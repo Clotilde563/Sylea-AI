@@ -1,0 +1,43 @@
+// Store Zustand global — état de l'application Syléa.AI
+
+import { create } from 'zustand'
+import type { Profil, AnalyseDilemme } from '../types'
+
+interface SyleaStore {
+  // Profil utilisateur
+  profil: Profil | null
+  setProfil: (p: Profil | null) => void
+
+  // Analyse dilemme en cours (entre /analyser et /choisir)
+  analyse: AnalyseDilemme | null
+  setAnalyse: (a: AnalyseDilemme | null) => void
+
+  // État de chargement global
+  loading: boolean
+  setLoading: (l: boolean) => void
+
+  // Message d'erreur global
+  error: string | null
+  setError: (e: string | null) => void
+
+  // Probabilité initiale déjà calculée ?
+  probCalculee: boolean
+  setProbCalculee: (v: boolean) => void
+}
+
+export const useStore = create<SyleaStore>((set) => ({
+  profil: null,
+  setProfil: (p) => set({ profil: p }),
+
+  analyse: null,
+  setAnalyse: (a) => set({ analyse: a }),
+
+  loading: false,
+  setLoading: (l) => set({ loading: l }),
+
+  error: null,
+  setError: (e) => set({ error: e }),
+
+  probCalculee: false,
+  setProbCalculee: (v) => set({ probCalculee: v }),
+}))

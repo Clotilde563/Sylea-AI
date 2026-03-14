@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Venv files (accidentally in project root)
+Include/
+Lib/
+Scripts/
+pyvenv.cfg
+nul
+
+# Data (SQLite user data)
+data/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Vite cache
+.vite/
+
+# Claude
+.claude/
