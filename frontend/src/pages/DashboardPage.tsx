@@ -247,21 +247,45 @@ export function DashboardPage() {
                 <span>{'\u25c7'}</span> Sous-objectifs
               </h3>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                {sousObjectifs.map((so, idx) => {
+              {sousObjectifs.map((so, idx) => {
                   const isCompleted = so.progression >= 100
                   const isActive = idx === activeIdx
-                  const isLocked = !isCompleted && !isActive
-                  const barColor = isCompleted ? 'linear-gradient(90deg, #22c55e, #16a34a)' : isActive ? 'linear-gradient(90deg, #60a5fa, #818cf8)' : 'rgba(255,255,255,0.1)'
-                  const textColor = isCompleted ? '#4ade80' : isActive ? 'var(--text-secondary)' : 'var(--text-muted)'
+                  const barColor = isCompleted ? 'linear-gradient(90deg, #22c55e, #16a34a)' : isActive ? 'linear-gradient(90deg, #60a5fa, #818cf8)' : 'linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.04))'
+                  const textColor = isCompleted ? '#4ade80' : isActive ? 'var(--text-primary)' : 'var(--text-muted)'
                   const tempsLabel = so.temps_estime > 0 ? (so.temps_estime >= 365 ? `${Math.round(so.temps_estime / 365)} an${so.temps_estime >= 730 ? 's' : ''}` : so.temps_estime >= 30 ? `${Math.round(so.temps_estime / 30)} mois` : `${Math.round(so.temps_estime)} j`) : null
                   return (
-                    <div key={so.id} style={{ opacity: isLocked ? 0.4 : 1, transition: 'opacity 0.3s' }}>
+                    <div key={so.id} style={{
+                      transition: 'all 0.3s',
+                      ...(isActive ? {
+                        background: 'linear-gradient(135deg, rgba(96,165,250,0.08), rgba(129,140,248,0.04))',
+                        border: '1px solid rgba(96,165,250,0.3)',
+                        borderRadius: 'var(--radius-md)',
+                        padding: '0.65rem 0.75rem',
+                        boxShadow: '0 0 16px rgba(96,165,250,0.12)',
+                      } : {
+                        padding: '0.3rem 0.75rem',
+                      })
+                    }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.3rem' }}>
-                        <span style={{ fontSize: '0.82rem', color: textColor, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          {isCompleted && <span style={{ color: '#22c55e' }}>{'\u2713'}</span>}
+                        <span style={{ fontSize: '0.82rem', color: textColor, display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: isActive ? 600 : 400 }}>
+                          {isCompleted && <span style={{ color: '#22c55e' }}>{'✓'}</span>}
                           {isActive && <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#60a5fa', boxShadow: '0 0 8px rgba(96,165,250,0.6)', animation: 'pulse 2s infinite' }} />}
-                          {isLocked && <span style={{ fontSize: '0.7rem', opacity: 0.7 }}>{'🔒'}</span>}
                           {so.titre}
+                          {isActive && (
+                            <span style={{
+                              fontSize: '0.62rem',
+                              fontWeight: 700,
+                              letterSpacing: '0.08em',
+                              textTransform: 'uppercase',
+                              color: '#60a5fa',
+                              background: 'rgba(96,165,250,0.12)',
+                              border: '1px solid rgba(96,165,250,0.3)',
+                              borderRadius: '10px',
+                              padding: '0.15rem 0.5rem',
+                              marginLeft: '0.25rem',
+                              animation: 'pulse 2s infinite',
+                            }}>{'à prioriser'}</span>
+                          )}
                         </span>
                         <span style={{ fontSize: '0.72rem', color: isCompleted ? '#4ade80' : 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                           {isActive && tempsLabel && <span style={{ color: 'var(--accent-violet-light)', fontSize: '0.68rem' }}>~{tempsLabel}</span>}
