@@ -9,6 +9,8 @@ Routes :
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -140,6 +142,48 @@ async def analyser_dilemme(
     )
 
 
+
+
+async def _identifier_so_pertinent(description: str, sous_objectifs: list) -> dict | None:
+    """Utilise Claude pour identifier le sous-objectif le plus pertinent."""
+    if len(sous_objectifs) <= 1:
+        return sous_objectifs[0] if sous_objectifs else None
+
+    try:
+        import anthropic as _anthropic
+        key = os.environ.get("ANTHROPIC_API_KEY")
+        if not key:
+            return None
+
+        client = _anthropic.Anthropic(api_key=key)
+        so_list = "\n".join(
+            f"{i+1}. {so['titre']}" for i, so in enumerate(sous_objectifs)
+        )
+        prompt = (
+            "Voici une action/choix d'un utilisateur :\n"
+            f'"{description}"\n\n'
+            f"Voici ses sous-objectifs en cours :\n{so_list}\n\n"
+            "Quel sous-objectif (numero) est le PLUS DIRECTEMENT impacte "
+            "par cette action ? Reponds UNIQUEMENT avec le numero (ex: 1, 2, 3...)."
+        )
+
+        msg = await asyncio.to_thread(
+            lambda: client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=10,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        )
+        text = msg.content[0].text.strip()
+        num_match = re.search(r"(\d+)", text)
+        if num_match:
+            idx = int(num_match.group(1)) - 1
+            if 0 <= idx < len(sous_objectifs):
+                return sous_objectifs[idx]
+    except Exception:
+        pass
+    return None
+
 @router.post("/choisir", response_model=DecisionOut)
 async def choisir_option(
     data: ChoixIn,
@@ -202,24 +246,29 @@ async def choisir_option(
     profil.marquer_modification()
     profil_repo.sauvegarder(profil)
 
-    # Mettre a jour le sous-objectif actif uniquement
+    # Identifier et mettre a jour le sous-objectif pertinent via IA
     so_titre_impacte = None
     try:
         db = profil_repo._db
-        so_actif = db.conn.execute(
-            "SELECT id, titre, progression FROM sous_objectifs WHERE user_id = ? AND progression < 100 ORDER BY ordre LIMIT 1",
+        all_so = db.conn.execute(
+            "SELECT id, titre, progression, ordre FROM sous_objectifs WHERE user_id = ? AND progression < 100 ORDER BY ordre",
             (profil.id,),
-        ).fetchone()
-        if so_actif:
+        ).fetchall()
+        if all_so:
+            # Construire la description du choix pour le matching
+            choix_desc = f"{data.question} - Choix: {analyse_choisie.description}"
+            so_cible = await _identifier_so_pertinent(choix_desc, all_so)
+            if so_cible is None:
+                so_cible = all_so[0]  # fallback: premier par ordre
             impact_so = abs(analyse_choisie.impact_probabilite) * 5
-            new_prog = min(100, max(0, so_actif["progression"] + impact_so))
+            new_prog = min(100, max(0, so_cible["progression"] + impact_so))
             db.conn.execute(
                 "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
-                (new_prog, so_actif["id"]),
+                (new_prog, so_cible["id"]),
             )
             db.conn.commit()
-            so_titre_impacte = so_actif["titre"]
+            so_titre_impacte = so_cible["titre"]
     except Exception:
-        pass  # Ne pas bloquer si la table n'existe pas encore
+        pass
 
     return _decision_to_out(decision, sous_objectif_impacte=so_titre_impacte)
