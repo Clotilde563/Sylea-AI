@@ -233,25 +233,6 @@ export function EvenementPage() {
         {phase === 'result' && analyse && (
           <div className="animate-fade-in" style={{ maxWidth: '600px', margin: '0 auto' }}>
 
-            {/* Événement */}
-            <div
-              style={{
-                background: 'var(--bg-surface)',
-                border: '1px solid var(--border)',
-                borderRadius: 'var(--radius-md)',
-                padding: '1rem 1.25rem',
-                marginBottom: '1.5rem',
-                display: 'flex',
-                gap: '0.75rem',
-                alignItems: 'flex-start',
-              }}
-            >
-              <span style={{ color: 'var(--accent-gold)', fontSize: '1.1rem', flexShrink: 0 }}>◉</span>
-              <p style={{ color: 'var(--text-secondary)', fontStyle: 'italic', lineHeight: '1.5' }}>
-                {description}
-              </p>
-            </div>
-
             {/* Card impact */}
             <div
               className="card"
@@ -287,44 +268,15 @@ export function EvenementPage() {
                 </div>
               </div>
 
-              {/* Résumé */}
-              <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-violet-light)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.5rem' }}>
-                ◈ Résumé
-              </p>
-              <p style={{ color: 'var(--text-secondary)', lineHeight: '1.6', fontSize: '0.9rem', marginBottom: '1rem' }}>
-                {analyse.resume}
-              </p>
-
-              {/* Explication */}
-              <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-violet-light)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.5rem' }}>
-                ◈ Analyse détaillée
-              </p>
-              <p style={{ color: 'var(--text-secondary)', lineHeight: '1.6', fontSize: '0.9rem', marginBottom: '1rem' }}>
+              {/* Analyse */}
+              <p style={{ color: 'var(--text-secondary)', lineHeight: '1.5', fontSize: '0.85rem', marginBottom: '0.75rem' }}>
                 {analyse.explication}
               </p>
 
               {/* Conseil */}
-              <div
-                style={{
-                  background: 'rgba(26,111,216,0.07)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 'var(--radius-md)',
-                  padding: '0.875rem',
-                  display: 'flex',
-                  gap: '0.75rem',
-                  alignItems: 'flex-start',
-                }}
-              >
-                <span style={{ fontSize: '1rem', flexShrink: 0 }}>★</span>
-                <div>
-                  <p style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--accent-gold)', marginBottom: '0.25rem', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                    Conseil
-                  </p>
-                  <p style={{ fontSize: '0.875rem', color: 'var(--text-primary)', lineHeight: '1.5' }}>
-                    {analyse.conseil}
-                  </p>
-                </div>
-              </div>
+              <p style={{ fontSize: '0.8rem', color: 'var(--accent-gold)', fontStyle: 'italic' }}>
+                ★ {analyse.conseil}
+              </p>
             </div>
 
             {error && (

@@ -102,11 +102,6 @@ export function OptionCard({
         </div>
       </div>
 
-      {/* ── Résumé ── */}
-      <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '1rem', fontStyle: 'italic' }}>
-        {option.resume}
-      </p>
-
       {/* ── Pour ── */}
       {option.pros.length > 0 && (
         <div style={{ marginBottom: '0.75rem' }}>
