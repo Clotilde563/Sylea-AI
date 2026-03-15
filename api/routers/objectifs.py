@@ -68,6 +68,29 @@ def _build_profil_context(profil) -> str:
     return "\n".join(parts)
 
 
+
+
+def _get_past_task_descriptions(db, user_id: str, days: int = 60) -> list[str]:
+    """Recupere les descriptions de taches deja proposees (derniers N jours)."""
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    rows = db.conn.execute(
+        "SELECT taches_json FROM taches_quotidiennes "
+        "WHERE user_id = ? AND date >= ? ORDER BY date DESC",
+        (user_id, cutoff),
+    ).fetchall()
+    descriptions = []
+    for row in rows:
+        try:
+            taches = json.loads(row["taches_json"])
+            for t in taches:
+                desc = t.get("description", "").strip()
+                if desc:
+                    descriptions.append(desc)
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return descriptions
+
+
 # == Sous-objectifs ========================================================
 
 @router.get("/api/sous-objectifs", response_model=list[SousObjectifOut])
@@ -123,8 +146,16 @@ async def generer_sous_objectifs(
         "Tu es un coach de vie strategique. Analyse ce profil et son objectif de vie, "
         "puis genere exactement 4 sous-objectifs LARGES et strategiques pour atteindre "
         "l'objectif principal. Chaque sous-objectif doit representer une GRANDE PHASE "
-        "du parcours (ex: 'Acquisition des connaissances', 'Mise en pratique', "
-        "'Developpement et lancement', 'Consolidation et croissance').\n\n"
+        "du parcours.\n\n"
+        "PERSONNALISATION:\n"
+        "Le profil contient les reponses de l'utilisateur a des questions personnalisees "
+        "(section apres '--- Contexte personnalise ---'). "
+        "Adapte les sous-objectifs au NIVEAU REEL de l'utilisateur. "
+        "Si l'utilisateur possede deja des connaissances ou competences dans le domaine, "
+        "NE CREE PAS de sous-objectif sur l'apprentissage des bases. "
+        "Commence directement par des phases d'action concrete adaptees a son niveau. "
+        "Exemple : si l'utilisateur connait deja le freelance, ne propose pas "
+        "'Apprendre les bases' mais plutot 'Creer son portfolio et lancer son activite'.\n\n"
         "IMPORTANT: Distribue le temps total proportionnellement entre les sous-objectifs. "
         "Le temps total estime pour l'objectif sera la SOMME des temps de chaque sous-objectif.\n\n"
         f"PROFIL:\n{ctx}\n\n"
@@ -225,15 +256,32 @@ async def generer_taches(
     ) if so_rows else "Aucun sous-objectif"
     ctx = _build_profil_context(profil)
     active_label = active_so['titre'] if active_so else "objectif principal"
+    # Recuperer l'historique des taches passees pour eviter les doublons
+    past_tasks = _get_past_task_descriptions(db, profil.id, days=60)
+    past_ctx = ""
+    if past_tasks:
+        past_list = "\n".join(f"- {desc}" for desc in past_tasks)
+        past_ctx = (
+            f"\nTACHES DEJA PROPOSEES (ne PAS repeter, propose des taches NOUVELLES):\n{past_list}\n"
+        )
     prompt = (
         "Tu es un coach de vie pragmatique. "
         "Genere exactement 4 taches concretes et realisables que l'utilisateur "
         "devrait accomplir AUJOURD'HUI pour progresser vers son objectif.\n\n"
+        "PERSONNALISATION:\n"
+        "Le profil contient les reponses de l'utilisateur a des questions personnalisees "
+        "(section apres '--- Contexte personnalise ---'). "
+        "Adapte les taches au NIVEAU REEL de l'utilisateur. "
+        "Si l'utilisateur a deja des connaissances, propose des taches "
+        "d'ACTION CONCRETE (creer, contacter, produire, lancer) plutot que d'apprentissage basique. "
+        "Si l'utilisateur debute, propose des taches d'apprentissage adaptees.\n\n"
         f"PROFIL:\n{ctx}\n\n"
         f"SOUS-OBJECTIFS:\n{so_ctx}\n\n"
         f"SOUS-OBJECTIF ACTIF: {active_label}\n"
         "Les taches doivent etre focalisees sur le sous-objectif ACTIF.\n\n"
-        "Chaque tache doit etre specifique et actionnable en quelques heures.\n\n"
+        "Chaque tache doit etre specifique et actionnable en quelques heures.\n"
+        f"{past_ctx}\n"
+        "NE REPETE JAMAIS une tache deja proposee. Chaque jour doit avoir des taches DIFFERENTES.\n\n"
         "Reponds UNIQUEMENT avec du JSON valide:\n"
         '[{"description": "..."}, {"description": "..."}, {"description": "..."}, {"description": "..."}]'
     )
