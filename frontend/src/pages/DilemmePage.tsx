@@ -28,7 +28,6 @@ export function DilemmePage() {
   const { profil, analyse, setAnalyse, setProfil } = useStore()
 
   const [phase, setPhase] = useState<Phase>(analyse ? 'result' : 'form')
-  const [question, setQuestion] = useState('')
   const [options, setOptions] = useState<string[]>(['', ''])
   const [choixSelectionne, setChoixSelectionne] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -101,7 +100,7 @@ export function DilemmePage() {
   }
 
   const handleAnalyser = async () => {
-    if (!question.trim() || options.some(o => !o.trim())) {
+    if (options.some(o => !o.trim())) {
       setError('Veuillez remplir tous les champs.')
       return
     }
@@ -112,7 +111,7 @@ export function DilemmePage() {
     setError(null)
     setPhase('loading')
     try {
-      const questionAuto = `${question.trim()} (impact temporel: ${getTemporalLabel()})`
+      const questionAuto = `${options.map(o => o.trim()).join(' vs ')} (impact temporel: ${getTemporalLabel()})`
       const result = await api.analyserDilemme({
         question: questionAuto,
         options: options.map(o => o.trim()),
@@ -153,7 +152,6 @@ export function DilemmePage() {
   }
 
   const handleReset = () => {
-    setQuestion('')
     setOptions(['', ''])
     setChoixSelectionne(null)
     setAnalyse(null)
@@ -194,7 +192,7 @@ export function DilemmePage() {
             Analyser un choix
           </h2>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-            Décrivez votre dilemme — Syléa.AI analyse vos options et leur impact sur votre probabilité de réussite.
+            Syléa.AI analyse vos options et leur impact sur votre probabilité de réussite.
           </p>
         </div>
 
@@ -202,19 +200,6 @@ export function DilemmePage() {
         {phase === 'form' && (
           <div className="card animate-fade-in-scale" style={{ maxWidth: '680px', margin: '0 auto' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-              <div className="input-group">
-                <label className="input-label">
-                  Décrivez votre dilemme <span style={{ color: 'var(--accent-gold)' }}>*</span>
-                </label>
-                <textarea
-                  className="input"
-                  rows={2}
-                  value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                  placeholder="Ex: Quitter mon CDI pour lancer ma startup ou rester en poste ?"
-                />
-              </div>
-
               {/* Sélecteur d'impact temporel */}
               <div className="input-group">
                 <label className="input-label">
@@ -383,7 +368,7 @@ export function DilemmePage() {
               <button
                 className="btn btn-primary btn-full"
                 onClick={handleAnalyser}
-                disabled={!question.trim() || options.some(o => !o.trim())}
+                disabled={options.some(o => !o.trim())}
               >
                 ⟡ Lancer l'analyse IA
               </button>
