@@ -353,14 +353,16 @@ async def completer_tache(
     profil_repo.sauvegarder(profil)
     # Mettre a jour SEULEMENT le sous-objectif actif (premier avec progression < 100)
     active_so = db.conn.execute(
-        "SELECT id, titre, progression FROM sous_objectifs "
+        "SELECT id, titre, progression, temps_estime FROM sous_objectifs "
         "WHERE user_id = ? AND progression < 100 ORDER BY ordre LIMIT 1",
         (profil.id,),
     ).fetchone()
     impacts_so = []
     so_impacte = None
     if active_so:
-        new_prog = min(100, active_so["progression"] + 2.0)
+        te = max(30, active_so["temps_estime"] if active_so["temps_estime"] else 180)
+        task_so_impact = 50.0 / (te * 4)  # tasks = 50% du progres sur temps_estime
+        new_prog = min(100, active_so["progression"] + task_so_impact)
         db.conn.execute(
             "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
             (new_prog, active_so["id"]),

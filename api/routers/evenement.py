@@ -305,14 +305,15 @@ async def confirmer_evenement(
     try:
         db = profil_repo._db
         all_so = db.conn.execute(
-            "SELECT id, titre, progression, ordre FROM sous_objectifs WHERE user_id = ? AND progression < 100 ORDER BY ordre",
+            "SELECT id, titre, progression, ordre, temps_estime FROM sous_objectifs WHERE user_id = ? AND progression < 100 ORDER BY ordre",
             (profil.id,),
         ).fetchall()
         if all_so:
             so_cible = await _identifier_so_pertinent(data.description, all_so)
             if so_cible is None:
                 so_cible = all_so[0]  # fallback: premier par ordre
-            impact_so = abs(data.impact_probabilite) * 10  # evenements rares mais fort impact
+            te = max(30, so_cible["temps_estime"] if so_cible["temps_estime"] else 180)
+            impact_so = abs(data.impact_probabilite) * (93.0 / te)  # events: 20% du progres
             new_prog = min(100, max(0, so_cible["progression"] + impact_so))
             db.conn.execute(
                 "UPDATE sous_objectifs SET progression = ? WHERE id = ?",

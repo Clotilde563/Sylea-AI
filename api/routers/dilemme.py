@@ -251,7 +251,7 @@ async def choisir_option(
     try:
         db = profil_repo._db
         all_so = db.conn.execute(
-            "SELECT id, titre, progression, ordre FROM sous_objectifs WHERE user_id = ? AND progression < 100 ORDER BY ordre",
+            "SELECT id, titre, progression, ordre, temps_estime FROM sous_objectifs WHERE user_id = ? AND progression < 100 ORDER BY ordre",
             (profil.id,),
         ).fetchall()
         if all_so:
@@ -260,7 +260,8 @@ async def choisir_option(
             so_cible = await _identifier_so_pertinent(choix_desc, all_so)
             if so_cible is None:
                 so_cible = all_so[0]  # fallback: premier par ordre
-            impact_so = abs(analyse_choisie.impact_probabilite) * 3  # choix frequents, impact modere
+            te = max(30, so_cible["temps_estime"] if so_cible["temps_estime"] else 180)
+            impact_so = abs(analyse_choisie.impact_probabilite) * (84.0 / te)  # choix: 30% du progres
             new_prog = min(100, max(0, so_cible["progression"] + impact_so))
             db.conn.execute(
                 "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
