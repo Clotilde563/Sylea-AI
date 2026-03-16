@@ -112,6 +112,7 @@ class DilemmeIn(BaseModel):
     # Retrocompat : si option_a/option_b sont fournis, les convertir en options
     option_a: Optional[str] = None
     option_b: Optional[str] = None
+    impact_temporel_jours: Optional[int] = None
 
 
 class AnalyseOptionOut(BaseModel):
@@ -133,7 +134,8 @@ class AnalyseDilemmeOut(BaseModel):
 class ChoixIn(BaseModel):
     question: str
     options: List[AnalyseOptionOut] = []
-    choix: str  # "A", "B", "C"...
+    choix: str
+    impact_temporel_jours: Optional[int] = None  # "A", "B", "C"...
 
 
 # ── Decision (historique) ─────────────────────────────────────────────────────

@@ -185,3 +185,10 @@ class DatabaseManager:
                 )
             except Exception:
                 pass  # Colonne deja existante
+            # Migration : ajouter impact_temporel_jours dans decisions
+            try:
+                self._conn.execute(
+                    "ALTER TABLE decisions ADD COLUMN impact_temporel_jours INTEGER DEFAULT NULL"
+                )
+            except Exception:
+                pass  # Colonne deja existante

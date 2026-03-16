@@ -99,6 +99,7 @@ async def analyser_dilemme(
                 profil,
                 data.question,
                 options_list,
+                impact_temporel_jours=data.impact_temporel_jours,
             )
             out_options = []
             for i, (l, desc) in enumerate(zip(lettres, options_list)):
@@ -211,6 +212,35 @@ async def choisir_option(
     if analyse_choisie is None:
         raise HTTPException(status_code=400, detail=f"Option '{data.choix}' non trouvée.")
 
+    # Anti-doublon: meme dilemme dans la periode d'impact temporel
+    if data.impact_temporel_jours and data.impact_temporel_jours > 0:
+        from datetime import datetime as _dt, timedelta as _td
+        cutoff = (_dt.now() - _td(days=data.impact_temporel_jours)).isoformat()
+        options_normalized = sorted([opt.description.strip().lower() for opt in data.options])
+        recent = profil_repo._db.conn.execute(
+            "SELECT options_json, cree_le, impact_temporel_jours FROM decisions "
+            "WHERE user_id = ? AND cree_le > ? AND question NOT LIKE '[Evenement]%' "
+            "ORDER BY cree_le DESC",
+            (profil.id, cutoff),
+        ).fetchall()
+        import json as _json
+        for row in recent:
+            try:
+                row_opts = _json.loads(row["options_json"])
+                row_opts_norm = sorted([o["description"].strip().lower() for o in row_opts])
+                if row_opts_norm == options_normalized:
+                    created = _dt.fromisoformat(row["cree_le"])
+                    itj = row["impact_temporel_jours"] or data.impact_temporel_jours
+                    unlock = created + _td(days=itj)
+                    remaining = max(1, (unlock - _dt.now()).days)
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Ce dilemme a deja ete soumis. Reessayez dans {remaining} jour(s).",
+                    )
+            except (_json.JSONDecodeError, KeyError, TypeError):
+                continue
+
+
     # Construire les OptionDilemme
     all_opts = []
     opt_choisie_id = None
@@ -236,6 +266,7 @@ async def choisir_option(
         probabilite_avant=prob_avant,
         option_choisie_id=opt_choisie_id,
         probabilite_apres=prob_apres,
+        impact_temporel_jours=data.impact_temporel_jours,
     )
 
     # Sauvegarder

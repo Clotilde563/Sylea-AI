@@ -272,6 +272,14 @@ async def confirmer_evenement(
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
+    # Anti-doublon: meme evenement deja enregistre
+    existing = profil_repo._db.conn.execute(
+        "SELECT id FROM decisions WHERE user_id = ? AND question = ?",
+        (profil.id, f"[Evenement] {data.description}"),
+    ).fetchone()
+    if existing:
+        raise HTTPException(status_code=409, detail="Cet evenement a deja ete enregistre.")
+
     # Creer une option unique representant l'evenement
     opt_event = OptionDilemme(
         description=data.description,

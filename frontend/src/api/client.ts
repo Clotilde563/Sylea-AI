@@ -62,6 +62,7 @@ export const api = {
   analyserDilemme: (data: {
     question: string
     options: string[]
+    impact_temporel_jours?: number
   }): Promise<AnalyseDilemme> =>
     request<AnalyseDilemme>('/dilemme/analyser', {
       method: 'POST',
@@ -80,6 +81,7 @@ export const api = {
       resume: string
     }[]
     choix: string  // "A", "B", "C"...
+    impact_temporel_jours?: number
   }): Promise<Decision> =>
     request<Decision>('/dilemme/choisir', {
       method: 'POST',

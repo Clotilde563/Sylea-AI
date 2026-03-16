@@ -135,6 +135,7 @@ class Decision:
     probabilite_apres: Optional[float] = None
     action_agent: Optional[ActionAgent] = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    impact_temporel_jours: Optional[int] = None
     cree_le: datetime = field(default_factory=datetime.now)
 
     def get_option_choisie(self) -> Optional[OptionDilemme]:
@@ -163,6 +164,7 @@ class Decision:
                 else None
             ),
             "cree_le": self.cree_le.isoformat(),
+            "impact_temporel_jours": self.impact_temporel_jours,
         }
 
     @classmethod
@@ -189,6 +191,7 @@ class Decision:
                 else None
             ),
             action_agent=action_agent,
+            impact_temporel_jours=data.get("impact_temporel_jours"),
         )
         decision.id = data["id"]
         decision.cree_le = datetime.fromisoformat(data["cree_le"])

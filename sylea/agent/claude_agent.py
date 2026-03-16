@@ -139,6 +139,7 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
         profil: ProfilUtilisateur,
         question: str,
         options: list,
+        impact_temporel_jours: int | None = None,
     ) -> AnalyseDilemme:
         """
         Analyse un dilemme entre N options et calcule l'impact sur la probabilité.
@@ -173,6 +174,36 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
             for l in lettres
         )
 
+
+        # Calibrer l'echelle d'impact selon l'impact temporel
+        if impact_temporel_jours is not None and impact_temporel_jours > 0:
+            if impact_temporel_jours <= 1:
+                echelle_impact = (
+                    f"Impact temporel: 1 jour. Impacts: +/-0.001 a +/-0.01%"
+                )
+            elif impact_temporel_jours <= 7:
+                echelle_impact = (
+                    f"Impact temporel: 1 semaine. Impacts: +/-0.005 a +/-0.05%"
+                )
+            elif impact_temporel_jours <= 30:
+                echelle_impact = (
+                    f"Impact temporel: 1 mois. Impacts: +/-0.01 a +/-0.1%"
+                )
+            elif impact_temporel_jours <= 365:
+                echelle_impact = (
+                    f"Impact temporel: 1 an. Impacts: +/-0.05 a +/-1.0%"
+                )
+            else:
+                echelle_impact = (
+                    f"Impact temporel: {impact_temporel_jours} jours (long terme). Impacts: +/-0.1 a +/-3.0%"
+                )
+        else:
+            echelle_impact = (
+                f"L'objectif est estime a {temps_estime_str}. "
+                f"Decisions courtes: +/-0.001 a +/-0.02%, "
+                f"decisions strategiques: +/-0.1 a +/-2%"
+            )
+
         prompt = f"""Analyse ce dilemme de vie pour aider l'utilisateur \u00e0 d\u00e9cider.
 
 PROFIL R\u00c9SUM\u00c9 :
@@ -190,10 +221,7 @@ Pour chaque option, analyse :
 1. Les avantages concrets par rapport \u00e0 l'objectif
 2. Les inconv\u00e9nients concrets
 3. L'impact sur la probabilit\u00e9 (delta en points de %, peut \u00eatre positif ou n\u00e9gatif)
-   L'objectif est estime a {temps_estime_str}. Les impacts doivent etre proportionnels :
-   Decision de quelques minutes a quelques heures : +/-0.001 a +/-0.02% (precise en minutes si < 1h)
-   Decision de quelques jours : +/-0.01 a +/-0.1%
-   Decision strategique majeure : +/-0.1 a +/-2%
+   {echelle_impact}
 
 R\u00e9ponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/apr\u00e8s) :
 {{

@@ -9,8 +9,6 @@ import type { AnalyseDilemme, Decision } from '../types'
 
 type Phase = 'form' | 'loading' | 'result' | 'done'
 
-// Regex pour detecter les indicateurs temporels dans la question
-const TEMPORAL_PATTERN = /\b(aujourd'hui|ce soir|ce matin|cet apr[eè]s[- ]midi|demain|cette semaine|ce week[- ]?end|ce mois|cette ann[eé]e|dans (une? |quelques |(\d+) )?(heure|jour|semaine|mois|an)|d'ici|avant|apr[eè]s|prochaine?|bient[oô]t|tout [àa] l'heure|en ce moment|maintenant|derni[eè]re?|depuis|il y a|la semaine|le mois|l'ann[eé]e)\b/i
 
 const MAX_OPTIONS = 5
 const MIN_OPTIONS = 2
@@ -36,6 +34,10 @@ export function DilemmePage() {
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [sousObjectifImpacte, setSousObjectifImpacte] = useState<string | null>(null)
+  const [impactTemporel, setImpactTemporel] = useState<string>('1_mois')
+  const [customYears, setCustomYears] = useState(0)
+  const [customMonths, setCustomMonths] = useState(0)
+  const [customDays, setCustomDays] = useState(0)
 
   if (!profil) {
     return (
@@ -50,21 +52,71 @@ export function DilemmePage() {
     )
   }
 
+
+  const TEMPORAL_OPTIONS = [
+    { value: '1_jour', label: '1 jour' },
+    { value: '1_semaine', label: '1 semaine' },
+    { value: '1_mois', label: '1 mois' },
+    { value: '1_an', label: '1 an' },
+    { value: 'long_terme', label: 'Long terme' },
+    { value: 'personnalise', label: 'Personnalisé' },
+  ]
+
+  const getTemporalLabel = () => {
+    const map: Record<string, string> = {
+      '1_jour': "aujourd'hui",
+      '1_semaine': 'cette semaine',
+      '1_mois': 'ce mois-ci',
+      '1_an': "cette année",
+      'long_terme': "sur toute la durée de l'objectif",
+    }
+    if (impactTemporel === 'personnalise') {
+      const parts = []
+      if (customYears > 0) parts.push(`${customYears} an(s)`)
+      if (customMonths > 0) parts.push(`${customMonths} mois`)
+      if (customDays > 0) parts.push(`${customDays} jour(s)`)
+      return parts.length > 0 ? `dans ${parts.join(' ')}` : "aujourd'hui"
+    }
+    return map[impactTemporel] || 'ce mois-ci'
+  }
+
+  const getImpactDays = (): number => {
+    switch (impactTemporel) {
+      case '1_jour': return 1
+      case '1_semaine': return 7
+      case '1_mois': return 30
+      case '1_an': return 365
+      case 'long_terme': {
+        if (profil?.objectif?.deadline) {
+          const d = new Date(profil.objectif.deadline)
+          const now = new Date()
+          return Math.max(1, Math.ceil((d.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
+        }
+        return 3650
+      }
+      case 'personnalise':
+        return Math.max(1, customYears * 365 + customMonths * 30 + customDays)
+      default: return 30
+    }
+  }
+
   const handleAnalyser = async () => {
     if (!question.trim() || options.some(o => !o.trim())) {
       setError('Veuillez remplir tous les champs.')
       return
     }
-    if (!TEMPORAL_PATTERN.test(question)) {
-      setError('Veuillez préciser une échelle temporelle dans votre question (ex: "aujourd\'hui", "ce mois", "cette année", "dans 6 mois"...). Cela permet à l\'IA d\'affiner son analyse d\'impact.')
+    if (impactTemporel === 'personnalise' && customYears === 0 && customMonths === 0 && customDays === 0) {
+      setError('Veuillez renseigner au moins une valeur pour la durée personnalisée.')
       return
     }
     setError(null)
     setPhase('loading')
     try {
+      const questionAuto = `${question.trim()} (impact temporel: ${getTemporalLabel()})`
       const result = await api.analyserDilemme({
-        question: question.trim(),
+        question: questionAuto,
         options: options.map(o => o.trim()),
+        impact_temporel_jours: getImpactDays(),
       })
       setAnalyse(result)
       setPhase('result')
@@ -83,6 +135,7 @@ export function DilemmePage() {
         question: analyse.question,
         options: analyse.options,
         choix: choixSelectionne,
+        impact_temporel_jours: getImpactDays(),
       })
       if (choixResult?.sous_objectif_impacte) {
         setSousObjectifImpacte(choixResult.sous_objectif_impacte)
@@ -106,6 +159,10 @@ export function DilemmePage() {
     setAnalyse(null)
     setError(null)
     setSousObjectifImpacte(null)
+    setImpactTemporel('1_mois')
+    setCustomYears(0)
+    setCustomMonths(0)
+    setCustomDays(0)
     setPhase('form')
   }
 
@@ -147,18 +204,93 @@ export function DilemmePage() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
               <div className="input-group">
                 <label className="input-label">
-                  Votre question <span style={{ color: 'var(--accent-gold)' }}>*</span>
+                  Décrivez votre dilemme <span style={{ color: 'var(--accent-gold)' }}>*</span>
                 </label>
                 <textarea
                   className="input"
-                  rows={3}
+                  rows={2}
                   value={question}
                   onChange={(e) => setQuestion(e.target.value)}
-                  placeholder="Ex: Dois-je quitter mon CDI cette année pour lancer ma startup ?"
+                  placeholder="Ex: Quitter mon CDI pour lancer ma startup ou rester en poste ?"
                 />
-                <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.375rem' }}>
-                  Incluez une indication temporelle (ex: "cette année", "ce mois", "demain"...)
+              </div>
+
+              {/* Sélecteur d'impact temporel */}
+              <div className="input-group">
+                <label className="input-label">
+                  Impact temporel <span style={{ color: 'var(--accent-gold)' }}>*</span>
+                </label>
+                <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+                  Sur quelle période ce choix aura-t-il un impact ?
                 </p>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem' }}>
+                  {TEMPORAL_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setImpactTemporel(opt.value)}
+                      style={{
+                        padding: '0.6rem 0.5rem',
+                        borderRadius: 'var(--radius-md)',
+                        border: impactTemporel === opt.value
+                          ? '2px solid var(--accent-violet)'
+                          : '1px solid var(--border)',
+                        background: impactTemporel === opt.value
+                          ? 'rgba(124,58,237,0.15)'
+                          : 'rgba(255,255,255,0.03)',
+                        color: impactTemporel === opt.value
+                          ? 'var(--accent-violet-light)'
+                          : 'var(--text-secondary)',
+                        cursor: 'pointer',
+                        fontSize: '0.85rem',
+                        fontWeight: impactTemporel === opt.value ? 600 : 400,
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                {impactTemporel === 'personnalise' && (
+                  <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.75rem' }}>
+                    <div style={{ flex: 1 }}>
+                      <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Années</label>
+                      <input
+                        type="number"
+                        className="input"
+                        min={0}
+                        max={50}
+                        value={customYears}
+                        onChange={(e) => setCustomYears(Math.max(0, parseInt(e.target.value) || 0))}
+                        style={{ textAlign: 'center' }}
+                      />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Mois</label>
+                      <input
+                        type="number"
+                        className="input"
+                        min={0}
+                        max={11}
+                        value={customMonths}
+                        onChange={(e) => setCustomMonths(Math.max(0, parseInt(e.target.value) || 0))}
+                        style={{ textAlign: 'center' }}
+                      />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Jours</label>
+                      <input
+                        type="number"
+                        className="input"
+                        min={0}
+                        max={30}
+                        value={customDays}
+                        onChange={(e) => setCustomDays(Math.max(0, parseInt(e.target.value) || 0))}
+                        style={{ textAlign: 'center' }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Options dynamiques */}
@@ -251,7 +383,7 @@ export function DilemmePage() {
               <button
                 className="btn btn-primary btn-full"
                 onClick={handleAnalyser}
-                disabled={!question || options.some(o => !o)}
+                disabled={!question.trim() || options.some(o => !o.trim())}
               >
                 ⟡ Lancer l'analyse IA
               </button>
