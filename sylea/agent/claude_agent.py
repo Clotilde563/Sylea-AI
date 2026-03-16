@@ -191,14 +191,14 @@ Pour chaque option, analyse :
 2. Les inconv\u00e9nients concrets
 3. L'impact sur la probabilit\u00e9 (delta en points de %, peut \u00eatre positif ou n\u00e9gatif)
    L'objectif est estime a {temps_estime_str}. Les impacts doivent etre proportionnels :
-   Decision de quelques heures : +/-0.001 a +/-0.02%
+   Decision de quelques minutes a quelques heures : +/-0.001 a +/-0.02% (precise en minutes si < 1h)
    Decision de quelques jours : +/-0.01 a +/-0.1%
    Decision strategique majeure : +/-0.1 a +/-2%
 
 R\u00e9ponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/apr\u00e8s) :
 {{
   {json_options},
-  "verdict": "2-3 phrases expliquant quelle option est la meilleure et pourquoi, en lien avec l'objectif",
+  "verdict": "2-3 phrases. IMPORTANT: utilise EXACTEMENT la probabilite {prob_totale:.1f}% et le temps estime {temps_estime_str} fournis ci-dessus (ne les invente pas). Explique quelle option est la meilleure et pourquoi. Pour les durees inferieures a 1 heure, utilise des minutes (ex: 45 minutes, pas 0 heures).",
   "option_recommandee": "{lettres[0]}"
 }}"""
 
