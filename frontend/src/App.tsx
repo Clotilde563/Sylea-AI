@@ -11,6 +11,7 @@ import { DilemmePage }       from './pages/DilemmePage'
 import { StatistiquesPage }  from './pages/StatistiquesPage'
 import { EvenementPage }    from './pages/EvenementPage'
 import { BilanPage }        from './pages/BilanPage'
+import { HistoriquePage }   from './pages/HistoriquePage'
 
 // ── Application ───────────────────────────────────────────────────────────────
 
@@ -39,6 +40,7 @@ export default function App() {
                   <Route path="/profil"       element={<ProfilWizardPage />} />
                   <Route path="/dilemme"      element={<DilemmePage />} />
                   <Route path="/statistiques" element={<StatistiquesPage />} />
+                  <Route path="/historique"   element={<HistoriquePage />} />
                   <Route path="/evenement"    element={<EvenementPage />} />
                   <Route path="/bilan"        element={<BilanPage />} />
                   <Route path="*"             element={<Navigate to="/" replace />} />

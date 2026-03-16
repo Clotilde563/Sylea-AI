@@ -102,3 +102,24 @@ async def get_agent_rapport(
         total_actions=len(actions),
         actions=[_action_to_out(a) for a in actions],
     )
+
+
+@router.delete("/{decision_id}")
+async def supprimer_decision(
+    decision_id: str,
+    profil_repo: ProfilRepository = Depends(get_profil_repo),
+    decision_repo: DecisionRepository = Depends(get_decision_repo),
+):
+    """Supprime une décision par son ID."""
+    if not profil_repo.existe():
+        raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
+
+    profil = profil_repo.charger()
+    if profil is None:
+        raise HTTPException(status_code=404, detail="Profil introuvable.")
+
+    deleted = decision_repo.supprimer_par_id(decision_id, profil.id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Décision introuvable.")
+
+    return {"detail": "Décision supprimée."}

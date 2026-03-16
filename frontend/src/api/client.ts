@@ -94,6 +94,9 @@ export const api = {
   getHistorique: (limite = 20): Promise<Decision[]> =>
     request<Decision[]>(`/historique?limite=${limite}`),
 
+  deleteDecision: (id: string): Promise<void> =>
+    request<void>(`/historique/${id}`, { method: 'DELETE' }),
+
   // Analyser la journée pour en extraire les scores bien-être
   analyserJournee: (description: string): Promise<BienEtreScores> =>
     request<BienEtreScores>('/profil/analyser-journee', {

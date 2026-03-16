@@ -8,21 +8,36 @@ import type { Decision } from '../types'
 
 export function HistoriquePage() {
   const navigate = useNavigate()
-  const profil = useStore((s) => s.profil)
+  const { profil, setProfil } = useStore()
   const [decisions, setDecisions] = useState<Decision[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [showArchived, setShowArchived] = useState(false)
+
+  const recentDecisions = decisions.slice(0, 10)
+  const archivedDecisions = decisions.slice(10)
+
+  const handleDelete = async (id: string) => {
+    try {
+      await api.deleteDecision(id)
+      setDecisions((prev) => prev.filter((d) => d.id !== id))
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Erreur lors de la suppression')
+    }
+  }
 
   useEffect(() => {
     if (!profil) {
-      navigate('/profil')
+      api.getProfil()
+        .then(setProfil)
+        .catch(() => navigate('/profil'))
       return
     }
-    api.getHistorique(30)
+    api.getHistorique(100)
       .then(setDecisions)
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
-  }, [profil, navigate])
+  }, [profil, setProfil, navigate])
 
   const formatDate = (iso: string) => {
     const d = new Date(iso)
@@ -47,7 +62,7 @@ export function HistoriquePage() {
             </h2>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
               {decisions.length > 0
-                ? `${decisions.length} décision${decisions.length > 1 ? 's' : ''} enregistrée${decisions.length > 1 ? 's' : ''}`
+                ? `${recentDecisions.length} décision${recentDecisions.length > 1 ? 's' : ''} récente${recentDecisions.length > 1 ? 's' : ''}${archivedDecisions.length > 0 ? ` · ${archivedDecisions.length} archivée${archivedDecisions.length > 1 ? 's' : ''}` : ''}`
                 : 'Aucune décision encore enregistrée'}
             </p>
           </div>
@@ -96,7 +111,7 @@ export function HistoriquePage() {
         {/* Tableau */}
         {!loading && decisions.length > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            {decisions.map((d) => {
+            {recentDecisions.map((d) => {
               const impactPos = (d.impact_net ?? 0) >= 0
               return (
                 <div
@@ -147,19 +162,99 @@ export function HistoriquePage() {
                       </div>
                     </div>
 
-                    {/* Badge impact */}
-                    <div style={{ flexShrink: 0 }}>
+                    {/* Badge impact + suppression */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
                       <span
                         className={`badge ${impactPos ? 'badge-success' : 'badge-danger'}`}
                         style={{ fontSize: '0.875rem', fontFamily: 'var(--font-mono)', padding: '0.35rem 0.75rem' }}
                       >
                         {formatImpact(d.impact_net)}
                       </span>
+                      <button
+                        onClick={() => handleDelete(d.id)}
+                        title="Supprimer cette décision"
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          cursor: 'pointer',
+                          fontSize: '1.1rem',
+                          padding: '0.25rem',
+                          color: '#ef4444',
+                          opacity: 0.7,
+                          transition: 'opacity 0.15s',
+                        }}
+                        onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
+                        onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.7')}
+                      >
+                        🗑️
+                      </button>
                     </div>
                   </div>
                 </div>
               )
             })}
+          </div>
+        )}
+
+        {/* Décisions archivées */}
+        {!loading && archivedDecisions.length > 0 && (
+          <div style={{ marginTop: '1.5rem' }}>
+            <button
+              onClick={() => setShowArchived(!showArchived)}
+              style={{
+                background: 'none',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-md)',
+                color: 'var(--text-muted)',
+                cursor: 'pointer',
+                padding: '0.625rem 1.25rem',
+                fontSize: '0.825rem',
+                width: '100%',
+                transition: 'all 0.15s',
+              }}
+            >
+              {showArchived ? '▲ Masquer' : '▼ Afficher'} les {archivedDecisions.length} décision{archivedDecisions.length > 1 ? 's' : ''} archivée{archivedDecisions.length > 1 ? 's' : ''}
+            </button>
+            {showArchived && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '0.75rem', opacity: 0.6 }}>
+                {archivedDecisions.map((d) => {
+                  const impactPos = (d.impact_net ?? 0) >= 0
+                  return (
+                    <div
+                      key={d.id}
+                      className="card"
+                      style={{
+                        borderLeft: `3px solid ${impactPos ? 'var(--success)' : 'var(--danger)'}`,
+                        padding: '0.875rem 1.125rem',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {d.question}
+                          </p>
+                          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{formatDate(d.cree_le)}</span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <span className={`badge ${impactPos ? 'badge-success' : 'badge-danger'}`} style={{ fontSize: '0.8rem', fontFamily: 'var(--font-mono)' }}>
+                            {formatImpact(d.impact_net)}
+                          </span>
+                          <button
+                            onClick={() => handleDelete(d.id)}
+                            title="Supprimer"
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '1rem', color: '#ef4444', opacity: 0.7 }}
+                            onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
+                            onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.7')}
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
           </div>
         )}
 

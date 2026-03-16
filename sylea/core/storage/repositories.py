@@ -99,6 +99,15 @@ class DecisionRepository:
             "SELECT COUNT(*) FROM decisions WHERE user_id = ?", (user_id,)
         ).fetchone()[0]
 
+    def supprimer_par_id(self, decision_id: str, user_id: str) -> bool:
+        """Supprime une décision par son ID (vérifie le user_id)."""
+        with self._db.conn:
+            cursor = self._db.conn.execute(
+                "DELETE FROM decisions WHERE id = ? AND user_id = ?",
+                (decision_id, user_id),
+            )
+            return cursor.rowcount > 0
+
     def effacer_decisions_utilisateur(self, user_id: str) -> None:
         """Supprime toutes les décisions d’un utilisateur."""
         with self._db.conn:
