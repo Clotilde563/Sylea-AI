@@ -267,18 +267,23 @@ async def generer_taches(
     # Recuperer l'historique des taches passees pour eviter les doublons
     past_tasks = _get_past_task_descriptions(db, profil.id, days=60)
     past_ctx = ""
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    # Taches non completees d'hier -> a reproposer automatiquement
+    uncompleted_yesterday = [
+        t for t in past_tasks
+        if not t["completee"] and t["date"] == yesterday
+    ]
     if past_tasks:
         completed = [t for t in past_tasks if t["completee"]]
-        not_completed = [t for t in past_tasks if not t["completee"]]
         lines = []
         if completed:
             lines.append("TACHES COMPLETEES (ne pas repeter a l'identique, mais tu peux proposer la SUITE logique) :")
-            for t in completed[-20:]:  # limiter aux 20 plus recentes
+            for t in completed[-20:]:
                 lines.append(f"  [{t['date']}] {t['description']}")
-        if not_completed:
-            lines.append("TACHES NON COMPLETEES (l'utilisateur ne les a pas faites, proposer des alternatives ou les reformuler) :")
-            for t in not_completed[-10:]:
-                lines.append(f"  [{t['date']}] {t['description']}")
+        if uncompleted_yesterday:
+            lines.append("TACHES NON COMPLETEES HIER (REPROPOSE-LES A L'IDENTIQUE, ce sont les priorites du jour) :")
+            for t in uncompleted_yesterday:
+                lines.append(f"  {t['description']}")
         past_ctx = "\n" + "\n".join(lines) + "\n"
     prompt = (
         "Tu es un coach de vie pragmatique et personnalise. "
@@ -296,10 +301,12 @@ async def generer_taches(
         "5. Si l'utilisateur a deja des connaissances, propose des taches "
         "d'ACTION CONCRETE (creer, contacter, produire, lancer) plutot que d'apprentissage basique.\n\n"
         "CONTINUITE DES TACHES:\n"
-        "Regarde les taches COMPLETEES precedemment et propose la SUITE LOGIQUE. "
-        "Par exemple, si l'utilisateur a deja cree une page d'accueil, propose d'ajouter "
-        "une page contact ou d'ameliorer le design. Construis sur ce qui a deja ete fait. "
-        "Ne repete JAMAIS une tache deja proposee mot pour mot.\n\n"
+        "1. Si des TACHES NON COMPLETEES HIER sont listees, REPROPOSE-LES A L'IDENTIQUE "
+        "(copie exacte de la description). Ce sont les priorites du jour.\n"
+        "2. Complete avec de nouvelles taches pour arriver a 4 au total.\n"
+        "3. Pour les nouvelles taches, regarde les taches COMPLETEES et propose la SUITE LOGIQUE. "
+        "Par exemple, si l'utilisateur a cree une page d'accueil, propose d'ajouter "
+        "une page contact. Construis sur ce qui a deja ete fait.\n\n"
         f"PROFIL:\n{ctx}\n\n"
         f"SOUS-OBJECTIFS:\n{so_ctx}\n\n"
         f"SOUS-OBJECTIF ACTIF: {active_label}\n"
