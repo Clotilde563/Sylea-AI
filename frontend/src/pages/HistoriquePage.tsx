@@ -18,6 +18,7 @@ export function HistoriquePage() {
   const archivedDecisions = decisions.slice(10)
 
   const handleDelete = async (id: string) => {
+    if (!window.confirm("\u26a0\ufe0f Supprimer cette d\u00e9cision ?\n\nCette action est irr\u00e9versible. La d\u00e9cision sera d\u00e9finitivement supprim\u00e9e de votre historique et ne sera plus prise en compte dans le calcul de votre probabilit\u00e9 de r\u00e9ussite.")) return
     try {
       await api.deleteDecision(id)
       setDecisions((prev) => prev.filter((d) => d.id !== id))
