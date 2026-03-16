@@ -301,7 +301,11 @@ R\u00e9ponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/apr\u0
         if not json_match:
             raise ValueError(f"Réponse Claude non parsable : {content[:200]}")
 
+        raw_json = json_match.group()
+        # Nettoyer les trailing commas (erreur frequente de Claude)
+        raw_json = re.sub(r',\s*}', '}', raw_json)
+        raw_json = re.sub(r',\s*]', ']', raw_json)
         try:
-            return json.loads(json_match.group())
+            return json.loads(raw_json)
         except json.JSONDecodeError as e:
             raise ValueError(f"JSON invalide dans la réponse Claude : {e}") from e
