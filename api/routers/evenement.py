@@ -158,9 +158,9 @@ async def _analyser_evenement_claude(
         f"+{max(90, round(99 - prob_actuelle))} et +{max(95, round(99.5 - prob_actuelle))} "
         "pour que la jauge atteigne quasi 100%. C'est OBLIGATOIRE.\n"
         f"2. PROPORTIONNALITE : L'impact doit etre proportionnel au temps restant ({temps_str}) :\n"
-        "   - Evenement mineur/quotidien : +/-0.05 a +/-0.3\n"
-        "   - Evenement significatif (promotion, certification, etc.) : +/-0.3 a +/-2.0\n"
-        "   - Evenement majeur (financement, changement de carriere) : +/-2.0 a +/-5.0\n"
+        "   - Evenement mineur : +/-0.1 a +/-0.5\n"
+        "   - Evenement significatif (promotion, certification, etc.) : +/-0.5 a +/-3.0\n"
+        "   - Evenement majeur (financement, changement de carriere) : +/-3.0 a +/-8.0\n"
         "3. COHERENCE : Un petit evenement ne peut pas avoir un impact de plusieurs "
         f"pourcents sur un objectif estime a {temps_str}.\n\n"
         "Reponds UNIQUEMENT avec du JSON valide, sans aucun markdown :\n"
@@ -312,7 +312,7 @@ async def confirmer_evenement(
             so_cible = await _identifier_so_pertinent(data.description, all_so)
             if so_cible is None:
                 so_cible = all_so[0]  # fallback: premier par ordre
-            impact_so = abs(data.impact_probabilite) * 5
+            impact_so = abs(data.impact_probabilite) * 10  # evenements rares mais fort impact
             new_prog = min(100, max(0, so_cible["progression"] + impact_so))
             db.conn.execute(
                 "UPDATE sous_objectifs SET progression = ? WHERE id = ?",

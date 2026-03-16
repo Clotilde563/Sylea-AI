@@ -260,7 +260,7 @@ async def choisir_option(
             so_cible = await _identifier_so_pertinent(choix_desc, all_so)
             if so_cible is None:
                 so_cible = all_so[0]  # fallback: premier par ordre
-            impact_so = abs(analyse_choisie.impact_probabilite) * 5
+            impact_so = abs(analyse_choisie.impact_probabilite) * 3  # choix frequents, impact modere
             new_prog = min(100, max(0, so_cible["progression"] + impact_so))
             db.conn.execute(
                 "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
