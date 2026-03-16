@@ -227,7 +227,7 @@ REGLES DE FORMAT STRICTES :
 R\u00e9ponds UNIQUEMENT avec ce JSON :
 {{
   {json_options},
-  "verdict": "15 mots max. Inclure {prob_totale:.1f}% et {temps_estime_str}.",
+  "verdict": "2-3 phrases naturelles et motivantes. NE PAS mentionner de pourcentage. Explique pourquoi cette option est meilleure pour l objectif de vie.",
   "option_recommandee": "{lettres[0]}"
 }}"""
 
@@ -412,6 +412,24 @@ R\u00e9ponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/apr\u0
 
         data = self._appeler_claude(prompt)
 
+        def _clean_verdict(v: str) -> str:
+            """Nettoyer le verdict: supprimer %, limiter longueur."""
+            import re as _re
+            v = " ".join(v.split()[:50])
+            # Supprimer les pourcentages
+            v = _re.sub(r'\d+[.,]?\d*\s*%', '', v)
+            # Nettoyer les artefacts
+            v = v.replace('À  sur', 'Sur').replace('A  sur', 'Sur')
+            v = v.replace('Avec et ', 'Sur un horizon de ').replace('Avec  et ', 'Sur un horizon de ')
+            v = v.replace('À et ', 'Sur ').replace('A et ', 'Sur ')
+            v = v.replace('À sur', 'Sur').replace('A sur ', 'Sur ')
+            # Nettoyer les doubles espaces
+            v = _re.sub(r'\s+', ' ', v).strip()
+            # Si commence par "de" ou "sur" en minuscule, capitaliser
+            if v and v[0].islower():
+                v = v[0].upper() + v[1:]
+            return v
+
         def _truncate(text: str, max_words: int = 6) -> str:
             """Tronquer un texte a max_words mots."""
             words = text.split()
@@ -435,7 +453,7 @@ R\u00e9ponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/apr\u0
 
         return AnalyseDilemme(
             options=parsed_options,
-            verdict=" ".join(data.get("verdict", "").split()[:25]),
+            verdict=_clean_verdict(data.get('verdict', '')),
             option_recommandee=data.get("option_recommandee", lettres[0]),
         )
 
