@@ -62,6 +62,10 @@ def _build_profil_context(profil) -> str:
     parts.append(f"Competences: {comps}")
     dipls = ", ".join(profil.diplomes) if profil.diplomes else "aucun"
     parts.append(f"Diplomes: {dipls}")
+    langs = ", ".join(profil.langues) if profil.langues else "non renseigne"
+    parts.append(f"Langues: {langs}")
+    parts.append(f"Revenu annuel: {profil.revenu_annuel:.0f} EUR")
+    parts.append(f"Heures disponibles pour l'objectif: {profil.heures_objectif:.1f}h/jour")
     parts.append(f"Sante {profil.niveau_sante}/10, Stress {profil.niveau_stress}/10, Energie {profil.niveau_energie}/10, Bonheur {profil.niveau_bonheur}/10")
     parts.append(f"Objectif: {obj_desc}")
     parts.append(f"Probabilite actuelle: {prob_tot:.1f}%")
@@ -70,25 +74,29 @@ def _build_profil_context(profil) -> str:
 
 
 
-def _get_past_task_descriptions(db, user_id: str, days: int = 60) -> list[str]:
-    """Recupere les descriptions de taches deja proposees (derniers N jours)."""
+def _get_past_task_descriptions(db, user_id: str, days: int = 60) -> list[dict]:
+    """Recupere les taches deja proposees avec date et statut (derniers N jours)."""
     cutoff = (date.today() - timedelta(days=days)).isoformat()
     rows = db.conn.execute(
-        "SELECT taches_json FROM taches_quotidiennes "
+        "SELECT date, taches_json FROM taches_quotidiennes "
         "WHERE user_id = ? AND date >= ? ORDER BY date DESC",
         (user_id, cutoff),
     ).fetchall()
-    descriptions = []
+    tasks = []
     for row in rows:
         try:
             taches = json.loads(row["taches_json"])
             for t in taches:
                 desc = t.get("description", "").strip()
                 if desc:
-                    descriptions.append(desc)
+                    tasks.append({
+                        "description": desc,
+                        "completee": t.get("completee", False),
+                        "date": row["date"],
+                    })
         except (json.JSONDecodeError, TypeError):
             continue
-    return descriptions
+    return tasks
 
 
 # == Sous-objectifs ========================================================
@@ -260,28 +268,44 @@ async def generer_taches(
     past_tasks = _get_past_task_descriptions(db, profil.id, days=60)
     past_ctx = ""
     if past_tasks:
-        past_list = "\n".join(f"- {desc}" for desc in past_tasks)
-        past_ctx = (
-            f"\nTACHES DEJA PROPOSEES (ne PAS repeter, propose des taches NOUVELLES):\n{past_list}\n"
-        )
+        completed = [t for t in past_tasks if t["completee"]]
+        not_completed = [t for t in past_tasks if not t["completee"]]
+        lines = []
+        if completed:
+            lines.append("TACHES COMPLETEES (ne pas repeter a l'identique, mais tu peux proposer la SUITE logique) :")
+            for t in completed[-20:]:  # limiter aux 20 plus recentes
+                lines.append(f"  [{t['date']}] {t['description']}")
+        if not_completed:
+            lines.append("TACHES NON COMPLETEES (l'utilisateur ne les a pas faites, proposer des alternatives ou les reformuler) :")
+            for t in not_completed[-10:]:
+                lines.append(f"  [{t['date']}] {t['description']}")
+        past_ctx = "\n" + "\n".join(lines) + "\n"
     prompt = (
-        "Tu es un coach de vie pragmatique. "
+        "Tu es un coach de vie pragmatique et personnalise. "
         "Genere exactement 4 taches concretes et realisables que l'utilisateur "
         "devrait accomplir AUJOURD'HUI pour progresser vers son objectif.\n\n"
-        "PERSONNALISATION:\n"
-        "Le profil contient les reponses de l'utilisateur a des questions personnalisees "
-        "(section apres '--- Contexte personnalise ---'). "
-        "Adapte les taches au NIVEAU REEL de l'utilisateur. "
-        "Si l'utilisateur a deja des connaissances, propose des taches "
-        "d'ACTION CONCRETE (creer, contacter, produire, lancer) plutot que d'apprentissage basique. "
-        "Si l'utilisateur debute, propose des taches d'apprentissage adaptees.\n\n"
+        "PERSONNALISATION IMPORTANTE:\n"
+        "1. Le profil contient les reponses de l'utilisateur a des questions personnalisees "
+        "(section apres '--- Contexte personnalise ---'). Lis-les attentivement.\n"
+        "2. Regarde le REVENU ANNUEL : si l'utilisateur a des moyens financiers, "
+        "recommande d'ACHETER des outils, formations, abonnements, logiciels ou services "
+        "plutot que de tout faire soi-meme gratuitement. "
+        "Exemple : recommander un abonnement a un outil pro au lieu de coder a la main.\n"
+        "3. Regarde les COMPETENCES et DIPLOMES : adapte le niveau de difficulte.\n"
+        "4. Regarde le TEMPS DISPONIBLE (heures/jour) : si peu de temps, propose des micro-taches.\n"
+        "5. Si l'utilisateur a deja des connaissances, propose des taches "
+        "d'ACTION CONCRETE (creer, contacter, produire, lancer) plutot que d'apprentissage basique.\n\n"
+        "CONTINUITE DES TACHES:\n"
+        "Regarde les taches COMPLETEES precedemment et propose la SUITE LOGIQUE. "
+        "Par exemple, si l'utilisateur a deja cree une page d'accueil, propose d'ajouter "
+        "une page contact ou d'ameliorer le design. Construis sur ce qui a deja ete fait. "
+        "Ne repete JAMAIS une tache deja proposee mot pour mot.\n\n"
         f"PROFIL:\n{ctx}\n\n"
         f"SOUS-OBJECTIFS:\n{so_ctx}\n\n"
         f"SOUS-OBJECTIF ACTIF: {active_label}\n"
         "Les taches doivent etre focalisees sur le sous-objectif ACTIF.\n\n"
         "Chaque tache doit etre specifique et actionnable en quelques heures.\n"
         f"{past_ctx}\n"
-        "NE REPETE JAMAIS une tache deja proposee. Chaque jour doit avoir des taches DIFFERENTES.\n\n"
         "Reponds UNIQUEMENT avec du JSON valide:\n"
         '[{"description": "..."}, {"description": "..."}, {"description": "..."}, {"description": "..."}]'
     )
