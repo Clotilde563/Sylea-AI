@@ -57,6 +57,15 @@ export function StatistiquesPage() {
   const navigate = useNavigate()
   const { profil, setProfil } = useStore()
   const [decisions, setDecisions] = useState<Decision[]>([])
+
+  const handleDeleteDecision = async (id: string) => {
+    try {
+      await api.deleteDecision(id)
+      setDecisions((prev) => prev.filter((d) => d.id !== id))
+    } catch {
+      // silently fail
+    }
+  }
   const [loading, setLoading]     = useState(true)
   const [hover1, setHover1]       = useState<{ days: number; x: number; y: number } | null>(null)
   const [zoomChart2, setZoomChart2] = useState<'7j' | '30j' | '90j' | 'max'>('max')
@@ -354,7 +363,7 @@ export function StatistiquesPage() {
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                    {['Question', 'Choix', 'Impact', 'Date'].map((h) => (
+                    {['Question', 'Choix', 'Impact', 'Date', ''].map((h) => (
                       <th key={h} style={{ padding: '0.5rem 0.75rem', textAlign: 'left', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.06em', fontSize: '0.72rem' }}>
                         {h}
                       </th>
@@ -379,6 +388,26 @@ export function StatistiquesPage() {
                         </td>
                         <td style={{ padding: '0.625rem 0.75rem', color: 'var(--text-muted)', fontSize: '0.75rem' }}>
                           {d.cree_le ? new Date(d.cree_le).toLocaleDateString('fr-FR') : '—'}
+                        </td>
+                        <td style={{ padding: '0.375rem 0.5rem', textAlign: 'center' }}>
+                          <button
+                            onClick={() => handleDeleteDecision(d.id)}
+                            title="Supprimer cette décision"
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              cursor: 'pointer',
+                              fontSize: '0.85rem',
+                              padding: '0.2rem',
+                              color: '#ef4444',
+                              opacity: 0.6,
+                              transition: 'opacity 0.15s',
+                            }}
+                            onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
+                            onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.6')}
+                          >
+                            🗑️
+                          </button>
                         </td>
                       </tr>
                     )
