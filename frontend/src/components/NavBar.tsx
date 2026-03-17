@@ -34,7 +34,6 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
     { to: '/', label: 'Tableau de bord' },
     { to: '/dilemme', label: 'Analyser un choix' },
     { to: '/statistiques', label: 'Statistiques' },
-    { to: '/profil', label: profil ? 'Mon profil' : 'Créer un profil' },
   ]
 
   return (
@@ -156,11 +155,15 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
                 </div>
               </button>
 
-              {/* Onglet 3: Modifier mon profil (rouge rétro) */}
+              {/* Onglet 3: Modifier / Créer mon profil */}
               <button
                 onClick={() => {
                   setDropdownOpen(false)
-                  setShowProfilModal(true)
+                  if (profil) {
+                    setShowProfilModal(true)
+                  } else {
+                    navigate('/profil')
+                  }
                 }}
                 style={{
                   display: 'flex', alignItems: 'center', gap: '0.6rem',
@@ -178,8 +181,8 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
                   <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                 </svg>
                 <div>
-                  <div style={{ fontWeight: 500, color: '#ef4444' }}>Modifier mon profil</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Informations et objectif</div>
+                  <div style={{ fontWeight: 500, color: profil ? '#ef4444' : 'var(--accent-violet-light)' }}>{profil ? 'Modifier mon profil' : 'Créer mon profil'}</div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>{profil ? 'Informations et objectif' : 'Commencez ici'}</div>
                 </div>
               </button>
             </div>

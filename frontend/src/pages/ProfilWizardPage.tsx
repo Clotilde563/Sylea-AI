@@ -178,15 +178,54 @@ export function ProfilWizardPage() {
       }
       setShowObjectifWarning(false)
       setError(null)
-      setGeneratingQuestions(true)
-      try {
-        const questions = await api.genererQuestions(objDesc.trim())
-        setQuestionsGenerees(questions)
-      } catch {
-        setQuestionsGenerees([])
+
+      // Vérifier si l'objectif a changé pour décider de regénérer les questions
+      let objectifChanged = true
+      if (profil?.objectif) {
+        const _df = profil.objectif.description
+        const _si = _df.indexOf('--- Contexte personnalisé ---')
+        const _existObj = _si >= 0 ? _df.substring(0, _si).trim() : _df.trim()
+        objectifChanged = objDesc.trim() !== _existObj
       }
-      setGeneratingQuestions(false)
-      setStep('questions')
+
+      if (!objectifChanged && profil?.objectif) {
+        // Objectif inchangé : récupérer les questions et réponses existantes
+        const fullDesc = profil.objectif.description
+        const sepIdx = fullDesc.indexOf('--- Contexte personnalisé ---')
+        if (sepIdx >= 0) {
+          const contextPart = fullDesc.substring(sepIdx + '--- Contexte personnalisé ---'.length).trim()
+          const qaPairs = contextPart.split('\n\nQ: ').filter(Boolean)
+          const existingQuestions: string[] = []
+          const existingReponses: Record<number, string> = {}
+          qaPairs.forEach((pair, idx) => {
+            const cleanPair = idx === 0 && pair.startsWith('Q: ') ? pair.substring(3) : pair
+            const parts = cleanPair.split('\nR: ')
+            if (parts.length >= 2) {
+              existingQuestions.push(parts[0].trim())
+              existingReponses[idx] = parts.slice(1).join('\nR: ').trim()
+            } else {
+              existingQuestions.push(cleanPair.trim())
+            }
+          })
+          setQuestionsGenerees(existingQuestions)
+          setReponses(existingReponses)
+        } else {
+          setQuestionsGenerees([])
+        }
+        setStep('questions')
+      } else {
+        // Objectif modifié ou nouveau profil : générer de nouvelles questions
+        setGeneratingQuestions(true)
+        try {
+          const questions = await api.genererQuestions(objDesc.trim())
+          setQuestionsGenerees(questions)
+          setReponses({})  // Reset des réponses pour les nouvelles questions
+        } catch {
+          setQuestionsGenerees([])
+        }
+        setGeneratingQuestions(false)
+        setStep('questions')
+      }
     } else if (step === 'questions') {
       setError(null)
       setStep('bien-etre')
@@ -305,6 +344,24 @@ export function ProfilWizardPage() {
     <>
     <div className="page animate-fade-in">
       <div className="container page-content">
+
+        {/* Flèche retour */}
+        <button
+          onClick={() => navigate('/')}
+          style={{
+            background: 'transparent', border: 'none', cursor: 'pointer',
+            color: 'var(--text-muted)', fontSize: '0.88rem', padding: '0.25rem 0',
+            display: 'flex', alignItems: 'center', gap: '0.4rem',
+            marginBottom: '0.75rem', transition: 'color 0.15s',
+          }}
+          onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-primary)')}
+          onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-muted)')}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+          Retour au tableau de bord
+        </button>
 
         {/* En-tête */}
         <div style={{ marginBottom: '2rem' }}>
