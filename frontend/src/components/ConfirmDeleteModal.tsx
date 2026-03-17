@@ -64,7 +64,7 @@ export function ConfirmDeleteModal({ visible, onConfirm, onCancel }: ConfirmDele
           fontWeight: 700,
           marginBottom: '0.75rem',
         }}>
-          Supprimer cette d\u00e9cision ?
+          Supprimer cette décision ?
         </h3>
 
         {/* Message */}
@@ -75,9 +75,9 @@ export function ConfirmDeleteModal({ visible, onConfirm, onCancel }: ConfirmDele
           lineHeight: 1.6,
           marginBottom: '1.75rem',
         }}>
-          Cette action est <span style={{ color: 'var(--danger)', fontWeight: 600 }}>irr\u00e9versible</span>.
-          La d\u00e9cision sera d\u00e9finitivement supprim\u00e9e de votre historique
-          et ne sera plus prise en compte dans le calcul de votre probabilit\u00e9 de r\u00e9ussite.
+          Cette action est <span style={{ color: 'var(--danger)', fontWeight: 600 }}>irréversible</span>.
+          La décision sera définitivement supprimée de votre historique
+          et ne sera plus prise en compte dans le calcul de votre probabilité de réussite.
         </p>
 
         {/* Buttons */}
