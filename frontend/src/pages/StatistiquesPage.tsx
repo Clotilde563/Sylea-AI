@@ -614,13 +614,24 @@ function Chart2({
       )}
 
       {/* Points de décision */}
-      {!loading && zoomedPoints.filter((_, i) => i > 0 && i < zoomedPoints.length - 1).map((hp, i) => {
+      {/* Point initial */}
+            {!loading && zoomedPoints.length > 0 && (() => {
+              const first = zoomedPoints[0]
+              const fx = xFromElapsed(first.elapsedMs, windowMs)
+              const fy = yZoomed(first.prob)
+              return (
+                <circle cx={fx} cy={fy} r={5}
+                  fill="#fca5a5" stroke="#020509" strokeWidth="2"
+                  style={{ filter: 'drop-shadow(0 0 4px rgba(239,68,68,0.8))' }}/>
+              )
+            })()}
+            {!loading && zoomedPoints.filter((_, i) => i > 0 && i < zoomedPoints.length - 1).map((hp, i) => {
         const hx = xFromElapsed(hp.elapsedMs, windowMs)
         const hy = yZoomed(hp.prob)
         return (
-          <circle key={i} cx={hx} cy={hy} r={4}
-            fill="#fca5a5" stroke="#020509" strokeWidth="1.5"
-            style={{ filter: 'drop-shadow(0 0 3px rgba(239,68,68,0.7))' }}/>
+          <circle key={i} cx={hx} cy={hy} r={5}
+            fill="#fca5a5" stroke="#020509" strokeWidth="2"
+            style={{ filter: 'drop-shadow(0 0 4px rgba(239,68,68,0.8))' }}/>
         )
       })}
 
