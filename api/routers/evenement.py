@@ -329,6 +329,10 @@ async def confirmer_evenement(
             )
             db.conn.commit()
             so_titre_impacte = so_cible["titre"]
+            # Persister le lien SO dans la décision
+            decision.sous_objectif_id = so_cible["id"]
+            decision.impact_sous_objectif = impact_so
+            decision_repo.sauvegarder(decision)
     except Exception:
         pass
 

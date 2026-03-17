@@ -192,3 +192,17 @@ class DatabaseManager:
                 )
             except Exception:
                 pass  # Colonne deja existante
+            # Migration : ajouter sous_objectif_id dans decisions
+            try:
+                self._conn.execute(
+                    "ALTER TABLE decisions ADD COLUMN sous_objectif_id TEXT DEFAULT NULL"
+                )
+            except Exception:
+                pass  # Colonne deja existante
+            # Migration : ajouter impact_sous_objectif dans decisions
+            try:
+                self._conn.execute(
+                    "ALTER TABLE decisions ADD COLUMN impact_sous_objectif REAL DEFAULT 0"
+                )
+            except Exception:
+                pass  # Colonne deja existante

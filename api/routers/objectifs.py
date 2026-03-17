@@ -427,6 +427,9 @@ async def completer_tache(
         option_choisie_id=opt.id,
         probabilite_apres=profil.probabilite_actuelle,
     )
+    if active_so:
+        decision.sous_objectif_id = active_so["id"]
+        decision.impact_sous_objectif = task_so_impact
     dec_repo = DecisionRepository(db)
     dec_repo.sauvegarder(decision)
     return CompleterTacheOut(

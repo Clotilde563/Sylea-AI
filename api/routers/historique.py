@@ -129,6 +129,24 @@ async def supprimer_decision(
     if decision.probabilite_apres is not None and decision.probabilite_avant is not None:
         impact_net = decision.probabilite_apres - decision.probabilite_avant
 
+    # 2b. Reverser la progression du sous-objectif si la décision en impactait un
+    if decision.sous_objectif_id and decision.impact_sous_objectif:
+        try:
+            db = profil_repo._db
+            so_row = db.conn.execute(
+                "SELECT id, progression FROM sous_objectifs WHERE id = ?",
+                (decision.sous_objectif_id,),
+            ).fetchone()
+            if so_row:
+                new_prog = max(0, so_row["progression"] - decision.impact_sous_objectif)
+                db.conn.execute(
+                    "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
+                    (new_prog, decision.sous_objectif_id),
+                )
+                db.conn.commit()
+        except Exception:
+            pass  # Best-effort: ne pas bloquer la suppression
+
     # 3. Supprimer la décision
     decision_repo.supprimer_par_id(decision_id, profil.id)
 

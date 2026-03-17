@@ -136,6 +136,8 @@ class Decision:
     action_agent: Optional[ActionAgent] = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     impact_temporel_jours: Optional[int] = None
+    sous_objectif_id: Optional[str] = None
+    impact_sous_objectif: float = 0.0
     cree_le: datetime = field(default_factory=datetime.now)
 
     def get_option_choisie(self) -> Optional[OptionDilemme]:
@@ -165,6 +167,8 @@ class Decision:
             ),
             "cree_le": self.cree_le.isoformat(),
             "impact_temporel_jours": self.impact_temporel_jours,
+            "sous_objectif_id": self.sous_objectif_id,
+            "impact_sous_objectif": self.impact_sous_objectif,
         }
 
     @classmethod
@@ -192,6 +196,8 @@ class Decision:
             ),
             action_agent=action_agent,
             impact_temporel_jours=data.get("impact_temporel_jours"),
+            sous_objectif_id=data.get("sous_objectif_id"),
+            impact_sous_objectif=float(data.get("impact_sous_objectif", 0)),
         )
         decision.id = data["id"]
         decision.cree_le = datetime.fromisoformat(data["cree_le"])

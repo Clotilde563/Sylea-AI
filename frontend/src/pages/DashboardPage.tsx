@@ -288,7 +288,7 @@ export function DashboardPage() {
                           )}
                         </span>
                         <span style={{ fontSize: '0.72rem', color: isCompleted ? '#4ade80' : 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          {isActive && tempsLabel && <span style={{ color: 'var(--accent-violet-light)', fontSize: '0.68rem' }}>~{tempsLabel}</span>}
+                          {tempsLabel && <span style={{ color: isActive ? 'var(--accent-violet-light)' : 'var(--text-muted)', fontSize: '0.68rem', opacity: isActive ? 1 : 0.7 }}>~{tempsLabel}</span>}
                           {so.progression.toFixed(0)}%
                         </span>
                       </div>
