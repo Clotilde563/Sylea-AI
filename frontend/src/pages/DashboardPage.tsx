@@ -140,7 +140,7 @@ export function DashboardPage() {
 
   const prob = profil.probabilite_actuelle
   const probCalculeeVal = profil.objectif?.probabilite_calculee ?? 0
-  const probGauge = Math.max(0.1, probCalculeeVal) + prob
+  const probGauge = 0.1 + prob
   const probTemps = probCalculeeVal + prob
   const duree = dureeFromProb(probTemps)
   const rawDesc = profil.objectif?.description || ''
