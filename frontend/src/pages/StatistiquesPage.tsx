@@ -510,12 +510,14 @@ function Chart2({
     return [...new Set(ticks)].sort((a, b) => a - b)
   })()
 
-  // Path de la courbe rouge (utilise zoomedPoints + windowMs)
+  // Path de la courbe rouge en ESCALIER (plat entre décisions, saut vertical au moment d'une décision)
   const pathD = zoomedPoints.length >= 2
     ? zoomedPoints.map((p, i) => {
         const x = xFromElapsed(p.elapsedMs, windowMs)
         const y = yZoomed(p.prob)
-        return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
+        if (i === 0) return `M ${x.toFixed(1)} ${y.toFixed(1)}`
+        // Escalier : d'abord horizontal (au même y que le point précédent), puis vertical
+        return `H ${x.toFixed(1)} V ${y.toFixed(1)}`
       }).join(' ')
     : ''
 
@@ -741,21 +743,19 @@ function buildHistoricalPoints(
   return { histPoints: points, totalElapsedMs: totalMs }
 }
 
-/** Interpolation linéaire de la probabilité pour un instant donné (en ms) */
+/** Interpolation en palier : retourne la dernière probabilité connue (pas d'interpolation linéaire) */
 function interpolateProb(
   points: { elapsedMs: number; prob: number }[],
   ems: number,
 ): number {
   if (points.length === 0) return 0
-  if (points.length === 1) return points[0].prob
-  for (let i = 0; i < points.length - 1; i++) {
-    const a = points[i], b = points[i + 1]
-    if (ems >= a.elapsedMs && ems <= b.elapsedMs) {
-      const t = (ems - a.elapsedMs) / (b.elapsedMs - a.elapsedMs)
-      return a.prob + t * (b.prob - a.prob)
-    }
+  // Trouver le dernier point dont le temps est <= ems
+  let result = points[0].prob
+  for (const p of points) {
+    if (p.elapsedMs <= ems) result = p.prob
+    else break
   }
-  return points[points.length - 1].prob
+  return result
 }
 
 // ── Composants locaux ─────────────────────────────────────────────────────────
