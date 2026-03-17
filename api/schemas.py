@@ -324,3 +324,16 @@ class CompleterTacheOut(BaseModel):
 
 class PersonnaliteOut(BaseModel):
     phrase: str
+
+
+# -- Service Client (chatbot) ------------------------------------------------
+
+class ServiceClientMessageIn(BaseModel):
+    role: str  # 'user' ou 'assistant'
+    content: str
+
+class ServiceClientChatIn(BaseModel):
+    messages: list[ServiceClientMessageIn]
+
+class ServiceClientChatOut(BaseModel):
+    message: str

@@ -12,12 +12,14 @@ import { StatistiquesPage }  from './pages/StatistiquesPage'
 import { EvenementPage }    from './pages/EvenementPage'
 import { BilanPage }        from './pages/BilanPage'
 import { HistoriquePage }   from './pages/HistoriquePage'
+import { ServiceChatbot }   from './components/ServiceChatbot'
 
 // ── Application ───────────────────────────────────────────────────────────────
 
 export default function App() {
   // true = affiche l'animation au lancement | false = désactivé
   const [showSplash, setShowSplash] = useState(true)
+  const [chatbotOpen, setChatbotOpen] = useState(false)
 
   return (
     <BrowserRouter>
@@ -33,7 +35,7 @@ export default function App() {
           path="/*"
           element={
             <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
-              <NavBar />
+              <NavBar onOpenChatbot={() => setChatbotOpen(true)} />
               <main style={{ flex: 1 }}>
                 <Routes>
                   <Route path="/"             element={<DashboardPage />} />
@@ -46,6 +48,7 @@ export default function App() {
                   <Route path="*"             element={<Navigate to="/" replace />} />
                 </Routes>
               </main>
+              <ServiceChatbot visible={chatbotOpen} onClose={() => setChatbotOpen(false)} />
 
               {/* Footer */}
               <footer

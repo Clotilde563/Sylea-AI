@@ -190,4 +190,12 @@ export const api = {
 
   getPersonnalite: (): Promise<PersonnaliteIA> =>
     request<PersonnaliteIA>('/profil/personnalite'),
+
+  // ── Service client chatbot ──────────────────────────────────────────
+
+  serviceClientChat: (messages: { role: string; content: string }[]): Promise<{ message: string }> =>
+    request<{ message: string }>('/service-client/chat', {
+      method: 'POST',
+      body: JSON.stringify({ messages }),
+    }),
 }

@@ -29,7 +29,7 @@ try:
 except ImportError:
     pass
 
-from api.routers import profil, dilemme, historique, evenement, bilan, objectifs
+from api.routers import profil, dilemme, historique, evenement, bilan, objectifs, service_client
 from api.schemas import HealthOut
 
 
@@ -62,6 +62,7 @@ app.include_router(historique.router)
 app.include_router(evenement.router)
 app.include_router(bilan.router)
 app.include_router(objectifs.router)
+app.include_router(service_client.router)
 
 
 # ── Routes utilitaires ────────────────────────────────────────────────────────

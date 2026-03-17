@@ -164,6 +164,14 @@ async def upsert_profil(
         profil.probabilite_actuelle = 0.0
         from datetime import datetime as _dt
         profil.objectif_modifie_le = _dt.now()
+        # Supprimer aussi les sous-objectifs et tâches (reset complet)
+        try:
+            db = repo._db
+            db.conn.execute("DELETE FROM sous_objectifs WHERE user_id = ?", (existing.id,))
+            db.conn.execute("DELETE FROM taches_quotidiennes WHERE user_id = ?", (existing.id,))
+            db.conn.commit()
+        except Exception:
+            pass
 
     profil.marquer_modification()
     repo.sauvegarder(profil)

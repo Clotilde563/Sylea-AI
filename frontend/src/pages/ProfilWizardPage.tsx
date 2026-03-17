@@ -6,6 +6,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store/useStore'
+import { ConfirmProfilModal } from '../components/ConfirmProfilModal'
 import { api } from '../api/client'
 import type { ProfilIn } from '../types'
 import { SITUATIONS_FAMILIALES } from '../types'
@@ -36,6 +37,7 @@ export function ProfilWizardPage() {
   const [step,   setStep]   = useState<Step>('identite')
   const [saving, setSaving] = useState(false)
   const [error,  setError]  = useState<string | null>(null)
+  const [showObjectifWarning, setShowObjectifWarning] = useState(false)
 
   // ── Identité ───────────────────────────────────────────────────────────────
   const [nom,        setNom]        = useState(() => profil?.nom        ?? '')
@@ -164,6 +166,17 @@ export function ProfilWizardPage() {
         setError('Veuillez remplir les champs obligatoires (*).')
         return
       }
+      // Vérifier si l'objectif de vie a changé → confirmation
+      if (profil?.objectif) {
+        const _descFull = profil.objectif.description
+        const _sepIdx = _descFull.indexOf('--- Contexte personnalisé ---')
+        const existingObj = _sepIdx >= 0 ? _descFull.substring(0, _sepIdx).trim() : _descFull.trim()
+        if (objDesc.trim() !== existingObj && !showObjectifWarning) {
+          setShowObjectifWarning(true)
+          return
+        }
+      }
+      setShowObjectifWarning(false)
       setError(null)
       setGeneratingQuestions(true)
       try {
@@ -289,6 +302,7 @@ export function ProfilWizardPage() {
 
   // ── Rendu ─────────────────────────────────────────────────────────────────
   return (
+    <>
     <div className="page animate-fade-in">
       <div className="container page-content">
 
@@ -699,5 +713,28 @@ export function ProfilWizardPage() {
 
       </div>
     </div>
+
+    {/* Modale confirmation changement d'objectif */}
+    {showObjectifWarning && (
+      <div style={{
+        position: 'fixed', inset: 0, zIndex: 9999,
+        background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        <div className="card" style={{ maxWidth: 420, padding: '2rem', textAlign: 'center' }}>
+          <div style={{ fontSize: '2.5rem', marginBottom: '0.75rem' }}>⚠️</div>
+          <h3 style={{ marginBottom: '0.75rem' }}>Objectif de vie modifié</h3>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', lineHeight: 1.6 }}>
+            Votre historique de <span style={{ color: '#ef4444' }}>décisions, sous-objectifs et tâches</span> sera
+            réinitialisé. Voulez-vous continuer ?
+          </p>
+          <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.25rem' }}>
+            <button className="btn" style={{ flex: 1 }} onClick={() => setShowObjectifWarning(false)}>Annuler</button>
+            <button className="btn btn-primary" style={{ flex: 1 }} onClick={() => goNext()}>Continuer</button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   )
 }
