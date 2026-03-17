@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store/useStore'
 import { api } from '../api/client'
 import type { Decision } from '../types'
+import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal'
 
 export function HistoriquePage() {
   const navigate = useNavigate()
@@ -18,14 +19,15 @@ export function HistoriquePage() {
   const archivedDecisions = decisions.slice(10)
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm("\u26a0\ufe0f Supprimer cette d\u00e9cision ?\n\nCette action est irr\u00e9versible. La d\u00e9cision sera d\u00e9finitivement supprim\u00e9e de votre historique et ne sera plus prise en compte dans le calcul de votre probabilit\u00e9 de r\u00e9ussite.")) return
     try {
       await api.deleteDecision(id)
       setDecisions((prev) => prev.filter((d) => d.id !== id))
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Erreur lors de la suppression')
     }
+    setDeleteTarget(null)
   }
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
 
   useEffect(() => {
     if (!profil) {
@@ -172,7 +174,7 @@ export function HistoriquePage() {
                         {formatImpact(d.impact_net)}
                       </span>
                       <button
-                        onClick={() => handleDelete(d.id)}
+                        onClick={() => setDeleteTarget(d.id)}
                         title="Supprimer cette décision"
                         style={{
                           background: 'none',
@@ -241,7 +243,7 @@ export function HistoriquePage() {
                             {formatImpact(d.impact_net)}
                           </span>
                           <button
-                            onClick={() => handleDelete(d.id)}
+                            onClick={() => setDeleteTarget(d.id)}
                             title="Supprimer"
                             style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '1rem', color: '#ef4444', opacity: 0.7 }}
                             onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
@@ -258,6 +260,12 @@ export function HistoriquePage() {
             )}
           </div>
         )}
+
+        <ConfirmDeleteModal
+          visible={deleteTarget !== null}
+          onConfirm={() => deleteTarget && handleDelete(deleteTarget)}
+          onCancel={() => setDeleteTarget(null)}
+        />
 
         {/* Statistiques sommaires */}
         {!loading && decisions.length > 0 && (

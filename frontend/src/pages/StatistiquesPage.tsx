@@ -8,6 +8,7 @@ import { useStore } from '../store/useStore'
 import { api } from '../api/client'
 import { dureeFromProb, probFromJours, buildTimeTicks } from '../utils/duration'
 import type { Decision, Profil } from '../types'
+import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal'
 
 // ── Dimensions partagées ──────────────────────────────────────────────────────
 const W   = 620
@@ -59,14 +60,15 @@ export function StatistiquesPage() {
   const [decisions, setDecisions] = useState<Decision[]>([])
 
   const handleDeleteDecision = async (id: string) => {
-    if (!window.confirm("\u26a0\ufe0f Supprimer cette d\u00e9cision ?\n\nCette action est irr\u00e9versible. La d\u00e9cision sera d\u00e9finitivement supprim\u00e9e de votre historique et ne sera plus prise en compte dans le calcul de votre probabilit\u00e9 de r\u00e9ussite.")) return
     try {
       await api.deleteDecision(id)
       setDecisions((prev) => prev.filter((d) => d.id !== id))
     } catch {
       // silently fail
     }
+    setDeleteTarget(null)
   }
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [loading, setLoading]     = useState(true)
   const [hover1, setHover1]       = useState<{ days: number; x: number; y: number } | null>(null)
   const [zoomChart2, setZoomChart2] = useState<'7j' | '30j' | '90j' | 'max'>('max')
@@ -392,7 +394,7 @@ export function StatistiquesPage() {
                         </td>
                         <td style={{ padding: '0.375rem 0.5rem', textAlign: 'center' }}>
                           <button
-                            onClick={() => handleDeleteDecision(d.id)}
+                            onClick={() => setDeleteTarget(d.id)}
                             title="Supprimer cette décision"
                             style={{
                               background: 'none',
@@ -419,7 +421,13 @@ export function StatistiquesPage() {
           </div>
         )}
 
-        {!loading && decisions.length === 0 && (
+        <ConfirmDeleteModal
+        visible={deleteTarget !== null}
+        onConfirm={() => deleteTarget && handleDeleteDecision(deleteTarget)}
+        onCancel={() => setDeleteTarget(null)}
+      />
+
+      {!loading && decisions.length === 0 && (
           <div className="card" style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
             <p style={{ fontSize: '1.5rem', marginBottom: '0.5rem', opacity: 0.4 }}>⊙</p>
             <p>Aucune décision enregistrée pour l'instant.</p>
