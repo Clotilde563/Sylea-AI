@@ -13,6 +13,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from sylea.core.models.decision import Decision
+from sylea.config.settings import PROB_MIN, PROB_MAX
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
 
 from api.schemas import DecisionOut, OptionDilemmeOut, ActionAgentOut, AgentRapportOut
@@ -110,7 +111,7 @@ async def supprimer_decision(
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     decision_repo: DecisionRepository = Depends(get_decision_repo),
 ):
-    """Supprime une décision par son ID."""
+    """Supprime une décision et recalcule la probabilité actuelle."""
     if not profil_repo.existe():
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
 
@@ -118,8 +119,28 @@ async def supprimer_decision(
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
-    deleted = decision_repo.supprimer_par_id(decision_id, profil.id)
-    if not deleted:
+    # 1. Charger la décision AVANT suppression pour connaître son impact
+    decision = decision_repo.obtenir_par_id(decision_id, profil.id)
+    if decision is None:
         raise HTTPException(status_code=404, detail="Décision introuvable.")
 
-    return {"detail": "Décision supprimée."}
+    # 2. Calculer l'impact_net
+    impact_net = 0.0
+    if decision.probabilite_apres is not None and decision.probabilite_avant is not None:
+        impact_net = decision.probabilite_apres - decision.probabilite_avant
+
+    # 3. Supprimer la décision
+    decision_repo.supprimer_par_id(decision_id, profil.id)
+
+    # 4. Recalculer probabilite_actuelle depuis TOUS les impacts restants
+    remaining = decision_repo.lister_pour_utilisateur(profil.id, limite=10000)
+    new_prob = sum(
+        (d.probabilite_apres or 0) - (d.probabilite_avant or 0)
+        for d in remaining
+    )
+    new_prob = max(PROB_MIN, min(PROB_MAX, new_prob))
+    profil.probabilite_actuelle = new_prob
+    profil.marquer_modification()
+    profil_repo.sauvegarder(profil)
+
+    return {"detail": "Décision supprimée.", "probabilite_actuelle": new_prob}

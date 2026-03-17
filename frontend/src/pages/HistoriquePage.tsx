@@ -22,6 +22,9 @@ export function HistoriquePage() {
     try {
       await api.deleteDecision(id)
       setDecisions((prev) => prev.filter((d) => d.id !== id))
+      // Re-fetch profil pour obtenir probabilite_actuelle mise à jour
+      const updatedProfil = await api.getProfil()
+      setProfil(updatedProfil)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Erreur lors de la suppression')
     }

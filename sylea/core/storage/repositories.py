@@ -99,6 +99,16 @@ class DecisionRepository:
             "SELECT COUNT(*) FROM decisions WHERE user_id = ?", (user_id,)
         ).fetchone()[0]
 
+    def obtenir_par_id(self, decision_id: str, user_id: str):
+        """Charge une décision par son ID (vérifie le user_id)."""
+        row = self._db.conn.execute(
+            "SELECT * FROM decisions WHERE id = ? AND user_id = ?",
+            (decision_id, user_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return Decision.from_dict(dict(row))
+
     def supprimer_par_id(self, decision_id: str, user_id: str) -> bool:
         """Supprime une décision par son ID (vérifie le user_id)."""
         with self._db.conn:

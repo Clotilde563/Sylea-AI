@@ -63,6 +63,9 @@ export function StatistiquesPage() {
     try {
       await api.deleteDecision(id)
       setDecisions((prev) => prev.filter((d) => d.id !== id))
+      // Re-fetch profil pour obtenir probabilite_actuelle mise à jour
+      const updatedProfil = await api.getProfil()
+      setProfil(updatedProfil)
     } catch {
       // silently fail
     }
@@ -102,7 +105,9 @@ export function StatistiquesPage() {
   const tgMois        = Math.floor((tempsGagne % 365) / 30)
 
   // ── Données chart 2 (courbe réelle) ──────────────────────────────────────
-  const { histPoints, totalElapsedMs } = buildHistoricalPoints(profil, decisions)
+  const { histPoints: rawHistPoints, totalElapsedMs } = buildHistoricalPoints(profil, decisions)
+  // Ajouter la probabilité de base pour que Chart2 affiche la probabilité TOTALE (comme Chart1)
+  const histPoints = rawHistPoints.map(p => ({ ...p, prob: p.prob + probCalculee }))
 
   return (
     <div className="page animate-fade-in">
