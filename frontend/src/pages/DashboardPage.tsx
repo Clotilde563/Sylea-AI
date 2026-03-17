@@ -241,6 +241,9 @@ export function DashboardPage() {
         {/* Sous-objectifs séquentiels */}
         {sousObjectifs.length > 0 && (() => {
           const activeIdx = sousObjectifs.findIndex(so => so.progression < 100)
+          // Calcul proportionnel : chaque SO affiche sa part du temps total réel
+          const totalJoursObjectif = duree.totalJours
+          const sumTempsEstime = sousObjectifs.reduce((s, so) => s + (so.temps_estime || 0), 0)
           return (
             <div className="card animate-fade-in" style={{ marginBottom: '1.5rem', padding: '1.25rem' }}>
               <h3 style={{ fontSize: '0.75rem', fontWeight: 700, letterSpacing: '0.1em', color: 'var(--accent-violet-light)', textTransform: 'uppercase', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -252,7 +255,9 @@ export function DashboardPage() {
                   const isActive = idx === activeIdx
                   const barColor = isCompleted ? 'linear-gradient(90deg, #22c55e, #16a34a)' : isActive ? 'linear-gradient(90deg, #60a5fa, #818cf8)' : 'linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.04))'
                   const textColor = isCompleted ? '#4ade80' : isActive ? 'var(--text-primary)' : 'var(--text-muted)'
-                  const tempsLabel = so.temps_estime > 0 ? (so.temps_estime >= 365 ? `${Math.round(so.temps_estime / 365)} an${so.temps_estime >= 730 ? 's' : ''}` : so.temps_estime >= 30 ? `${Math.round(so.temps_estime / 30)} mois` : `${Math.round(so.temps_estime)} j`) : null
+                  // Temps proportionnel au temps total de l'objectif de vie
+                  const soJours = sumTempsEstime > 0 ? (so.temps_estime / sumTempsEstime) * totalJoursObjectif : 0
+                  const tempsLabel = soJours > 0 ? (soJours >= 365 ? `${Math.round(soJours / 365)} an${soJours >= 730 ? 's' : ''}` : soJours >= 30 ? `${Math.round(soJours / 30)} mois` : `${Math.round(soJours)} j`) : null
                   return (
                     <div key={so.id} style={{
                       transition: 'all 0.3s',
