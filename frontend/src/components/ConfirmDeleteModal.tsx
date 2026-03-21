@@ -1,4 +1,5 @@
 // Modal de confirmation de suppression — Design Syléa.AI
+import { useT } from '../i18n/LanguageContext'
 
 interface ConfirmDeleteModalProps {
   visible: boolean
@@ -7,6 +8,7 @@ interface ConfirmDeleteModalProps {
 }
 
 export function ConfirmDeleteModal({ visible, onConfirm, onCancel }: ConfirmDeleteModalProps) {
+  const t = useT()
   if (!visible) return null
 
   return (
@@ -64,7 +66,7 @@ export function ConfirmDeleteModal({ visible, onConfirm, onCancel }: ConfirmDele
           fontWeight: 700,
           marginBottom: '0.75rem',
         }}>
-          Supprimer cette décision ?
+          {t('modal.supprimer_decision')}
         </h3>
 
         {/* Message */}
@@ -75,9 +77,7 @@ export function ConfirmDeleteModal({ visible, onConfirm, onCancel }: ConfirmDele
           lineHeight: 1.6,
           marginBottom: '1.75rem',
         }}>
-          Cette action est <span style={{ color: 'var(--danger)', fontWeight: 600 }}>irréversible</span>.
-          La décision sera définitivement supprimée de votre historique
-          et ne sera plus prise en compte dans le calcul de votre probabilité de réussite.
+          {t('modal.supprimer_desc')}
         </p>
 
         {/* Buttons */}
@@ -99,7 +99,7 @@ export function ConfirmDeleteModal({ visible, onConfirm, onCancel }: ConfirmDele
             onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)' }}
             onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
           >
-            Annuler
+            {t('common.annuler')}
           </button>
           <button
             onClick={onConfirm}
@@ -118,7 +118,7 @@ export function ConfirmDeleteModal({ visible, onConfirm, onCancel }: ConfirmDele
             onMouseEnter={(e) => { e.currentTarget.style.background = '#dc2626' }}
             onMouseLeave={(e) => { e.currentTarget.style.background = '#ef4444' }}
           >
-            Supprimer
+            {t('stats.supprimer')}
           </button>
         </div>
       </div>

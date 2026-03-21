@@ -3,6 +3,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { SyleaLogo } from './SyleaLogo'
 import { api } from '../api/client'
+import { useDeviceContext } from '../contexts/DeviceContext'
+import { useT } from '../i18n/LanguageContext'
 
 interface ChatMessage {
   role: 'user' | 'assistant'
@@ -15,8 +17,10 @@ interface ServiceChatbotProps {
 }
 
 export function ServiceChatbot({ visible, onClose }: ServiceChatbotProps) {
+  const t = useT()
+  const { ctx: deviceCtx } = useDeviceContext()
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: 'assistant', content: 'Bonjour ! 👋 Je suis le Service Syléa. Comment puis-je vous aider ?' },
+    { role: 'assistant', content: t('chatbot.bienvenue') },
   ])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
@@ -37,10 +41,10 @@ export function ServiceChatbot({ visible, onClose }: ServiceChatbotProps) {
     setSending(true)
     try {
       const history = newMessages.map(m => ({ role: m.role, content: m.content }))
-      const response = await api.serviceClientChat(history)
+      const response = await api.serviceClientChat(history, deviceCtx ?? undefined)
       setMessages(prev => [...prev, { role: 'assistant', content: response.message }])
     } catch {
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Désolé, une erreur est survenue. Réessayez.' }])
+      setMessages(prev => [...prev, { role: 'assistant', content: t('chatbot.erreur') }])
     } finally {
       setSending(false)
     }
@@ -70,7 +74,7 @@ export function ServiceChatbot({ visible, onClose }: ServiceChatbotProps) {
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <SyleaLogo size={20} animated={false} />
           <span style={{ fontSize: '0.78rem', fontWeight: 700, letterSpacing: '0.1em', color: 'var(--accent-silver)' }}>
-            SERVICE SYLÉA
+            {t('chatbot.titre')}
           </span>
         </div>
         <button onClick={onClose} style={{
@@ -111,7 +115,7 @@ export function ServiceChatbot({ visible, onClose }: ServiceChatbotProps) {
             fontSize: '0.82rem', color: 'var(--text-muted)',
           }}>
             <span className="spinner spinner-sm" style={{ marginRight: '0.5rem' }} />
-            Réflexion...
+            {t('chatbot.reflexion')}
           </div>
         )}
         <div ref={messagesEndRef} />
@@ -127,7 +131,7 @@ export function ServiceChatbot({ visible, onClose }: ServiceChatbotProps) {
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
-          placeholder="Posez votre question..."
+          placeholder={t('chatbot.placeholder')}
           style={{ flex: 1, fontSize: '0.82rem', padding: '0.5rem 0.75rem' }}
         />
         <button

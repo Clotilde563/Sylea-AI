@@ -1,4 +1,5 @@
 // Modale de confirmation avant modification du profil
+import { useT } from '../i18n/LanguageContext'
 
 interface ConfirmProfilModalProps {
   visible: boolean
@@ -9,6 +10,7 @@ interface ConfirmProfilModalProps {
 }
 
 export function ConfirmProfilModal({ visible, onConfirm, onCancel, title, message }: ConfirmProfilModalProps) {
+  const t = useT()
   if (!visible) return null
 
   return (
@@ -49,17 +51,17 @@ export function ConfirmProfilModal({ visible, onConfirm, onCancel, title, messag
         </div>
 
         <h3 style={{ textAlign: 'center', fontSize: '1.05rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '0.75rem' }}>
-          {title || 'Modifier mon profil ?'}
+          {title || t('modal.modifier_profil')}
         </h3>
 
         <div style={{ textAlign: 'center', fontSize: '0.85rem', lineHeight: 1.7, color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>
           {message || (
             <>
               <p style={{ marginBottom: '0.5rem' }}>
-                Modifier vos <strong style={{ color: 'var(--text-primary)' }}>informations personnelles</strong> entraînera un recalcul de votre probabilité.
+                {t('modal.modifier_proba')}
               </p>
               <p>
-                Modifier votre <strong style={{ color: '#ef4444' }}>objectif de vie</strong> réinitialisera <span style={{ color: '#ef4444' }}>tout votre historique</span> (décisions, sous-objectifs, tâches).
+                {t('modal.modifier_objectif')}
               </p>
             </>
           )}
@@ -73,7 +75,7 @@ export function ConfirmProfilModal({ visible, onConfirm, onCancel, title, messag
               background: 'transparent', border: '1px solid var(--border)',
               color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '0.85rem',
             }}
-          >Annuler</button>
+          >{t('common.annuler')}</button>
           <button
             onClick={onConfirm}
             style={{
@@ -81,7 +83,7 @@ export function ConfirmProfilModal({ visible, onConfirm, onCancel, title, messag
               background: 'var(--accent-violet)', border: 'none',
               color: '#fff', fontWeight: 600, cursor: 'pointer', fontSize: '0.85rem',
             }}
-          >Continuer</button>
+          >{t('common.confirmer')}</button>
         </div>
       </div>
     </div>

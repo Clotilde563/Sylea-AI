@@ -20,8 +20,10 @@ from api.schemas import (
     CompleterTacheIn, CompleterTacheOut,
     SousObjectifUpdateIn,
     PersonnaliteOut,
+    GenererSousObjectifsIn, GenererTachesIn,
 )
 from api.dependencies import get_profil_repo, get_db
+from api.context_helper import format_device_context
 
 router = APIRouter(tags=["objectifs"])
 
@@ -127,6 +129,7 @@ async def liste_sous_objectifs(
 
 @router.post("/api/sous-objectifs/generer", response_model=list[SousObjectifOut])
 async def generer_sous_objectifs(
+    data: GenererSousObjectifsIn,
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     db=Depends(get_db),
 ):
@@ -172,11 +175,12 @@ async def generer_sous_objectifs(
         "Exactement 4 sous-objectifs, du plus immediat au plus lointain. "
         "temps_estime_jours est le nombre de jours estimes pour accomplir ce sous-objectif. "
         "Les titres doivent etre courts et larges (phase strategique, pas micro-tache)."
+        + format_device_context(data.contexte_appareil)
     )
     try:
-        data = await _call_claude_json(prompt)
+        raw = await _call_claude_json(prompt)
     except Exception:
-        data = [
+        raw = [
             {"titre": "Preparation", "description": "Rassembler les ressources necessaires", "temps_estime_jours": 180},
             {"titre": "Formation", "description": "Acquerir les competences manquantes", "temps_estime_jours": 365},
             {"titre": "Action", "description": "Mettre en oeuvre le plan", "temps_estime_jours": 365},
@@ -184,7 +188,7 @@ async def generer_sous_objectifs(
         ]
     now = datetime.now().isoformat()
     results = []
-    for i, item in enumerate(data[:4]):
+    for i, item in enumerate(raw[:4]):
         so_id = str(uuid.uuid4())
         titre = str(item.get("titre", f"Etape {i+1}"))
         desc = str(item.get("description", ""))
@@ -235,6 +239,7 @@ async def check_taches_aujourdhui(
 
 @router.post("/api/taches/generer", response_model=TachesOut)
 async def generer_taches(
+    data: GenererTachesIn,
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     db=Depends(get_db),
 ):
@@ -315,11 +320,12 @@ async def generer_taches(
         f"{past_ctx}\n"
         "Reponds UNIQUEMENT avec du JSON valide:\n"
         '[{"description": "..."}, {"description": "..."}, {"description": "..."}, {"description": "..."}]'
+        + format_device_context(data.contexte_appareil)
     )
     try:
-        data = await _call_claude_json(prompt)
+        raw = await _call_claude_json(prompt)
     except Exception:
-        data = [
+        raw = [
             {"description": "Definir 3 actions prioritaires pour votre objectif"},
             {"description": "Consacrer 30 min a la formation ou recherche"},
             {"description": "Contacter une personne cle de votre reseau"},
@@ -328,7 +334,7 @@ async def generer_taches(
     now = datetime.now()
     deadline = datetime(now.year, now.month, now.day, 23, 59, 59).isoformat()
     taches = []
-    for item in data[:4]:
+    for item in raw[:4]:
         taches.append({
             "id": str(uuid.uuid4()),
             "description": str(item.get("description", "Tache")),

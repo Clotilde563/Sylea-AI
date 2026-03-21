@@ -87,19 +87,28 @@ export function probFromJours(totalJ: number): number {
  * Retourne un label court : "+1a 6m", "-45j", "+12h", etc.
  * La durée inclut des heures si le delta est inférieur à 1 jour.
  */
-export function deltaFromImpact(probActuelle: number, impactPoints: number): string {
+export function deltaFromImpact(probActuelle: number, impactPoints: number, maxJours?: number): string {
   const pAvant = Math.max(0, Math.min(100, probActuelle))
   const pApres = Math.max(0, Math.min(100, probActuelle + impactPoints))
   const dAvant = dureeFromProb(pAvant)
   const dApres = dureeFromProb(pApres)
   // positif = gain de temps (bonne décision), négatif = perte
-  const deltaFloat = dAvant.totalJours - dApres.totalJours
+  let deltaFloat = dAvant.totalJours - dApres.totalJours
+  // Plafonner par l'impact temporel si fourni (le gain/perte ne peut pas dépasser le cadre temporel)
+  if (maxJours !== undefined && maxJours > 0) {
+    deltaFloat = Math.max(-maxJours, Math.min(maxJours, deltaFloat))
+  }
   const sign = deltaFloat >= 0 ? '+' : '-'
   const abs  = Math.abs(deltaFloat)
 
   if (abs < 1) {
-    const h = Math.round(abs * 24)
-    return h === 0 ? '0h' : `${sign}${h}h`
+    const totalMin = Math.round(abs * 24 * 60)
+    if (totalMin < 60) {
+      return totalMin === 0 ? '0min' : `${sign}${totalMin}min`
+    }
+    const h = Math.floor(totalMin / 60)
+    const m = totalMin % 60
+    return m > 0 ? `${sign}${h}h${m}min` : `${sign}${h}h`
   }
 
   const absJ  = Math.round(abs)

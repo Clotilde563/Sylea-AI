@@ -5,6 +5,8 @@ import { useNavigate } from 'react-router-dom'
 import { OptionCard } from '../components/OptionCard'
 import { useStore } from '../store/useStore'
 import { api } from '../api/client'
+import { useT } from '../i18n/LanguageContext'
+import { useDeviceContext } from '../contexts/DeviceContext'
 import type { AnalyseDilemme, Decision } from '../types'
 
 type Phase = 'form' | 'loading' | 'result' | 'done'
@@ -24,8 +26,10 @@ const OPTION_COLORS = [
 const OPTION_TEXT_COLORS = ['white', '#0d0d14', 'white', 'white', 'white']
 
 export function DilemmePage() {
+  const t = useT()
   const navigate = useNavigate()
-  const { profil, analyse, setAnalyse, setProfil } = useStore()
+  const { profil, analyse, setAnalyse, setProfil, refreshSousObjectifs } = useStore()
+  const { ctx: deviceCtx } = useDeviceContext()
 
   const [phase, setPhase] = useState<Phase>(analyse ? 'result' : 'form')
   const [options, setOptions] = useState<string[]>(['', ''])
@@ -42,9 +46,9 @@ export function DilemmePage() {
     return (
       <div className="page">
         <div className="container page-content" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '1rem' }}>
-          <p style={{ color: 'var(--text-muted)' }}>Vous devez créer un profil pour analyser un dilemme.</p>
+          <p style={{ color: 'var(--text-muted)' }}>{t('dilemme.creer_profil_msg')}</p>
           <button className="btn btn-primary" onClick={() => navigate('/profil')}>
-            Créer mon profil
+            {t('dilemme.creer_profil')}
           </button>
         </div>
       </div>
@@ -53,12 +57,12 @@ export function DilemmePage() {
 
 
   const TEMPORAL_OPTIONS = [
-    { value: '1_jour', label: '1 jour' },
-    { value: '1_semaine', label: '1 semaine' },
-    { value: '1_mois', label: '1 mois' },
-    { value: '1_an', label: '1 an' },
-    { value: 'long_terme', label: 'Long terme' },
-    { value: 'personnalise', label: 'Personnalisé' },
+    { value: '1_jour', label: t('dilemme.jour') },
+    { value: '1_semaine', label: t('dilemme.semaine') },
+    { value: '1_mois', label: t('dilemme.mois_label') },
+    { value: '1_an', label: t('dilemme.an_label') },
+    { value: 'long_terme', label: t('dilemme.long_terme') },
+    { value: 'personnalise', label: t('dilemme.personnalise') },
   ]
 
   const getTemporalLabel = () => {
@@ -101,11 +105,11 @@ export function DilemmePage() {
 
   const handleAnalyser = async () => {
     if (options.some(o => !o.trim())) {
-      setError('Veuillez remplir tous les champs.')
+      setError(t('dilemme.remplir_champs'))
       return
     }
     if (impactTemporel === 'personnalise' && customYears === 0 && customMonths === 0 && customDays === 0) {
-      setError('Veuillez renseigner au moins une valeur pour la durée personnalisée.')
+      setError(t('dilemme.duree_personnalisee_vide'))
       return
     }
     setError(null)
@@ -116,11 +120,12 @@ export function DilemmePage() {
         question: questionAuto,
         options: options.map(o => o.trim()),
         impact_temporel_jours: getImpactDays(),
+        contexte_appareil: deviceCtx ?? undefined,
       })
       setAnalyse(result)
       setPhase('result')
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Erreur lors de l\'analyse')
+      setError(e instanceof Error ? e.message : t('dilemme.erreur_analyse'))
       setPhase('form')
     }
   }
@@ -135,6 +140,7 @@ export function DilemmePage() {
         options: analyse.options,
         choix: choixSelectionne,
         impact_temporel_jours: getImpactDays(),
+        contexte_appareil: deviceCtx ?? undefined,
       })
       if (choixResult?.sous_objectif_impacte) {
         setSousObjectifImpacte(choixResult.sous_objectif_impacte)
@@ -142,10 +148,11 @@ export function DilemmePage() {
       // Recharger le profil pour la probabilité mise à jour
       const updated = await api.getProfil()
       setProfil(updated)
+      await refreshSousObjectifs()
       setAnalyse(null)
       setPhase('done')
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Erreur lors de l\'enregistrement')
+      setError(e instanceof Error ? e.message : t('dilemme.erreur_enregistrement'))
     } finally {
       setSubmitting(false)
     }
@@ -189,10 +196,10 @@ export function DilemmePage() {
         {/* En-tête */}
         <div style={{ marginBottom: '2rem' }}>
           <h2 style={{ color: 'var(--accent-silver)', marginBottom: '0.375rem' }}>
-            Analyser un choix
+            {t('dilemme.analyser_choix')}
           </h2>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-            Syléa.AI analyse vos options et leur impact sur votre probabilité de réussite.
+            {t('dilemme.analyser_desc')}
           </p>
         </div>
 
@@ -203,10 +210,10 @@ export function DilemmePage() {
               {/* Sélecteur d'impact temporel */}
               <div className="input-group">
                 <label className="input-label">
-                  Impact temporel <span style={{ color: 'var(--accent-gold)' }}>*</span>
+                  {t('dilemme.impact_temporel')} <span style={{ color: 'var(--accent-gold)' }}>*</span>
                 </label>
                 <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
-                  Sur quelle période ce choix aura-t-il un impact ?
+                  {t('dilemme.impact_temporel_desc')}
                 </p>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem' }}>
                   {TEMPORAL_OPTIONS.map((opt) => (
@@ -239,7 +246,7 @@ export function DilemmePage() {
                 {impactTemporel === 'personnalise' && (
                   <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.75rem' }}>
                     <div style={{ flex: 1 }}>
-                      <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Années</label>
+                      <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{t('dilemme.annees')}</label>
                       <input
                         type="number"
                         className="input"
@@ -251,7 +258,7 @@ export function DilemmePage() {
                       />
                     </div>
                     <div style={{ flex: 1 }}>
-                      <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Mois</label>
+                      <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{t('dilemme.mois')}</label>
                       <input
                         type="number"
                         className="input"
@@ -263,7 +270,7 @@ export function DilemmePage() {
                       />
                     </div>
                     <div style={{ flex: 1 }}>
-                      <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Jours</label>
+                      <label style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>{t('dilemme.jours')}</label>
                       <input
                         type="number"
                         className="input"
@@ -302,7 +309,7 @@ export function DilemmePage() {
                         >
                           {lettre}
                         </span>
-                        Option {lettre} <span style={{ color: 'var(--accent-gold)' }}>*</span>
+                        {t('dilemme.option')} {lettre} <span style={{ color: 'var(--accent-gold)' }}>*</span>
                         {options.length > MIN_OPTIONS && (
                           <button
                             type="button"
@@ -318,7 +325,7 @@ export function DilemmePage() {
                               padding: '0.15rem 0.5rem',
                               transition: 'all 0.15s',
                             }}
-                            title="Supprimer cette option"
+                            title={t('dilemme.supprimer_option')}
                           >
                             ×
                           </button>
@@ -357,7 +364,7 @@ export function DilemmePage() {
                   }}
                 >
                   <span style={{ fontSize: '1.2rem', fontWeight: 300 }}>+</span>
-                  Ajouter une option ({options.length}/{MAX_OPTIONS})
+                  {t('dilemme.ajouter_option')} ({options.length}/{MAX_OPTIONS})
                 </button>
               )}
 
@@ -370,7 +377,7 @@ export function DilemmePage() {
                 onClick={handleAnalyser}
                 disabled={options.some(o => !o.trim())}
               >
-                ⟡ Lancer l'analyse IA
+                {t('dilemme.analyser')}
               </button>
             </div>
           </div>
@@ -391,10 +398,10 @@ export function DilemmePage() {
             />
             <div style={{ textAlign: 'center' }}>
               <p style={{ color: 'var(--accent-silver)', fontWeight: 600, marginBottom: '0.375rem' }}>
-                Syléa.AI analyse votre dilemme…
+                {t('dilemme.analyse_en_cours')}
               </p>
               <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>
-                Calcul de l'impact sur votre probabilité de réussite
+                {t('dilemme.calcul_impact')}
               </p>
             </div>
           </div>
@@ -414,6 +421,7 @@ export function DilemmePage() {
                   selected={choixSelectionne === opt.lettre}
                   onSelect={() => setChoixSelectionne(choixSelectionne === opt.lettre ? null : opt.lettre)}
                   probActuelle={(profil.objectif?.probabilite_calculee ?? 0) + profil.probabilite_actuelle}
+                  impactTemporelJours={getImpactDays()}
                 />
               ))}
             </div>
@@ -428,12 +436,31 @@ export function DilemmePage() {
               }}
             >
               <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-violet-light)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.625rem' }}>
-                ◈ Verdict Syléa.AI
+                ◈ {t('dilemme.verdict_sylea')}
               </p>
               <p style={{ color: 'var(--text-secondary)', lineHeight: '1.6', fontSize: '0.925rem' }}>
                 {analyse.verdict}
               </p>
             </div>
+
+            {/* Étude scientifique */}
+            {analyse.etude_scientifique && (
+              <div
+                className="card"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(59,130,246,0.06), rgba(16,185,129,0.04))',
+                  border: '1px solid rgba(59,130,246,0.2)',
+                  marginBottom: '1.5rem',
+                }}
+              >
+                <p style={{ fontSize: '0.75rem', fontWeight: 700, color: '#60a5fa', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.625rem' }}>
+                  {t('dilemme.etude_scientifique')}
+                </p>
+                <p style={{ color: 'var(--text-secondary)', lineHeight: '1.6', fontSize: '0.875rem', fontStyle: 'italic' }}>
+                  {analyse.etude_scientifique}
+                </p>
+              </div>
+            )}
 
             {error && (
               <p style={{ color: 'var(--danger)', fontSize: '0.875rem', marginBottom: '1rem' }}>⚠ {error}</p>
@@ -442,7 +469,7 @@ export function DilemmePage() {
             {/* Actions */}
             <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
               <button className="btn btn-outline" onClick={handleReset}>
-                ← Nouveau dilemme
+                ← {t('dilemme.nouveau_dilemme')}
               </button>
               <button
                 className="btn btn-gold"
@@ -450,10 +477,10 @@ export function DilemmePage() {
                 disabled={!choixSelectionne || submitting}
               >
                 {submitting
-                  ? 'Enregistrement…'
+                  ? t('dilemme.enregistrement')
                   : choixSelectionne
-                  ? `✓ Valider l'option ${choixSelectionne}`
-                  : 'Sélectionnez une option'}
+                  ? `✓ ${t('dilemme.valider_option')} ${choixSelectionne}`
+                  : t('dilemme.selectionnez_option')}
               </button>
             </div>
           </div>
@@ -473,22 +500,22 @@ export function DilemmePage() {
             }}
           >
             <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>✓</div>
-            <h3 style={{ color: 'var(--success)', marginBottom: '0.75rem' }}>Décision enregistrée !</h3>
+            <h3 style={{ color: 'var(--success)', marginBottom: '0.75rem' }}>{t('dilemme.decision_enregistree')}</h3>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1rem', lineHeight: '1.5' }}>
-              Votre choix a été sauvegardé et votre probabilité de réussite a été mise à jour.
+              {t('dilemme.choix_sauvegarde')}
             </p>
             {sousObjectifImpacte && (
               <div style={{ background: 'rgba(96,165,250,0.08)', border: '1px solid rgba(96,165,250,0.25)', borderRadius: 'var(--radius-md)', padding: '0.6rem 1rem', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <span style={{ color: '#60a5fa', fontSize: '0.8rem' }}>{'↳'}</span>
-                <span style={{ color: '#93c5fd', fontSize: '0.82rem' }}>Sous-objectif impacté : <strong>{sousObjectifImpacte}</strong></span>
+                <span style={{ color: '#93c5fd', fontSize: '0.82rem' }}>{t('dilemme.sous_objectif_impacte')} : <strong>{sousObjectifImpacte}</strong></span>
               </div>
             )}
             <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
               <button className="btn btn-outline btn-sm" onClick={handleReset}>
-                Nouveau dilemme
+                {t('dilemme.nouveau_dilemme')}
               </button>
               <button className="btn btn-primary btn-sm" onClick={() => navigate('/')}>
-                Tableau de bord
+                {t('dilemme.tableau_de_bord')}
               </button>
             </div>
           </div>

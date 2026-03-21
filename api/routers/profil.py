@@ -19,8 +19,9 @@ from sylea.core.models.user import ProfilUtilisateur, Objectif
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
 from sylea.core.engine.probability import MoteurProbabilite
 
-from api.schemas import ProfilIn, ProfilOut, ObjectifOut, ProbabiliteOut, JourneeIn, BienEtreScoresOut, QuestionsObjectifIn
+from api.schemas import ProfilIn, ProfilOut, ObjectifOut, ProbabiliteOut, ProbabiliteIn, JourneeIn, BienEtreScoresOut, QuestionsObjectifIn
 from api.dependencies import get_profil_repo, get_decision_repo, get_moteur, get_agent
+from api.context_helper import format_device_context
 
 router = APIRouter(prefix="/api/profil", tags=["profil"])
 
@@ -180,6 +181,7 @@ async def upsert_profil(
 
 @router.post("/probabilite", response_model=ProbabiliteOut)
 async def recalculer_probabilite(
+    data: ProbabiliteIn,
     repo: ProfilRepository = Depends(get_profil_repo),
     moteur: MoteurProbabilite = Depends(get_moteur),
     agent=Depends(get_agent),
@@ -202,8 +204,10 @@ async def recalculer_probabilite(
     if agent is not None:
         try:
             # Appel bloquant → thread séparé
+            device_context = format_device_context(data.contexte_appareil)
             analyse = await asyncio.to_thread(
-                agent.analyser_probabilite, profil, prob_locale
+                agent.analyser_probabilite, profil, prob_locale,
+                device_context=device_context,
             )
             # Stocker dans probabilite_calculee (interne pour calcul temps)
             profil.objectif.probabilite_calculee = analyse.probabilite
@@ -256,7 +260,7 @@ _QUESTIONS_FALLBACK = [
 ]
 
 
-async def _generer_questions_claude(description: str) -> list:
+async def _generer_questions_claude(description: str, device_context: str = "") -> list:
     """G\u00e9n\u00e8re 12 questions personnalis\u00e9es via Claude Haiku."""
     import os, json, re as _re
     import anthropic as _anthropic
@@ -274,6 +278,7 @@ async def _generer_questions_claude(description: str) -> list:
         "les risques potentiels et les prochaines \u00e9tapes concrètes.\n\n"
         "R\u00e9ponds UNIQUEMENT avec un tableau JSON de 12 cha\u00eenes en fran\u00e7ais, sans aucun markdown.\n"
         'Format exact : ["question 1", "question 2", ..., "question 12"]'
+        f'{device_context}'
     )
     msg = await asyncio.to_thread(
         lambda: client.messages.create(
@@ -296,7 +301,7 @@ async def _generer_questions_claude(description: str) -> list:
 async def generer_questions(data: QuestionsObjectifIn):
     """G\u00e9n\u00e8re 12 questions personnalis\u00e9es bas\u00e9es sur l'objectif de l'utilisateur."""
     try:
-        return await _generer_questions_claude(data.description)
+        return await _generer_questions_claude(data.description, device_context=format_device_context(data.contexte_appareil))
     except Exception:
         return _QUESTIONS_FALLBACK
 
@@ -342,7 +347,7 @@ def _analyser_journee_heuristique(description: str) -> dict:
     }
 
 
-async def _analyser_journee_claude(description: str) -> dict:
+async def _analyser_journee_claude(description: str, device_context: str = "") -> dict:
     """Analyse par Claude Haiku (nécessite ANTHROPIC_API_KEY)."""
     import os, json, re
     import anthropic as _anthropic
@@ -358,6 +363,7 @@ async def _analyser_journee_claude(description: str) -> dict:
         f'Journée : "{description}"\n\n'
         'Format exact : {"niveau_sante": X, "niveau_stress": X, "niveau_energie": X, "niveau_bonheur": X}\n'
         "(1=très mauvais, 10=excellent ; stress élevé = score élevé)"
+        f'{device_context}'
     )
     msg = await asyncio.to_thread(
         lambda: client.messages.create(
@@ -383,7 +389,7 @@ async def _analyser_journee_claude(description: str) -> dict:
 async def analyser_journee(data: JourneeIn):
     """Analyse la description d'une journée et retourne des scores bien-être (1-10)."""
     try:
-        scores = await _analyser_journee_claude(data.description)
+        scores = await _analyser_journee_claude(data.description, device_context=format_device_context(data.contexte_appareil))
         return BienEtreScoresOut(**scores)
     except Exception:
         return BienEtreScoresOut(**_analyser_journee_heuristique(data.description))

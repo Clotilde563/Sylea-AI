@@ -4,6 +4,8 @@ import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store/useStore'
 import { api } from '../api/client'
+import { useDeviceContext } from '../contexts/DeviceContext'
+import { useT } from '../i18n/LanguageContext'
 
 // Couleur dynamique pour les scores 1-10
 function scoreCol(val: number, invert = false): string {
@@ -23,6 +25,8 @@ function fmt(h: number): string {
 
 export function BilanPage() {
   const navigate = useNavigate()
+  const t = useT()
+  const { ctx: deviceCtx } = useDeviceContext()
   const { profil, setProfil } = useStore()
 
   // Scores bien-être
@@ -70,7 +74,7 @@ export function BilanPage() {
       return
     }
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-    if (!SR) { setVoiceError('Navigateur non compatible avec la saisie vocale.'); return }
+    if (!SR) { setVoiceError(t('bilan.vocal_incompatible')); return }
     const r = new SR()
     r.lang = 'fr-FR'
     r.continuous = true
@@ -88,7 +92,7 @@ export function BilanPage() {
         }
       }
     }
-    r.onerror = (ev: any) => { setVoiceError(`Erreur vocale : ${ev.error}`); setVoiceActive(false) }
+    r.onerror = (ev: any) => { setVoiceError(`${t('bilan.erreur_vocale')} ${ev.error}`); setVoiceActive(false) }
     r.onend = () => setVoiceActive(false)
     r.start()
     setVoiceActive(true)
@@ -100,13 +104,13 @@ export function BilanPage() {
     setAnalysing(true)
     setError(null)
     try {
-      const scores = await api.analyserJournee(descJournee)
+      const scores = await api.analyserJournee(descJournee, deviceCtx ?? undefined)
       setSante(scores.niveau_sante)
       setStress(scores.niveau_stress)
       setEnergie(scores.niveau_energie)
       setBonheur(scores.niveau_bonheur)
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Erreur d'analyse")
+      setError(e instanceof Error ? e.message : t('bilan.erreur_analyse'))
     } finally {
       setAnalysing(false)
     }
@@ -133,7 +137,7 @@ export function BilanPage() {
       setProfil(updated)
       setDone(true)
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Erreur d'enregistrement")
+      setError(e instanceof Error ? e.message : t('bilan.erreur_enregistrement'))
     } finally {
       setSaving(false)
     }
@@ -143,7 +147,7 @@ export function BilanPage() {
     return (
       <div className="loading-center">
         <div className="spinner" />
-        <p style={{ color: 'var(--text-muted)' }}>Chargement…</p>
+        <p style={{ color: 'var(--text-muted)' }}>{t('bilan.chargement')}</p>
       </div>
     )
   }
@@ -163,12 +167,12 @@ export function BilanPage() {
             }}
           >
             <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>✓</div>
-            <h3 style={{ color: 'var(--success)', marginBottom: '0.75rem' }}>Bilan enregistré !</h3>
+            <h3 style={{ color: 'var(--success)', marginBottom: '0.75rem' }}>{t('bilan.bilan_enregistre')}</h3>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1.5rem', lineHeight: '1.5' }}>
-              Votre bilan du jour a été sauvegardé. Vos scores et votre emploi du temps ont été mis à jour.
+              {t('bilan.bilan_sauvegarde')}
             </p>
             <button className="btn btn-primary btn-sm" onClick={() => navigate('/')}>
-              Retour au tableau de bord
+              {t('bilan.retour_dashboard')}
             </button>
           </div>
         </div>
@@ -183,10 +187,10 @@ export function BilanPage() {
         {/* En-tête */}
         <div style={{ marginBottom: '2rem' }}>
           <h2 style={{ color: 'var(--accent-silver)', marginBottom: '0.375rem' }}>
-            ☀️ Bilan du jour
+            {t('bilan.titre_page')}
           </h2>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-            Comment vous sentez-vous aujourd'hui ? Ces informations permettent à Syléa.AI d'affiner ses analyses.
+            {t('bilan.subtitle')}
           </p>
         </div>
 
@@ -196,14 +200,14 @@ export function BilanPage() {
             {/* Auto-évaluations */}
             <div>
               <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-violet-light)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '1.25rem' }}>
-                ◈ Auto-évaluations (1 – 10)
+                {t('bilan.auto_evaluations')}
               </p>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
                 {[
-                  { label: 'Santé physique',      val: sante,   set: setSante,   invert: false, lo: 'Mauvaise',      hi: 'Excellente' },
-                  { label: 'Niveau de stress',     val: stress,  set: setStress,  invert: true,  lo: 'Très calme',    hi: 'Très stressé' },
-                  { label: 'Énergie quotidienne',  val: energie, set: setEnergie, invert: false, lo: 'Épuisé(e)',     hi: "Plein d'énergie" },
-                  { label: 'Bonheur général',      val: bonheur, set: setBonheur, invert: false, lo: 'Très triste',   hi: 'Très heureux/se' },
+                  { label: t('bilan.sante_physique'),      val: sante,   set: setSante,   invert: false, lo: t('bilan.mauvaise'),      hi: t('bilan.excellente') },
+                  { label: t('bilan.niveau_stress'),       val: stress,  set: setStress,  invert: true,  lo: t('bilan.tres_calme'),     hi: t('bilan.tres_stresse') },
+                  { label: t('bilan.energie_quotidienne'), val: energie, set: setEnergie, invert: false, lo: t('bilan.epuise'),         hi: t('bilan.plein_energie') },
+                  { label: t('bilan.bonheur_general'),     val: bonheur, set: setBonheur, invert: false, lo: t('bilan.tres_triste'),    hi: t('bilan.tres_heureux') },
                 ].map(({ label, val, set, invert, lo, hi }) => (
                   <div key={label}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
@@ -228,15 +232,15 @@ export function BilanPage() {
             {/* Temps quotidien */}
             <div>
               <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-gold)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '1.25rem' }}>
-                ◈ Temps quotidien
+                {t('bilan.temps_quotidien')}
               </p>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
                 {[
-                  { label: 'Travail',                 val: hTravail,   set: setHTravail,   min: 0, max: 16, step: 0.5, gold: false },
-                  { label: 'Sommeil',                 val: hSommeil,   set: setHSommeil,   min: 3, max: 12, step: 0.5, gold: false },
-                  { label: 'Loisirs',                 val: hLoisirs,   set: setHLoisirs,   min: 0, max: 8,  step: 0.5, gold: false },
-                  { label: 'Transport',               val: hTransport, set: setHTransport, min: 0, max: 6,  step: 0.5, gold: false },
-                  { label: 'Consacré à mon objectif', val: hObjectif,  set: setHObjectif,  min: 0, max: 8,  step: 0.5, gold: true  },
+                  { label: t('bilan.travail'),            val: hTravail,   set: setHTravail,   min: 0, max: 16, step: 0.5, gold: false },
+                  { label: t('bilan.sommeil'),            val: hSommeil,   set: setHSommeil,   min: 3, max: 12, step: 0.5, gold: false },
+                  { label: t('bilan.loisirs'),            val: hLoisirs,   set: setHLoisirs,   min: 0, max: 8,  step: 0.5, gold: false },
+                  { label: t('bilan.transport'),          val: hTransport, set: setHTransport, min: 0, max: 6,  step: 0.5, gold: false },
+                  { label: t('bilan.consacre_objectif'),  val: hObjectif,  set: setHObjectif,  min: 0, max: 8,  step: 0.5, gold: true  },
                 ].map(({ label, val, set, min, max, step, gold }) => (
                   <div key={label}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.375rem' }}>
@@ -260,16 +264,16 @@ export function BilanPage() {
             {/* Journée type */}
             <div>
               <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.625rem' }}>
-                ◈ Racontez votre journée (optionnel)
+                {t('bilan.raconter_journee')}
               </p>
               <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '0.75rem', lineHeight: '1.5' }}>
-                Décrivez librement votre journée — Syléa.AI analysera votre texte et remplira automatiquement les scores ci-dessus.
+                {t('bilan.raconter_desc')}
               </p>
               <textarea
                 className="input" rows={4}
                 value={descJournee}
                 onChange={e => setDescJournee(e.target.value)}
-                placeholder="Ex : Je me suis levé à 7h, bien dormi. La réunion du matin était stressante..."
+                placeholder={t('bilan.description_placeholder')}
               />
               <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.75rem', justifyContent: 'flex-end' }}>
                 <button
@@ -277,14 +281,14 @@ export function BilanPage() {
                   onClick={toggleVoice}
                   title="Saisie vocale" style={{ minWidth: '7.5rem' }}
                 >
-                  {voiceActive ? '⏺ Écoute…' : '🎤 Vocal'}
+                  {voiceActive ? t('bilan.ecoute') : t('bilan.vocal')}
                 </button>
                 <button
                   type="button" className="btn btn-outline btn-sm"
                   onClick={analyserJournee} disabled={!descJournee.trim() || analysing}
                   style={{ minWidth: '13rem' }}
                 >
-                  {analysing ? 'Analyse en cours…' : "⟡ Analyser avec l'IA"}
+                  {analysing ? t('bilan.analyse_cours') : t('bilan.analyser_ia')}
                 </button>
               </div>
               {voiceError && (
@@ -298,10 +302,10 @@ export function BilanPage() {
 
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <button className="btn btn-outline" onClick={() => navigate('/')}>
-                ← Retour
+                {t('bilan.retour')}
               </button>
               <button className="btn btn-gold" onClick={handleSubmit} disabled={saving}>
-                {saving ? 'Enregistrement…' : '✓ Enregistrer mon bilan'}
+                {saving ? t('bilan.enregistrement') : t('bilan.enregistrer_bilan')}
               </button>
             </div>
           </div>

@@ -9,6 +9,7 @@ import { api } from '../api/client'
 import { dureeFromProb, probFromJours, buildTimeTicks } from '../utils/duration'
 import type { Decision, Profil } from '../types'
 import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal'
+import { useT } from '../i18n/LanguageContext'
 
 // ── Dimensions partagées ──────────────────────────────────────────────────────
 const W   = 620
@@ -54,9 +55,10 @@ function buildChartYearTicks(maxAns: number): number[] {
 
 // ── Composant principal ───────────────────────────────────────────────────────
 export function StatistiquesPage() {
+  const t        = useT()
   const uid      = useId().replace(/\W/g, '')
   const navigate = useNavigate()
-  const { profil, setProfil } = useStore()
+  const { profil, setProfil, refreshSousObjectifs } = useStore()
   const [decisions, setDecisions] = useState<Decision[]>([])
 
   const handleDeleteDecision = async (id: string) => {
@@ -66,6 +68,7 @@ export function StatistiquesPage() {
       // Re-fetch profil pour obtenir probabilite_actuelle mise à jour
       const updatedProfil = await api.getProfil()
       setProfil(updatedProfil)
+      await refreshSousObjectifs()
     } catch {
       // silently fail
     }
@@ -75,6 +78,7 @@ export function StatistiquesPage() {
   const [loading, setLoading]     = useState(true)
   const [hover1, setHover1]       = useState<{ days: number; x: number; y: number } | null>(null)
   const [zoomChart2, setZoomChart2] = useState<'7j' | '30j' | '90j' | 'max'>('max')
+  const [smoothChart2, setSmoothChart2] = useState(true)
 
   useEffect(() => {
     // Toujours recharger le profil depuis l'API
@@ -114,22 +118,22 @@ export function StatistiquesPage() {
         {/* ── En-tête ── */}
         <div style={{ marginBottom: '2rem' }}>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginBottom: '0.25rem' }}>
-            Tableau de bord avancé
+            {t('stats.dashboard_avance')}
           </p>
           <h1 style={{ fontSize: '1.75rem', color: 'var(--accent-silver)', marginBottom: '0.25rem' }}>
-            Statistiques
+            {t('stats.titre')}
           </h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>
-            Évolution de votre probabilité de réussite
+            {t('stats.evolution_proba')}
           </p>
         </div>
 
         {/* ── Cartes stats ── */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '1rem', marginBottom: '1.75rem' }}>
-          <StatCard label="Décisions prises"     value={String(decisions.length)} sub="depuis le début"              color="var(--accent-violet-light)" />
-          <StatCard label="Gain probabilité"     value={gainTotal >= 0 ? `+${gainTotal.toFixed(1)} %` : `${gainTotal.toFixed(1)} %`} sub="total cumulé" color={gainTotal >= 0 ? '#22c55e' : '#ef4444'} />
-          <StatCard label="Temps économisé"      value={tempsGagne > 0 ? (tgAns > 0 ? `${tgAns}a${tgMois > 0 ? ` ${tgMois}m` : ''}` : `${tgMois}m`) : '—'} sub="vers votre objectif" color="#4090f0" />
-          <StatCard label="Temps restant estimé" value={dureeActuelle.ligne1} sub={dureeActuelle.ligne2 || 'pour atteindre l\'objectif'} color="var(--accent-silver)" />
+          <StatCard label={t('stats.decisions_prises')} value={String(decisions.length)} sub={t('stats.depuis_debut')} color="var(--accent-violet-light)" />
+          <StatCard label={t('stats.gain_proba')} value={gainTotal >= 0 ? `+${gainTotal.toFixed(1)} %` : `${gainTotal.toFixed(1)} %`} sub={t('stats.total_cumule')} color={gainTotal >= 0 ? '#22c55e' : '#ef4444'} />
+          <StatCard label={t('stats.temps_economise')} value={tempsGagne > 0 ? (tgAns > 0 ? `${tgAns}a${tgMois > 0 ? ` ${tgMois}m` : ''}` : `${tgMois}m`) : '—'} sub={t('stats.vers_objectif')} color="#4090f0" />
+          <StatCard label={t('stats.temps_restant')} value={dureeActuelle.ligne1} sub={dureeActuelle.ligne2 || t('stats.pour_atteindre')} color="var(--accent-silver)" />
         </div>
 
         {/* ── Card contenant les deux graphiques ── */}
@@ -140,7 +144,7 @@ export function StatistiquesPage() {
           {/* ── Graphique 1 : courbe théorique ── */}
           <div style={{ marginBottom: '0.6rem' }}>
             <span style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.12em', color: 'var(--accent-violet-light)', textTransform: 'uppercase' }}>
-              ◈ Probabilité théorique selon le temps restant estimé
+              ◈ {t('stats.proba_theorique')}
             </span>
           </div>
 
@@ -215,13 +219,13 @@ export function StatistiquesPage() {
             <text x={PAD.left + innerW() / 2} y={H - 4} textAnchor="middle"
               fontSize="10" fill="rgba(232,232,240,0.4)"
               fontFamily="Inter, system-ui, sans-serif" letterSpacing="0.08em">
-              TEMPS RESTANT ESTIMÉ
+              {t('stats.temps_restant_label')}
             </text>
             <text x={10} y={PAD.top + innerH() / 2} textAnchor="middle"
               fontSize="10" fill="rgba(232,232,240,0.4)"
               fontFamily="Inter, system-ui, sans-serif" letterSpacing="0.08em"
               transform={`rotate(-90, 10, ${PAD.top + innerH() / 2})`}>
-              PROBABILITÉ
+              {t('stats.probabilite_label')}
             </text>
 
             {/* Aire + courbe théorique */}
@@ -266,7 +270,7 @@ export function StatistiquesPage() {
                     fontSize="9" fill="rgba(0,200,255,0.85)"
                     fontFamily="Inter, system-ui, sans-serif"
                     fontWeight="600" letterSpacing="0.06em">
-                    MAINTENANT
+                    {t('stats.maintenant')}
                   </text>
                 </g>
               )
@@ -290,12 +294,12 @@ export function StatistiquesPage() {
                   <text x={tipX + 8} y={tipY + 15}
                     fontSize="9" fill="rgba(232,232,240,0.5)"
                     fontFamily="Inter, system-ui, sans-serif" letterSpacing="0.06em">
-                    TEMPS : {duree.ligne1}{duree.ligne2 ? ` ${duree.ligne2}` : ''}
+                    {t('stats.temps_label')} {duree.ligne1}{duree.ligne2 ? ` ${duree.ligne2}` : ''}
                   </text>
                   <text x={tipX + 8} y={tipY + 31}
                     fontSize="12" fontWeight="700" fill="#4090f0"
                     fontFamily="Inter, system-ui, sans-serif">
-                    {prob.toFixed(1)} % de réussite
+                    {prob.toFixed(1)} % {t('stats.reussite')}
                   </text>
                 </g>
               )
@@ -304,8 +308,8 @@ export function StatistiquesPage() {
 
           {/* Légende chart 1 */}
           <div style={{ display: 'flex', gap: '1.5rem', marginBottom: '2rem', flexWrap: 'wrap' }}>
-            <LegendItem colorLine="#4090f0" label="Courbe théorique" />
-            <LegendItem colorDot="#00c8ff" label="Position actuelle" />
+            <LegendItem colorLine="#4090f0" label={t('stats.courbe_theorique')} />
+            <LegendItem colorDot="#00c8ff" label={t('stats.position_actuelle')} />
           </div>
 
           {/* Séparateur */}
@@ -314,9 +318,27 @@ export function StatistiquesPage() {
           {/* ── Graphique 2 : progression réelle dans le temps ── */}
           <div style={{ marginBottom: '0.6rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
             <span style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.12em', color: '#f87171', textTransform: 'uppercase' }}>
-              ◈ Progression réelle depuis le début
+              ◈ {t('stats.progression_reelle')}
             </span>
-            <div style={{ display: 'flex', gap: '0.25rem' }}>
+            <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+              <button
+                onClick={() => setSmoothChart2(v => !v)}
+                style={{
+                  padding: '0.25rem 0.625rem',
+                  borderRadius: '999px',
+                  fontSize: '0.65rem',
+                  fontWeight: 600,
+                  letterSpacing: '0.06em',
+                  border: smoothChart2 ? '1px solid #f59e0b' : '1px solid var(--border)',
+                  background: smoothChart2 ? 'rgba(245,158,11,0.15)' : 'transparent',
+                  color: smoothChart2 ? '#fbbf24' : 'var(--text-muted)',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s',
+                }}
+              >
+                {t('stats.dynamique')}
+              </button>
+              <div style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 0.15rem' }} />
               {(['7j', '30j', '90j', 'max'] as const).map((period) => (
                 <button
                   key={period}
@@ -350,12 +372,13 @@ export function StatistiquesPage() {
               probActuelle={probActuelle}
               loading={loading}
               zoomPeriod={zoomChart2}
+              smooth={smoothChart2}
             />
           )}
 
           {/* Légende chart 2 */}
           <div style={{ display: 'flex', gap: '1.5rem', marginTop: '0.75rem', flexWrap: 'wrap' }}>
-            <LegendItem colorLine="#ef4444" label="Progression réelle" />
+            <LegendItem colorLine="#ef4444" label={t('stats.progression_reelle_legende')} />
           </div>
         </div>
 
@@ -363,13 +386,13 @@ export function StatistiquesPage() {
         {!loading && decisions.length > 0 && (
           <div className="card" style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}>
             <h3 style={{ fontSize: '0.8rem', fontWeight: 700, letterSpacing: '0.1em', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '1rem' }}>
-              ◈ Historique des décisions
+              ◈ {t('stats.historique_decisions')}
             </h3>
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                    {['Question', 'Choix', 'Impact', 'Date', ''].map((h) => (
+                    {[t('stats.question_col'), t('stats.choix_col'), t('stats.impact_col'), t('stats.date_col'), ''].map((h) => (
                       <th key={h} style={{ padding: '0.5rem 0.75rem', textAlign: 'left', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.06em', fontSize: '0.72rem' }}>
                         {h}
                       </th>
@@ -398,7 +421,7 @@ export function StatistiquesPage() {
                         <td style={{ padding: '0.375rem 0.5rem', textAlign: 'center' }}>
                           <button
                             onClick={() => setDeleteTarget(d.id)}
-                            title="Supprimer cette décision"
+                            title={t('stats.supprimer')}
                             style={{
                               background: 'none',
                               border: 'none',
@@ -433,8 +456,8 @@ export function StatistiquesPage() {
       {!loading && decisions.length === 0 && (
           <div className="card" style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
             <p style={{ fontSize: '1.5rem', marginBottom: '0.5rem', opacity: 0.4 }}>⊙</p>
-            <p>Aucune décision enregistrée pour l'instant.</p>
-            <p style={{ fontSize: '0.8rem', marginTop: '0.5rem' }}>Analysez un dilemme pour commencer à alimenter vos statistiques.</p>
+            <p>{t('stats.aucune_decision')}</p>
+            <p style={{ fontSize: '0.8rem', marginTop: '0.5rem' }}>{t('stats.aucune_decision_desc')}</p>
           </div>
         )}
       </div>
@@ -443,8 +466,61 @@ export function StatistiquesPage() {
 }
 
 // ── Graphique 2 (courbe réelle rouge) ─────────────────────────────────────────
+/** Monotone cubic Hermite spline — courbe lisse passant par tous les points sans oscillation */
+function buildSmoothPath(pts: { x: number; y: number }[]): string {
+  const n = pts.length
+  if (n < 2) return ''
+  if (n === 2) return `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)} L ${pts[1].x.toFixed(1)} ${pts[1].y.toFixed(1)}`
+
+  // 1. Calculer les pentes (differences)
+  const dx: number[] = []
+  const dy: number[] = []
+  const m: number[] = []
+  for (let i = 0; i < n - 1; i++) {
+    dx.push(pts[i + 1].x - pts[i].x)
+    dy.push(pts[i + 1].y - pts[i].y)
+    m.push(dx[i] === 0 ? 0 : dy[i] / dx[i])
+  }
+
+  // 2. Tangentes monotones (Fritsch-Carlson)
+  const t: number[] = [m[0]]
+  for (let i = 1; i < n - 1; i++) {
+    if (m[i - 1] * m[i] <= 0) {
+      t.push(0)
+    } else {
+      t.push((m[i - 1] + m[i]) / 2)
+    }
+  }
+  t.push(m[n - 2])
+
+  // 3. Ajuster pour monotonie
+  for (let i = 0; i < n - 1; i++) {
+    if (Math.abs(m[i]) < 1e-10) { t[i] = 0; t[i + 1] = 0; continue }
+    const a = t[i] / m[i]
+    const b = t[i + 1] / m[i]
+    const s = a * a + b * b
+    if (s > 9) {
+      const tau = 3 / Math.sqrt(s)
+      t[i] = tau * a * m[i]
+      t[i + 1] = tau * b * m[i]
+    }
+  }
+
+  // 4. Generer le path SVG avec des courbes cubiques
+  let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`
+  for (let i = 0; i < n - 1; i++) {
+    const dxi = dx[i] / 3
+    const cp1x = pts[i].x + dxi
+    const cp1y = pts[i].y + t[i] * dxi
+    const cp2x = pts[i + 1].x - dxi
+    const cp2y = pts[i + 1].y - t[i + 1] * dxi
+    d += ` C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${pts[i + 1].x.toFixed(1)} ${pts[i + 1].y.toFixed(1)}`
+  }
+  return d
+}
+
 function Chart2({
-  uid, profil, histPoints, totalElapsedMs, probActuelle, loading, zoomPeriod = 'max',
+  uid, profil, histPoints, totalElapsedMs, probActuelle, loading, zoomPeriod = 'max', smooth = false,
 }: {
   uid: string
   profil: Profil
@@ -453,7 +529,9 @@ function Chart2({
   probActuelle: number
   loading: boolean
   zoomPeriod?: '7j' | '30j' | '90j' | 'max'
+  smooth?: boolean
 }) {
+  const t = useT()
   const [hover, setHover] = useState<{ x: number; y: number; prob: number; elapsedMs: number } | null>(null)
 
   // ── Zoom : filtrer les points par période ───────────────────────────────────────
@@ -510,15 +588,76 @@ function Chart2({
     return [...new Set(ticks)].sort((a, b) => a - b)
   })()
 
-  // Path de la courbe rouge en ESCALIER (plat entre décisions, saut vertical au moment d'une décision)
+  // Couleurs conditionnelles selon le mode
+  const lineColor = smooth ? '#f59e0b' : '#ef4444'
+  const glowColor = smooth ? 'rgba(245,158,11,0.9)' : 'rgba(239,68,68,0.9)'
+  const dotColor  = smooth ? '#fcd34d' : '#fca5a5'
+
+  // Path de la courbe (escalier ou lisse selon le mode)
   const pathD = zoomedPoints.length >= 2
-    ? zoomedPoints.map((p, i) => {
-        const x = xFromElapsed(p.elapsedMs, windowMs)
-        const y = yZoomed(p.prob)
-        if (i === 0) return `M ${x.toFixed(1)} ${y.toFixed(1)}`
-        // Escalier : d'abord horizontal (au même y que le point précédent), puis vertical
-        return `H ${x.toFixed(1)} V ${y.toFixed(1)}`
-      }).join(' ')
+    ? smooth
+      ? (() => {
+          // Mode lisse : fonction continue globale
+          // prob(t) = prob_initiale + Σ delta_i × sigmoid((t - t_i) / largeur)
+          // Échantillonnage uniforme → courbe parfaitement lisse sans aucun angle
+
+          // Collecter les décisions (moments + deltas de probabilité)
+          const decisions: { ems: number; prob: number }[] = []
+          for (let i = 0; i < zoomedPoints.length; i++) {
+            decisions.push({ ems: zoomedPoints[i].elapsedMs, prob: zoomedPoints[i].prob })
+          }
+          if (decisions.length < 2) return ''
+
+          const baseProb = decisions[0].prob
+          // Largeur de transition : large pour un lissage visible
+          // Utiliser l'écart moyen entre décisions × 1.5 pour que les transitions se chevauchent
+          const totalRange = windowMs || 1
+          const avgGap = decisions.length > 1
+            ? (decisions[decisions.length - 1].ems - decisions[0].ems) / (decisions.length - 1)
+            : totalRange
+          const transWidth = Math.max(avgGap * 0.6, totalRange * 0.06)
+
+          // Fonction continue : à l'instant ems, quelle est la proba lissée ?
+          function smoothProb(ems: number): number {
+            let prob = baseProb
+            for (let i = 1; i < decisions.length; i++) {
+              const delta = decisions[i].prob - decisions[i - 1].prob
+              const center = decisions[i].ems
+              // Sigmoïde très douce : k=3 pour une transition large et progressive
+              const x = (ems - center) / transWidth
+              const sig = 1 / (1 + Math.exp(-3 * x))
+              prob += delta * sig
+            }
+            return prob
+          }
+
+          // Échantillonner uniformément 150 points sur toute la timeline
+          const numSamples = 150
+          const startEms = decisions[0].ems
+          const endEms = decisions[decisions.length - 1].ems
+          const rangeEms = endEms - startEms || 1
+
+          const pts: { x: number; y: number }[] = []
+          for (let s = 0; s <= numSamples; s++) {
+            const ems = startEms + (rangeEms * s) / numSamples
+            const prob = smoothProb(ems)
+            pts.push({
+              x: xFromElapsed(ems, windowMs),
+              y: yZoomed(prob),
+            })
+          }
+
+          // Construire le path SVG directement avec des lignes (les 150 points font une courbe lisse)
+          return pts.map((p, i) =>
+            i === 0 ? `M ${p.x.toFixed(1)} ${p.y.toFixed(1)}` : `L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`
+          ).join(' ')
+        })()
+      : zoomedPoints.map((p, i) => {
+          const x = xFromElapsed(p.elapsedMs, windowMs)
+          const y = yZoomed(p.prob)
+          if (i === 0) return `M ${x.toFixed(1)} ${y.toFixed(1)}`
+          return `H ${x.toFixed(1)} V ${y.toFixed(1)}`
+        }).join(' ')
     : ''
 
   // Aire sous la courbe rouge
@@ -550,8 +689,8 @@ function Chart2({
     >
       <defs>
         <linearGradient id={`sg2-area-${uid}`} x1="0%" y1="0%" x2="0%" y2="100%">
-          <stop offset="0%"   stopColor="#ef4444" stopOpacity="0.15"/>
-          <stop offset="100%" stopColor="#ef4444" stopOpacity="0.01"/>
+          <stop offset="0%"   stopColor={lineColor} stopOpacity="0.15"/>
+          <stop offset="100%" stopColor={lineColor} stopOpacity="0.01"/>
         </linearGradient>
         <filter id={`sg2-glow-${uid}`}>
           <feGaussianBlur stdDeviation="2" result="b"/>
@@ -598,42 +737,42 @@ function Chart2({
       <text x={PAD.left + innerW() / 2} y={H - 4} textAnchor="middle"
         fontSize="10" fill="rgba(232,232,240,0.4)"
         fontFamily="Inter, system-ui, sans-serif" letterSpacing="0.08em">
-        TEMPS ÉCOULÉ DEPUIS LE DÉBUT
+        {t('stats.temps_ecoule')}
       </text>
       <text x={10} y={PAD.top + innerH() / 2} textAnchor="middle"
         fontSize="10" fill="rgba(232,232,240,0.4)"
         fontFamily="Inter, system-ui, sans-serif" letterSpacing="0.08em"
         transform={`rotate(-90, 10, ${PAD.top + innerH() / 2})`}>
-        PROBABILITÉ
+        {t('stats.probabilite_label')}
       </text>
 
       {/* Aire + courbe rouge */}
       {!loading && areaD && <path d={areaD} fill={`url(#sg2-area-${uid})`}/>}
       {!loading && pathD && (
-        <path d={pathD} fill="none" stroke="#ef4444" strokeWidth="2.5"
+        <path d={pathD} fill="none" stroke={lineColor} strokeWidth="2.5"
           strokeLinecap="round" strokeLinejoin="round"
           style={{ filter: `url(#sg2-glow-${uid})` }}/>
       )}
 
-      {/* Points de décision */}
+      {/* Points de décision (masqués en mode lisse) */}
       {/* Point initial */}
-            {!loading && zoomedPoints.length > 0 && (() => {
+            {!loading && !smooth && zoomedPoints.length > 0 && (() => {
               const first = zoomedPoints[0]
               const fx = xFromElapsed(first.elapsedMs, windowMs)
               const fy = yZoomed(first.prob)
               return (
                 <circle cx={fx} cy={fy} r={5}
-                  fill="#fca5a5" stroke="#020509" strokeWidth="2"
-                  style={{ filter: 'drop-shadow(0 0 4px rgba(239,68,68,0.8))' }}/>
+                  fill={dotColor} stroke="#020509" strokeWidth="2"
+                  style={{ filter: `drop-shadow(0 0 4px ${glowColor})` }}/>
               )
             })()}
-            {!loading && zoomedPoints.filter((_, i) => i > 0 && i < zoomedPoints.length - 1).map((hp, i) => {
+            {!loading && !smooth && zoomedPoints.filter((_, i) => i > 0 && i < zoomedPoints.length - 1).map((hp, i) => {
         const hx = xFromElapsed(hp.elapsedMs, windowMs)
         const hy = yZoomed(hp.prob)
         return (
           <circle key={i} cx={hx} cy={hy} r={5}
-            fill="#fca5a5" stroke="#020509" strokeWidth="2"
-            style={{ filter: 'drop-shadow(0 0 4px rgba(239,68,68,0.8))' }}/>
+            fill={dotColor} stroke="#020509" strokeWidth="2"
+            style={{ filter: `drop-shadow(0 0 4px ${glowColor})` }}/>
         )
       })}
 
@@ -644,15 +783,15 @@ function Chart2({
         const py   = yZoomed(last.prob)
         return (
           <g>
-            <circle cx={px} cy={py} r={7}
-              fill="#ef4444" stroke="#020509" strokeWidth="2"
-              style={{ filter: 'drop-shadow(0 0 8px rgba(239,68,68,0.9))' }}/>
-            <circle cx={px} cy={py} r={3} fill="#020509"/>
+            {!smooth && <circle cx={px} cy={py} r={7}
+              fill={lineColor} stroke="#020509" strokeWidth="2"
+              style={{ filter: `drop-shadow(0 0 8px ${glowColor})` }}/>}
+            {!smooth && <circle cx={px} cy={py} r={3} fill="#020509"/>}
             <text x={px} y={py - 13} textAnchor="middle"
-              fontSize="9" fill="rgba(248,113,113,0.9)"
+              fontSize="9" fill={smooth ? 'rgba(251,191,36,0.9)' : 'rgba(248,113,113,0.9)'}
               fontFamily="Inter, system-ui, sans-serif"
               fontWeight="600" letterSpacing="0.06em">
-              MAINTENANT
+              {t('stats.maintenant')}
             </text>
           </g>
         )
@@ -672,16 +811,16 @@ function Chart2({
             <circle cx={hover.x} cy={hover.y} r={4} fill="white" opacity={0.8}
               style={{ filter: 'drop-shadow(0 0 3px white)' }}/>
             <rect x={tipX} y={tipY} width={118} height={46} rx={6}
-              fill="#13131f" stroke="rgba(239,68,68,0.4)" strokeWidth="1"/>
+              fill="#13131f" stroke={smooth ? 'rgba(245,158,11,0.4)' : 'rgba(239,68,68,0.4)'} strokeWidth="1"/>
             <text x={tipX + 8} y={tipY + 15}
               fontSize="9" fill="rgba(232,232,240,0.5)"
               fontFamily="Inter, system-ui, sans-serif" letterSpacing="0.06em">
               T+{timeLabel}
             </text>
             <text x={tipX + 8} y={tipY + 31}
-              fontSize="12" fontWeight="700" fill="#f87171"
+              fontSize="12" fontWeight="700" fill={smooth ? '#fbbf24' : '#f87171'}
               fontFamily="Inter, system-ui, sans-serif">
-              {hover.prob.toFixed(1)} % de réussite
+              {hover.prob.toFixed(1)} % {t('stats.reussite')}
             </text>
           </g>
         )

@@ -27,6 +27,7 @@ from api.schemas import (
     OptionDilemmeOut,
 )
 from api.dependencies import get_profil_repo, get_decision_repo, get_agent
+from api.context_helper import format_device_context
 
 router = APIRouter(prefix="/api/dilemme", tags=["dilemme"])
 
@@ -100,6 +101,7 @@ async def analyser_dilemme(
                 data.question,
                 options_list,
                 impact_temporel_jours=data.impact_temporel_jours,
+                device_context=format_device_context(data.contexte_appareil),
             )
             out_options = []
             for i, (l, desc) in enumerate(zip(lettres, options_list)):
@@ -117,6 +119,7 @@ async def analyser_dilemme(
                 options=out_options,
                 verdict=analyse.verdict,
                 option_recommandee=analyse.option_recommandee,
+                etude_scientifique=getattr(analyse, 'etude_scientifique', ''),
             )
         except Exception as exc:
             raise HTTPException(
@@ -291,8 +294,9 @@ async def choisir_option(
             so_cible = await _identifier_so_pertinent(choix_desc, all_so)
             if so_cible is None:
                 so_cible = all_so[0]  # fallback: premier par ordre
+            total_te = sum(max(30, so["temps_estime"] or 180) for so in all_so)
             te = max(30, so_cible["temps_estime"] if so_cible["temps_estime"] else 180)
-            impact_so = abs(analyse_choisie.impact_probabilite) * (84.0 / te)  # choix: 30% du progres
+            impact_so = abs(analyse_choisie.impact_probabilite) * (total_te / te)  # amplifie: plus le SO est court, plus l'impact est grand
             new_prog = min(100, max(0, so_cible["progression"] + impact_so))
             db.conn.execute(
                 "UPDATE sous_objectifs SET progression = ? WHERE id = ?",

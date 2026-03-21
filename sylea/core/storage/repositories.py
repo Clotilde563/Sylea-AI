@@ -118,6 +118,44 @@ class DecisionRepository:
             )
             return cursor.rowcount > 0
 
+    def lister_pagine(
+        self, user_id: str, page: int = 1, par_page: int = 10,
+        tri: str = "recent", recherche: str | None = None,
+    ) -> List[Decision]:
+        """Liste paginee avec tri et recherche optionnelle."""
+        conditions = ["user_id = ?"]
+        params: list = [user_id]
+        if recherche:
+            conditions.append("question LIKE ?")
+            params.append(f"%{recherche}%")
+        where = " AND ".join(conditions)
+
+        order = {
+            "recent": "cree_le DESC",
+            "ancien": "cree_le ASC",
+            "impact": "ABS(COALESCE(probabilite_apres, probabilite_avant) - probabilite_avant) DESC",
+        }.get(tri, "cree_le DESC")
+
+        offset = (max(1, page) - 1) * par_page
+        params.extend([par_page, offset])
+        rows = self._db.conn.execute(
+            f"SELECT * FROM decisions WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
+            params,
+        ).fetchall()
+        return [Decision.from_dict(dict(r)) for r in rows]
+
+    def compter_filtre(self, user_id: str, recherche: str | None = None) -> int:
+        """Compte les decisions avec filtre optionnel."""
+        conditions = ["user_id = ?"]
+        params: list = [user_id]
+        if recherche:
+            conditions.append("question LIKE ?")
+            params.append(f"%{recherche}%")
+        where = " AND ".join(conditions)
+        return self._db.conn.execute(
+            f"SELECT COUNT(*) FROM decisions WHERE {where}", params
+        ).fetchone()[0]
+
     def effacer_decisions_utilisateur(self, user_id: str) -> None:
         """Supprime toutes les décisions d’un utilisateur."""
         with self._db.conn:

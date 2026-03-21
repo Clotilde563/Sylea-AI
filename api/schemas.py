@@ -11,6 +11,19 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
+# ── Contexte appareil (heure, geoloc, meteo) ─────────────────────────────────
+
+class DeviceContextIn(BaseModel):
+    heure: int = Field(0, ge=0, le=23)
+    minute: int = Field(0, ge=0, le=59)
+    fuseau_horaire: str = ""
+    latitude: float = 0.0
+    longitude: float = 0.0
+    ville: str = ""
+    temperature: float = 0.0
+    meteo: str = ""
+
+
 # ── Objectif ──────────────────────────────────────────────────────────────────
 
 class ObjectifIn(BaseModel):
@@ -33,6 +46,7 @@ class ObjectifOut(BaseModel):
 class ProfilIn(BaseModel):
     nom: str
     age: int = Field(ge=1)
+    genre: str = ""
     profession: str
     ville: str
     situation_familiale: str
@@ -72,6 +86,7 @@ class ProfilOut(BaseModel):
     id: str
     nom: str
     age: int
+    genre: str = ""
     profession: str
     ville: str
     situation_familiale: str
@@ -113,6 +128,7 @@ class DilemmeIn(BaseModel):
     option_a: Optional[str] = None
     option_b: Optional[str] = None
     impact_temporel_jours: Optional[int] = None
+    contexte_appareil: Optional[DeviceContextIn] = None
 
 
 class AnalyseOptionOut(BaseModel):
@@ -129,6 +145,7 @@ class AnalyseDilemmeOut(BaseModel):
     options: List[AnalyseOptionOut] = []
     verdict: str
     option_recommandee: str  # "A", "B", "C"...
+    etude_scientifique: str = ""
 
 
 class ChoixIn(BaseModel):
@@ -136,6 +153,7 @@ class ChoixIn(BaseModel):
     options: List[AnalyseOptionOut] = []
     choix: str
     impact_temporel_jours: Optional[int] = None  # "A", "B", "C"...
+    contexte_appareil: Optional[DeviceContextIn] = None
 
 
 # ── Decision (historique) ─────────────────────────────────────────────────────
@@ -200,6 +218,7 @@ class AgentRapportOut(BaseModel):
 
 class JourneeIn(BaseModel):
     description: str
+    contexte_appareil: Optional[DeviceContextIn] = None
 
 
 class BienEtreScoresOut(BaseModel):
@@ -214,6 +233,7 @@ class BienEtreScoresOut(BaseModel):
 
 class QuestionsObjectifIn(BaseModel):
     description: str
+    contexte_appareil: Optional[DeviceContextIn] = None
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -226,6 +246,7 @@ class HealthOut(BaseModel):
 
 class EvenementIn(BaseModel):
     description: str = Field(min_length=5)
+    contexte_appareil: Optional[DeviceContextIn] = None
 
 
 class AnalyseEvenementOut(BaseModel):
@@ -239,6 +260,7 @@ class ConfirmerEvenementIn(BaseModel):
     description: str
     impact_probabilite: float
     resume: str
+    contexte_appareil: Optional[DeviceContextIn] = None
 
 
 # -- Bilan quotidien -----------------------------------------------------------
@@ -334,6 +356,29 @@ class ServiceClientMessageIn(BaseModel):
 
 class ServiceClientChatIn(BaseModel):
     messages: list[ServiceClientMessageIn]
+    contexte_appareil: Optional[DeviceContextIn] = None
+
+
+class ProbabiliteIn(BaseModel):
+    contexte_appareil: Optional[DeviceContextIn] = None
+
+
+class GenererSousObjectifsIn(BaseModel):
+    contexte_appareil: Optional[DeviceContextIn] = None
+
+
+class GenererTachesIn(BaseModel):
+    contexte_appareil: Optional[DeviceContextIn] = None
 
 class ServiceClientChatOut(BaseModel):
     message: str
+
+
+# -- Historique pagine -------------------------------------------------------
+
+class HistoriquePagineOut(BaseModel):
+    decisions: List[DecisionOut]
+    total: int
+    page: int
+    par_page: int
+    pages_total: int

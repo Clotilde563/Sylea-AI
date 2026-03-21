@@ -385,6 +385,19 @@ input[type="range"]::-webkit-slider-thumb {
 .animate-fade-in { animation: fade-in 0.4s ease both; }
 .animate-fade-in-scale { animation: fade-in-scale 0.3s ease both; }
 
+/* ── Syléa shimmer link (Mes agents) ─────────────────────────────────── */
+
+@keyframes sylea-shimmer {
+  0%   { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+.sylea-shimmer-link:hover {
+  background: linear-gradient(135deg, rgba(59,130,246,0.1), rgba(139,92,246,0.1), rgba(239,68,68,0.1)) !important;
+  border-color: rgba(139,92,246,0.3) !important;
+  filter: drop-shadow(0 0 8px rgba(139,92,246,0.3));
+}
+
 /* ── Spinner ──────────────────────────────────────────────────────────────── */
 
 .spinner {

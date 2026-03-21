@@ -6,10 +6,12 @@ import { useStore } from '../store/useStore'
 import { api } from '../api/client'
 import type { Decision } from '../types'
 import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal'
+import { useT } from '../i18n/LanguageContext'
 
 export function HistoriquePage() {
+  const t = useT()
   const navigate = useNavigate()
-  const { profil, setProfil } = useStore()
+  const { profil, setProfil, refreshSousObjectifs } = useStore()
   const [decisions, setDecisions] = useState<Decision[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -25,8 +27,9 @@ export function HistoriquePage() {
       // Re-fetch profil pour obtenir probabilite_actuelle mise à jour
       const updatedProfil = await api.getProfil()
       setProfil(updatedProfil)
+      await refreshSousObjectifs()
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Erreur lors de la suppression')
+      setError(e instanceof Error ? e.message : 'Error')
     }
     setDeleteTarget(null)
   }
@@ -64,19 +67,19 @@ export function HistoriquePage() {
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '2rem' }}>
           <div>
             <h2 style={{ color: 'var(--accent-silver)', marginBottom: '0.375rem' }}>
-              Historique des décisions
+              {t('historique.titre')}
             </h2>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
               {decisions.length > 0
-                ? `${recentDecisions.length} décision${recentDecisions.length > 1 ? 's' : ''} récente${recentDecisions.length > 1 ? 's' : ''}${archivedDecisions.length > 0 ? ` · ${archivedDecisions.length} archivée${archivedDecisions.length > 1 ? 's' : ''}` : ''}`
-                : 'Aucune décision encore enregistrée'}
+                ? `${recentDecisions.length} ${recentDecisions.length > 1 ? t('historique.decisions') : t('historique.decision')} ${recentDecisions.length > 1 ? t('historique.recentes') : t('historique.recente')}${archivedDecisions.length > 0 ? ` · ${archivedDecisions.length} ${archivedDecisions.length > 1 ? t('historique.archivees') : t('historique.archivee')}` : ''}`
+                : t('historique.aucune_decision')}
             </p>
           </div>
           <button
             className="btn btn-primary btn-sm"
             onClick={() => navigate('/dilemme')}
           >
-            + Nouveau dilemme
+            {t('historique.nouveau_dilemme')}
           </button>
         </div>
 
@@ -84,7 +87,7 @@ export function HistoriquePage() {
         {loading && (
           <div className="loading-center">
             <div className="spinner" />
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>Chargement…</p>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>{t('common.chargement')}</p>
           </div>
         )}
 
@@ -103,13 +106,13 @@ export function HistoriquePage() {
           >
             <div style={{ fontSize: '2.5rem', marginBottom: '1rem', opacity: 0.4 }}>◈</div>
             <h3 style={{ color: 'var(--text-secondary)', marginBottom: '0.5rem', fontSize: '1rem' }}>
-              Aucune décision pour l'instant
+              {t('historique.aucune_pour_instant')}
             </h3>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginBottom: '1.5rem' }}>
-              Soumettez votre premier dilemme pour que Syléa.AI vous aide à décider.
+              {t('historique.soumettez_premier')}
             </p>
             <button className="btn btn-primary btn-sm" onClick={() => navigate('/dilemme')}>
-              Analyser un choix
+              {t('historique.analyser_choix')}
             </button>
           </div>
         )}
@@ -150,7 +153,7 @@ export function HistoriquePage() {
                       {/* Option choisie */}
                       {d.option_choisie_description && (
                         <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
-                          <span style={{ color: 'var(--text-muted)' }}>Choix : </span>
+                          <span style={{ color: 'var(--text-muted)' }}>{t('historique.choix_label')} </span>
                           {d.option_choisie_description}
                         </p>
                       )}
@@ -178,7 +181,7 @@ export function HistoriquePage() {
                       </span>
                       <button
                         onClick={() => setDeleteTarget(d.id)}
-                        title="Supprimer cette décision"
+                        title={t('historique.supprimer')}
                         style={{
                           background: 'none',
                           border: 'none',
@@ -219,7 +222,7 @@ export function HistoriquePage() {
                 transition: 'all 0.15s',
               }}
             >
-              {showArchived ? '▲ Masquer' : '▼ Afficher'} les {archivedDecisions.length} décision{archivedDecisions.length > 1 ? 's' : ''} archivée{archivedDecisions.length > 1 ? 's' : ''}
+              {showArchived ? `▲ ${t('historique.masquer')}` : `▼ ${t('historique.afficher')}`} {t('historique.les')} {archivedDecisions.length} {archivedDecisions.length > 1 ? t('historique.decisions') : t('historique.decision')} {archivedDecisions.length > 1 ? t('historique.archivees') : t('historique.archivee')}
             </button>
             {showArchived && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '0.75rem', opacity: 0.6 }}>
@@ -247,7 +250,7 @@ export function HistoriquePage() {
                           </span>
                           <button
                             onClick={() => setDeleteTarget(d.id)}
-                            title="Supprimer"
+                            title={t('historique.supprimer')}
                             style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '1rem', color: '#ef4444', opacity: 0.7 }}
                             onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
                             onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.7')}
@@ -281,17 +284,17 @@ export function HistoriquePage() {
             }}
           >
             <StatCard
-              label="Décisions prises"
+              label={t('stats.decisions_prises')}
               value={decisions.length.toString()}
               color="var(--accent-violet-light)"
             />
             <StatCard
-              label="Impact total"
+              label={t('historique.impact_total')}
               value={formatImpact(decisions.reduce((sum, d) => sum + (d.impact_net ?? 0), 0))}
               color={decisions.reduce((sum, d) => sum + (d.impact_net ?? 0), 0) >= 0 ? 'var(--success)' : 'var(--danger)'}
             />
             <StatCard
-              label="Décisions positives"
+              label={t('historique.decisions_positives')}
               value={`${decisions.filter((d) => (d.impact_net ?? 0) > 0).length}`}
               color="var(--success)"
             />

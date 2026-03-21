@@ -8,8 +8,10 @@ import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store/useStore'
 import { ConfirmProfilModal } from '../components/ConfirmProfilModal'
 import { api } from '../api/client'
+import { useDeviceContext } from '../contexts/DeviceContext'
 import type { ProfilIn } from '../types'
 import { SITUATIONS_FAMILIALES } from '../types'
+import { useT } from '../i18n/LanguageContext'
 
 type Step = 'identite' | 'questions' | 'bien-etre'
 
@@ -32,6 +34,8 @@ function scoreCol(s: number, invert = false): string {
 
 export function ProfilWizardPage() {
   const navigate  = useNavigate()
+  const t = useT()
+  const { ctx: deviceCtx } = useDeviceContext()
   const { profil, setProfil, setProbCalculee } = useStore()
 
   const [step,   setStep]   = useState<Step>('identite')
@@ -42,6 +46,7 @@ export function ProfilWizardPage() {
   // ── Identité ───────────────────────────────────────────────────────────────
   const [nom,        setNom]        = useState(() => profil?.nom        ?? '')
   const [age,        setAge]        = useState(() => profil ? String(profil.age) : '')
+  const [genre,      setGenre]      = useState(() => profil?.genre       ?? '')
   const [profession, setProfession] = useState(() => profil?.profession  ?? '')
   const [ville,      setVille]      = useState(() => profil?.ville       ?? '')
   const [sitFam,     setSitFam]     = useState(() => profil?.situation_familiale ?? '')
@@ -71,6 +76,7 @@ export function ProfilWizardPage() {
   const [questionsGenerees,   setQuestionsGenerees]   = useState<string[]>([])
   const [generatingQuestions, setGeneratingQuestions] = useState(false)
   const [reponses,            setReponses]            = useState<Record<number, string>>({})
+  const [questionsReadOnly,   setQuestionsReadOnly]   = useState(false)
   // Index de la question dont la saisie vocale est active (-1 = aucune)
   const [activeVoiceIdx, setActiveVoiceIdx] = useState<number>(-1)
 
@@ -163,7 +169,7 @@ export function ProfilWizardPage() {
   const goNext = async () => {
     if (step === 'identite') {
       if (!nom.trim() || !age || !profession.trim() || !objDesc.trim()) {
-        setError('Veuillez remplir les champs obligatoires (*).')
+        setError(t('common.obligatoires'))
         return
       }
       // Vérifier si l'objectif de vie a changé → confirmation
@@ -193,6 +199,8 @@ export function ProfilWizardPage() {
         const fullDesc = profil.objectif.description
         const sepIdx = fullDesc.indexOf('--- Contexte personnalisé ---')
         if (sepIdx >= 0) {
+          // Des réponses existent → les afficher en lecture seule
+          setQuestionsReadOnly(true)
           const contextPart = fullDesc.substring(sepIdx + '--- Contexte personnalisé ---'.length).trim()
           const qaPairs = contextPart.split('\n\nQ: ').filter(Boolean)
           const existingQuestions: string[] = []
@@ -209,15 +217,27 @@ export function ProfilWizardPage() {
           })
           setQuestionsGenerees(existingQuestions)
           setReponses(existingReponses)
+          setStep('questions')
         } else {
-          setQuestionsGenerees([])
+          // Pas de contexte personnalisé → générer les questions (modifiables)
+          setQuestionsReadOnly(false)
+          setGeneratingQuestions(true)
+          try {
+            const questions = await api.genererQuestions(objDesc.trim(), deviceCtx ?? undefined)
+            setQuestionsGenerees(questions)
+            setReponses({})
+          } catch {
+            setQuestionsGenerees([])
+          }
+          setGeneratingQuestions(false)
+          setStep('questions')
         }
-        setStep('questions')
       } else {
         // Objectif modifié ou nouveau profil : générer de nouvelles questions
+        setQuestionsReadOnly(false)
         setGeneratingQuestions(true)
         try {
-          const questions = await api.genererQuestions(objDesc.trim())
+          const questions = await api.genererQuestions(objDesc.trim(), deviceCtx ?? undefined)
           setQuestionsGenerees(questions)
           setReponses({})  // Reset des réponses pour les nouvelles questions
         } catch {
@@ -243,7 +263,7 @@ export function ProfilWizardPage() {
     if (!descJournee.trim()) return
     setAnalysing(true)
     try {
-      const scores = await api.analyserJournee(descJournee)
+      const scores = await api.analyserJournee(descJournee, deviceCtx ?? undefined)
       setSante(scores.niveau_sante)
       setStress(scores.niveau_stress)
       setEnergie(scores.niveau_energie)
@@ -287,6 +307,7 @@ export function ProfilWizardPage() {
       const data: ProfilIn = {
         nom:                 nom.trim(),
         age:                 parseInt(age),
+        genre:               genre,
         profession:          profession.trim(),
         ville:               ville.trim(),
         situation_familiale: sitFam,
@@ -319,7 +340,7 @@ export function ProfilWizardPage() {
       setProfil(saved)
       if (resetHistorique) setProbCalculee(false)  // Force recalcul apres reset
       try {
-        await api.recalculerProbabilite()
+        await api.recalculerProbabilite(deviceCtx ?? undefined)
         const updated = await api.getProfil()
         setProfil(updated)
       } catch { /* si IA indisponible */ }
@@ -333,9 +354,9 @@ export function ProfilWizardPage() {
 
   // ── Indicateur d'étapes ────────────────────────────────────────────────────
   const STEPS: { key: Step; label: string; n: number }[] = [
-    { key: 'identite',  label: 'Identité',  n: 1 },
-    { key: 'questions', label: 'Questions', n: 2 },
-    { key: 'bien-etre', label: 'Bien-être', n: 3 },
+    { key: 'identite',  label: t('profil.step_identite'),  n: 1 },
+    { key: 'questions', label: t('profil.step_questions'), n: 2 },
+    { key: 'bien-etre', label: t('profil.step_bienetre'), n: 3 },
   ]
   const currentIdx = STEPS.findIndex(s => s.key === step)
 
@@ -360,16 +381,16 @@ export function ProfilWizardPage() {
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
-          Retour au tableau de bord
+          {t('common.retour_dashboard').replace('← ', '')}
         </button>
 
         {/* En-tête */}
         <div style={{ marginBottom: '2rem' }}>
           <h2 style={{ color: 'var(--accent-silver)', marginBottom: '0.375rem' }}>
-            {profil ? 'Modifier mon profil' : 'Créer mon profil'}
+            {profil ? t('profil.modifier_profil') : t('profil.creer_profil')}
           </h2>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-            Syléa.AI analyse votre situation pour calculer votre probabilité de réussite.
+            {t('profil.analyse_description')}
           </p>
         </div>
 
@@ -426,30 +447,38 @@ export function ProfilWizardPage() {
               {/* Informations personnelles */}
               <div>
                 <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-violet-light)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '1rem' }}>
-                  ◈ Informations personnelles
+                  ◈ {t('profil.infos_personnelles')}
                 </p>
+                <div className="input-group" style={{ marginBottom: '1rem' }}>
+                  <label className="input-label">{t('settings.genre')} <span style={{ color: 'var(--accent-gold)' }}>*</span></label>
+                  <select className="input" value={genre} onChange={e => setGenre(e.target.value)}>
+                    <option value="">{t('common.selectionner')}</option>
+                    <option value="Homme">{t('common.homme')}</option>
+                    <option value="Femme">{t('common.femme')}</option>
+                  </select>
+                </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                   <div className="input-group">
-                    <label className="input-label">Nom complet <span style={{ color: 'var(--accent-gold)' }}>*</span></label>
+                    <label className="input-label">{t('profil.nom_complet')} <span style={{ color: 'var(--accent-gold)' }}>*</span></label>
                     <input className="input" value={nom} onChange={e => setNom(e.target.value)} placeholder="Marie Dupont" />
                   </div>
                   <div className="input-group">
-                    <label className="input-label">Âge <span style={{ color: 'var(--accent-gold)' }}>*</span></label>
+                    <label className="input-label">{t('settings.age')} <span style={{ color: 'var(--accent-gold)' }}>*</span></label>
                     <input className="input" type="number" min="1" max="120" value={age} onChange={e => setAge(e.target.value)} placeholder="35" />
                   </div>
                   <div className="input-group">
-                    <label className="input-label">Profession <span style={{ color: 'var(--accent-gold)' }}>*</span></label>
+                    <label className="input-label">{t('settings.profession')} <span style={{ color: 'var(--accent-gold)' }}>*</span></label>
                     <input className="input" value={profession} onChange={e => setProfession(e.target.value)} placeholder="Ingénieure logiciel" />
                   </div>
                   <div className="input-group">
-                    <label className="input-label">Ville</label>
+                    <label className="input-label">{t('settings.ville')}</label>
                     <input className="input" value={ville} onChange={e => setVille(e.target.value)} placeholder="Paris" />
                   </div>
                 </div>
                 <div className="input-group" style={{ marginTop: '1rem' }}>
-                  <label className="input-label">Situation familiale <span style={{ color: 'var(--accent-gold)' }}>*</span></label>
+                  <label className="input-label">{t('settings.situation')} <span style={{ color: 'var(--accent-gold)' }}>*</span></label>
                   <select className="input" value={sitFam} onChange={e => setSitFam(e.target.value)}>
-                    <option value="">— Sélectionner —</option>
+                    <option value="">{t('common.selectionner')}</option>
                     {SITUATIONS_FAMILIALES.map(s => <option key={s} value={s}>{s}</option>)}
                   </select>
                 </div>
@@ -458,11 +487,11 @@ export function ProfilWizardPage() {
               {/* Objectif de vie */}
               <div>
                 <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-gold)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '1rem' }}>
-                  ◈ Votre objectif de vie
+                  ◈ {t('profil.objectif_vie')}
                 </p>
                 <div className="input-group">
                   <label className="input-label">
-                    Description <span style={{ color: 'var(--accent-gold)' }}>*</span>
+                    {t('profil.description_objectif')} <span style={{ color: 'var(--accent-gold)' }}>*</span>
                   </label>
                   <textarea
                     className="input"
@@ -473,19 +502,19 @@ export function ProfilWizardPage() {
                   />
                 </div>
                 <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem', lineHeight: '1.5' }}>
-                  ✦ Syléa.AI génèrera des questions personnalisées basées sur votre objectif à l'étape suivante.
+                  {t('profil.sylea_genere_questions')}
                 </p>
               </div>
 
               {/* Compétences & formation */}
               <div>
                 <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '1rem' }}>
-                  ◈ Compétences & formation (optionnel)
+                  ◈ {t('profil.competences_formation')}
                 </p>
                 {[
-                  { label: 'Compétences', list: competences, setList: setCompetences, input: compInput, setInput: setCompInput, ph: 'Ex: Python, leadership…' },
-                  { label: 'Diplômes',    list: diplomes,    setList: setDiplomes,    input: diplInput, setInput: setDiplInput, ph: 'Ex: Master Finance…' },
-                  { label: 'Langues',     list: langues,     setList: setLangues,     input: langInput, setInput: setLangInput, ph: 'Ex: Anglais C1…' },
+                  { label: t('profil.competences_label'), list: competences, setList: setCompetences, input: compInput, setInput: setCompInput, ph: 'Ex: Python, leadership…' },
+                  { label: t('profil.diplomes_label'),    list: diplomes,    setList: setDiplomes,    input: diplInput, setInput: setDiplInput, ph: 'Ex: Master Finance…' },
+                  { label: t('profil.langues_label'),     list: langues,     setList: setLangues,     input: langInput, setInput: setLangInput, ph: 'Ex: Anglais C1…' },
                 ].map(({ label, list, setList, input, setInput, ph }) => (
                   <div className="input-group" key={label}>
                     <label className="input-label">{label}</label>
@@ -533,10 +562,10 @@ export function ProfilWizardPage() {
                           border: '2px solid rgba(255,255,255,0.3)', borderTop: '2px solid white',
                           animation: 'spin 0.7s linear infinite', display: 'inline-block',
                         }} />
-                        Génération des questions…
+                        {t('profil.generation_questions')}
                       </span>
                     )
-                    : 'Étape suivante →'
+                    : t('common.suivant')
                   }
                 </button>
               </div>
@@ -551,16 +580,29 @@ export function ProfilWizardPage() {
 
               <div>
                 <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-violet-light)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.5rem' }}>
-                  ◈ Questions sur votre objectif
+                  ◈ {t('profil.questions_objectif')}
                 </p>
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', lineHeight: '1.5' }}>
-                  Ces questions ont été générées par Syléa.AI spécifiquement pour votre objectif. Répondez librement, par écrit ou à voix haute.
+                  {questionsReadOnly
+                    ? t('profil.questions_readonly')
+                    : t('profil.questions_desc')}
                 </p>
+                {questionsReadOnly && (
+                  <div style={{
+                    display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+                    padding: '0.3rem 0.75rem', borderRadius: '999px', fontSize: '0.7rem', fontWeight: 600,
+                    background: 'rgba(59,130,246,0.1)', color: '#60a5fa', border: '1px solid rgba(59,130,246,0.2)',
+                    marginTop: '0.25rem',
+                  }}>
+                    <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><rect x={3} y={11} width={18} height={11} rx={2}/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                    {t('profil.lecture_seule')}
+                  </div>
+                )}
               </div>
 
               {questionsGenerees.length === 0 ? (
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', fontStyle: 'italic', textAlign: 'center', padding: '1.5rem 0' }}>
-                  Aucune question générée. Vous pouvez passer directement à l'étape suivante.
+                  {t('profil.aucune_question')}
                 </p>
               ) : (
                 questionsGenerees.map((q, i) => {
@@ -583,15 +625,22 @@ export function ProfilWizardPage() {
                           className="input"
                           rows={2}
                           value={reponses[i] ?? ''}
-                          onChange={e => setReponses(prev => ({ ...prev, [i]: e.target.value }))}
-                          placeholder="Votre réponse…"
-                          style={{ flex: 1, resize: 'vertical' }}
+                          onChange={e => { if (!questionsReadOnly) setReponses(prev => ({ ...prev, [i]: e.target.value })) }}
+                          readOnly={questionsReadOnly}
+                          placeholder={t('profil.votre_reponse')}
+                          style={{
+                            flex: 1, resize: questionsReadOnly ? 'none' : 'vertical',
+                            opacity: questionsReadOnly ? 0.7 : 1,
+                            cursor: questionsReadOnly ? 'default' : undefined,
+                            background: questionsReadOnly ? 'rgba(255,255,255,0.02)' : undefined,
+                          }}
                         />
+                        {!questionsReadOnly && (
                         <button
                           type="button"
                           onClick={() => startVoiceQuestion(i)}
                           disabled={activeVoiceIdx !== -1 && !isListening}
-                          title={isListening ? 'Écoute en cours…' : 'Répondre à voix haute'}
+                          title={isListening ? t('profil.ecoute_cours') : t('profil.repondre_voix')}
                           style={{
                             flexShrink: 0,
                             width: '36px',
@@ -612,6 +661,7 @@ export function ProfilWizardPage() {
                         >
                           🎤
                         </button>
+                        )}
                       </div>
                       {isListening && (
                         <p style={{
@@ -628,7 +678,7 @@ export function ProfilWizardPage() {
                             animation: 'pulse 0.8s ease-in-out infinite',
                             display: 'inline-block',
                           }} />
-                          Écoute en cours…
+                          {t('profil.ecoute_cours')}
                         </p>
                       )}
                     </div>
@@ -643,8 +693,8 @@ export function ProfilWizardPage() {
               )}
 
               <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.5rem' }}>
-                <button className="btn btn-outline" onClick={goPrev}>← Précédent</button>
-                <button className="btn btn-primary" onClick={goNext}>Étape suivante →</button>
+                <button className="btn btn-outline" onClick={goPrev}>{t('common.precedent')}</button>
+                <button className="btn btn-primary" onClick={goNext}>{t('common.suivant')}</button>
               </div>
             </div>
           </div>
@@ -658,14 +708,14 @@ export function ProfilWizardPage() {
               {/* Auto-évaluations */}
               <div>
                 <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-violet-light)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '1.25rem' }}>
-                  ◈ Auto-évaluations (1 – 10)
+                  ◈ {t('profil.auto_evaluations')}
                 </p>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
                   {[
-                    { label: 'Santé physique',      val: sante,   set: setSante,   invert: false, lo: 'Mauvaise',      hi: 'Excellente' },
-                    { label: 'Niveau de stress',     val: stress,  set: setStress,  invert: true,  lo: 'Très calme',    hi: 'Très stressé' },
-                    { label: 'Énergie quotidienne',  val: energie, set: setEnergie, invert: false, lo: 'Épuisé(e)',     hi: "Plein d'énergie" },
-                    { label: 'Bonheur général',      val: bonheur, set: setBonheur, invert: false, lo: 'Très triste',   hi: 'Très heureux/se' },
+                    { label: t('profil.sante_physique'),      val: sante,   set: setSante,   invert: false, lo: t('profil.mauvaise'),      hi: t('profil.excellente') },
+                    { label: t('profil.niveau_stress'),     val: stress,  set: setStress,  invert: true,  lo: t('profil.tres_calme'),    hi: t('profil.tres_stresse') },
+                    { label: t('profil.energie_quotidienne'),  val: energie, set: setEnergie, invert: false, lo: t('profil.epuise'),     hi: t('profil.plein_energie') },
+                    { label: t('profil.bonheur_general'),      val: bonheur, set: setBonheur, invert: false, lo: t('profil.tres_triste'),   hi: t('profil.tres_heureux') },
                   ].map(({ label, val, set, invert, lo, hi }) => (
                     <div key={label}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
@@ -690,15 +740,15 @@ export function ProfilWizardPage() {
               {/* Temps quotidien */}
               <div>
                 <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-gold)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '1.25rem' }}>
-                  ◈ Temps quotidien
+                  ◈ {t('profil.temps_quotidien')}
                 </p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1.1rem' }}>
                   {[
-                    { label: 'Travail',                 val: hTravail,   set: setHTravail,   min: 0, max: 16, step: 0.5, gold: false },
-                    { label: 'Sommeil',                 val: hSommeil,   set: setHSommeil,   min: 3, max: 12, step: 0.5, gold: false },
-                    { label: 'Loisirs',                 val: hLoisirs,   set: setHLoisirs,   min: 0, max: 8,  step: 0.5, gold: false },
-                    { label: 'Transport',               val: hTransport, set: setHTransport, min: 0, max: 6,  step: 0.5, gold: false },
-                    { label: 'Consacré à mon objectif', val: hObjectif,  set: setHObjectif,  min: 0, max: 8,  step: 0.5, gold: true  },
+                    { label: t('profil.travail'),                 val: hTravail,   set: setHTravail,   min: 0, max: 16, step: 0.5, gold: false },
+                    { label: t('profil.sommeil'),                 val: hSommeil,   set: setHSommeil,   min: 3, max: 12, step: 0.5, gold: false },
+                    { label: t('profil.loisirs'),                 val: hLoisirs,   set: setHLoisirs,   min: 0, max: 8,  step: 0.5, gold: false },
+                    { label: t('profil.transport'),               val: hTransport, set: setHTransport, min: 0, max: 6,  step: 0.5, gold: false },
+                    { label: t('profil.consacre_objectif'), val: hObjectif,  set: setHObjectif,  min: 0, max: 8,  step: 0.5, gold: true  },
                   ].map(({ label, val, set, min, max, step, gold }) => (
                     <div key={label}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.375rem' }}>
@@ -722,10 +772,10 @@ export function ProfilWizardPage() {
               {/* Journée type */}
               <div>
                 <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.625rem' }}>
-                  ◈ Racontez votre journée type (optionnel)
+                  ◈ {t('profil.racontez_journee')}
                 </p>
                 <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '0.75rem', lineHeight: '1.5' }}>
-                  Décrivez librement votre journée — Syléa.AI analysera votre texte et remplira automatiquement les scores ci-dessus.
+                  {t('profil.decrivez_journee')}
                 </p>
                 <textarea
                   className="input" rows={4}
@@ -739,14 +789,14 @@ export function ProfilWizardPage() {
                     onClick={startVoiceJournee} disabled={voiceActive}
                     title="Saisie vocale (français)" style={{ minWidth: '7.5rem' }}
                   >
-                    {voiceActive ? '⏺ Écoute…' : '🎤 Vocal'}
+                    {voiceActive ? t('profil.vocal_ecoute') : t('profil.vocal_btn')}
                   </button>
                   <button
                     type="button" className="btn btn-outline btn-sm"
                     onClick={analyserJournee} disabled={!descJournee.trim() || analysing}
                     style={{ minWidth: '13rem' }}
                   >
-                    {analysing ? 'Analyse en cours…' : "⟡ Analyser avec l'IA"}
+                    {analysing ? t('profil.analyse_cours_profil') : t('profil.analyser_ia')}
                   </button>
                 </div>
                 {voiceError && (
@@ -759,9 +809,9 @@ export function ProfilWizardPage() {
               {error && <p style={{ color: 'var(--danger)', fontSize: '0.875rem' }}>⚠ {error}</p>}
 
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <button className="btn btn-outline" onClick={goPrev}>← Précédent</button>
+                <button className="btn btn-outline" onClick={goPrev}>{t('common.precedent')}</button>
                 <button className="btn btn-gold" onClick={handleSubmit} disabled={saving}>
-                  {saving ? 'Enregistrement…' : profil ? '✓ Mettre à jour' : '✓ Créer mon profil'}
+                  {saving ? t('profil.enregistrement') : profil ? t('profil.mettre_a_jour') : t('profil.creer_mon_profil_btn')}
                 </button>
               </div>
             </div>
@@ -780,14 +830,13 @@ export function ProfilWizardPage() {
       }}>
         <div className="card" style={{ maxWidth: 420, padding: '2rem', textAlign: 'center' }}>
           <div style={{ fontSize: '2.5rem', marginBottom: '0.75rem' }}>⚠️</div>
-          <h3 style={{ marginBottom: '0.75rem' }}>Objectif de vie modifié</h3>
+          <h3 style={{ marginBottom: '0.75rem' }}>{t('profil.objectif_modifie')}</h3>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', lineHeight: 1.6 }}>
-            Votre historique de <span style={{ color: '#ef4444' }}>décisions, sous-objectifs et tâches</span> sera
-            réinitialisé. Voulez-vous continuer ?
+            Votre historique de <span style={{ color: '#ef4444' }}>{t('profil.objectif_modifie_desc')}</span> {t('profil.objectif_modifie_msg')}
           </p>
           <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.25rem' }}>
-            <button className="btn" style={{ flex: 1 }} onClick={() => setShowObjectifWarning(false)}>Annuler</button>
-            <button className="btn btn-primary" style={{ flex: 1 }} onClick={() => goNext()}>Continuer</button>
+            <button className="btn" style={{ flex: 1 }} onClick={() => setShowObjectifWarning(false)}>{t('common.annuler')}</button>
+            <button className="btn btn-primary" style={{ flex: 1 }} onClick={() => goNext()}>{t('profil.continuer')}</button>
           </div>
         </div>
       </div>

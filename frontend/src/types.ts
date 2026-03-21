@@ -1,5 +1,16 @@
 // Types TypeScript miroir des schémas Pydantic de l'API Syléa.AI
 
+export interface DeviceContext {
+  heure: number
+  minute: number
+  fuseau_horaire: string
+  latitude: number
+  longitude: number
+  ville: string
+  temperature: number
+  meteo: string
+}
+
 export interface Objectif {
   description: string
   categorie: string
@@ -12,6 +23,7 @@ export interface Profil {
   id: string
   nom: string
   age: number
+  genre: string
   profession: string
   ville: string
   situation_familiale: string
@@ -41,6 +53,7 @@ export interface Profil {
 export interface ProfilIn {
   nom: string
   age: number
+  genre?: string
   profession: string
   ville: string
   situation_familiale: string
@@ -82,6 +95,7 @@ export interface AnalyseDilemme {
   options: { lettre: string; description: string; pros: string[]; cons: string[]; impact_probabilite: number; resume: string }[]
   verdict: string
   option_recommandee: string  // "A", "B", "C"...
+  etude_scientifique?: string
 }
 
 export interface OptionDilemme {

@@ -100,6 +100,7 @@ class ProfilUtilisateur:
     patrimoine_estime: float
     charges_mensuelles: float
     objectif_financier: Optional[float] = None
+    genre: str = ""
 
     # ── Temps quotidien (heures/jour) ───────────────────────────────────────
     heures_travail: float = 8.0
@@ -158,6 +159,7 @@ class ProfilUtilisateur:
             "id": self.id,
             "nom": self.nom,
             "age": self.age,
+            "genre": self.genre,
             "profession": self.profession,
             "ville": self.ville,
             "situation_familiale": self.situation_familiale,
@@ -216,6 +218,7 @@ class ProfilUtilisateur:
         profil = cls(
             nom=data["nom"],
             age=int(data["age"]),
+            genre=data.get("genre", ""),
             profession=data["profession"],
             ville=data["ville"],
             situation_familiale=data["situation_familiale"],

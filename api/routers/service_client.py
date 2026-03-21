@@ -10,6 +10,7 @@ import os
 
 from fastapi import APIRouter, HTTPException
 from api.schemas import ServiceClientChatIn, ServiceClientChatOut
+from api.context_helper import format_device_context
 
 router = APIRouter(prefix="/api/service-client", tags=["service-client"])
 
@@ -22,11 +23,12 @@ _CHATBOT_SYSTEM_PROMPT = """Tu es l'assistant du Service Client de SYLEA.AI, une
 - Donner des instructions etape par etape quand necessaire
 
 ## REGLES STRICTES
-1. Tu ne reponds QU'aux questions sur l'application SYLEA.AI
-2. Si la question n'a AUCUN rapport avec l'application, reponds poliment : "Je suis le Service Sylea, je ne peux repondre qu'aux questions concernant l'application SYLEA.AI. Comment puis-je vous aider avec l'application ?"
-3. Tu ne reveles JAMAIS les details techniques internes (code source, formules de calcul, architecture, base de donnees, modeles IA utilises)
-4. Si on te demande comment fonctionne le calcul de probabilite en interne, reponds que c'est un algorithme proprietaire sans donner de details
-5. Tes reponses font maximum 3-4 phrases, sauf pour les guides etape par etape
+1. Tu reponds aux questions sur l'application SYLEA.AI et son fonctionnement global
+2. Si la question n'a AUCUN rapport avec l'application ou l'aide a la decision, reponds poliment : "Je suis le Service Sylea, je ne peux repondre qu'aux questions concernant l'application SYLEA.AI. Comment puis-je vous aider avec l'application ?"
+3. Quand on te demande la technologie, le fonctionnement ou les methodes utilisees, tu peux repondre dans les grandes lignes de facon valorisante pour le produit. Par exemple : "SYLEA.AI utilise l'intelligence artificielle avancee pour analyser vos choix de vie et mesurer leur impact reel sur vos objectifs", sans entrer dans les details techniques internes (pas de code source, formules exactes, noms de modeles IA, architecture technique)
+4. Tu adoptes un ton enthousiaste et valorisant : tu vends le produit. Mets en avant la puissance de l'IA, la precision de l'analyse, l'accompagnement personnalise
+5. Pour les questions d'aide et d'utilisation, donne des reponses claires, concretes et utiles avec des instructions etape par etape si necessaire
+6. Tes reponses font maximum 3-4 phrases, sauf pour les guides etape par etape
 
 ## FONCTIONNALITES DE L'APPLICATION
 
@@ -102,11 +104,13 @@ async def service_client_chat(data: ServiceClientChatIn):
             for m in data.messages
         ]
 
+        system_prompt = _CHATBOT_SYSTEM_PROMPT + format_device_context(data.contexte_appareil)
+
         response = await asyncio.to_thread(
             lambda: client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=500,
-                system=_CHATBOT_SYSTEM_PROMPT,
+                system=system_prompt,
                 messages=api_messages,
             )
         )

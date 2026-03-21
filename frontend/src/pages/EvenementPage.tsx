@@ -5,13 +5,17 @@ import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store/useStore'
 import { api } from '../api/client'
 import { deltaFromImpact } from '../utils/duration'
+import { useT } from '../i18n/LanguageContext'
+import { useDeviceContext } from '../contexts/DeviceContext'
 import type { AnalyseEvenement } from '../types'
 
 type Phase = 'form' | 'loading' | 'result' | 'done'
 
 export function EvenementPage() {
   const navigate = useNavigate()
-  const { profil, setProfil } = useStore()
+  const t = useT()
+  const { ctx: deviceCtx } = useDeviceContext()
+  const { profil, setProfil, refreshSousObjectifs } = useStore()
 
   const [phase, setPhase]         = useState<Phase>('form')
   const [description, setDescription] = useState('')
@@ -33,7 +37,7 @@ export function EvenementPage() {
   const toggleVoice = useCallback(() => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     if (!SR) {
-      setError('La reconnaissance vocale n\'est pas disponible sur ce navigateur.')
+      setError(t('evenement.vocal_indisponible'))
       return
     }
 
@@ -64,17 +68,17 @@ export function EvenementPage() {
   // -- Handlers -------------------------------------------------------------
   const handleAnalyser = async () => {
     if (!description.trim() || description.trim().length < 5) {
-      setError('Veuillez décrire l\'événement (minimum 5 caractères).')
+      setError(t('evenement.min_caracteres'))
       return
     }
     setError(null)
     setPhase('loading')
     try {
-      const result = await api.analyserEvenement(description.trim())
+      const result = await api.analyserEvenement(description.trim(), deviceCtx ?? undefined)
       setAnalyse(result)
       setPhase('result')
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Erreur lors de l\'analyse')
+      setError(e instanceof Error ? e.message : t('evenement.erreur_analyse'))
       setPhase('form')
     }
   }
@@ -88,15 +92,17 @@ export function EvenementPage() {
         description: description.trim(),
         impact_probabilite: analyse.impact_probabilite,
         resume: analyse.resume,
+        contexte_appareil: deviceCtx ?? undefined,
       })
       if (confirmResult?.sous_objectif_impacte) {
         setSousObjectifImpacte(confirmResult.sous_objectif_impacte)
       }
       const updated = await api.getProfil()
       setProfil(updated)
+      await refreshSousObjectifs()
       setPhase('done')
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Erreur lors de l\'enregistrement')
+      setError(e instanceof Error ? e.message : t('evenement.erreur_enregistrement'))
     } finally {
       setSubmitting(false)
     }
@@ -115,7 +121,7 @@ export function EvenementPage() {
     return (
       <div className="page">
         <div className="container page-content" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '1rem' }}>
-          <p style={{ color: 'var(--text-muted)' }}>Chargement du profil...</p>
+          <p style={{ color: 'var(--text-muted)' }}>{t('evenement.chargement_profil')}</p>
           <div className="spinner" />
         </div>
       </div>
@@ -133,10 +139,10 @@ export function EvenementPage() {
         {/* En-tête */}
         <div style={{ marginBottom: '2rem' }}>
           <h2 style={{ color: 'var(--accent-silver)', marginBottom: '0.375rem' }}>
-            Enregistrer un événement
+            {t('evenement.titre')}
           </h2>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-            Décrivez un événement récent — Syléa.AI analyse son impact sur votre objectif de vie.
+            {t('evenement.subtitle')}
           </p>
         </div>
 
@@ -147,7 +153,7 @@ export function EvenementPage() {
               <div className="input-group">
                 <label className="input-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <span>
-                    Décrivez l'événement <span style={{ color: 'var(--accent-gold)' }}>*</span>
+                    {t('evenement.description_label')} <span style={{ color: 'var(--accent-gold)' }}>*</span>
                   </span>
                   <button
                     type="button"
@@ -173,10 +179,10 @@ export function EvenementPage() {
                     {isListening ? (
                       <>
                         <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'white', animation: 'pulse 1s infinite' }} />
-                        Arrêter
+                        {t('evenement.arreter')}
                       </>
                     ) : (
-                      <>◎ Dicter</>
+                      <>{t('evenement.dicter')}</>
                     )}
                   </button>
                 </label>
@@ -185,7 +191,7 @@ export function EvenementPage() {
                   rows={4}
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
-                  placeholder="Ex: J'ai obtenu une promotion au travail avec une augmentation de 15%"
+                  placeholder={t('evenement.description_placeholder')}
                   style={{ resize: 'vertical' }}
                 />
               </div>
@@ -199,7 +205,7 @@ export function EvenementPage() {
                 onClick={handleAnalyser}
                 disabled={!description.trim() || description.trim().length < 5}
               >
-                ⟡ Analyser l'impact
+                {t('evenement.analyser')}
               </button>
             </div>
           </div>
@@ -220,10 +226,10 @@ export function EvenementPage() {
             />
             <div style={{ textAlign: 'center' }}>
               <p style={{ color: 'var(--accent-silver)', fontWeight: 600, marginBottom: '0.375rem' }}>
-                Syléa.AI analyse votre événement…
+                {t('evenement.analyse_cours')}
               </p>
               <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>
-                Calcul de l'impact sur votre objectif de vie
+                {t('evenement.calcul_impact')}
               </p>
             </div>
           </div>
@@ -256,7 +262,7 @@ export function EvenementPage() {
                 </div>
                 <div>
                   <p style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                    Impact en temps
+                    {t('evenement.impact_temps')}
                   </p>
                   <p style={{
                     fontSize: '0.85rem',
@@ -286,14 +292,14 @@ export function EvenementPage() {
             {/* Actions */}
             <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
               <button className="btn btn-outline" onClick={handleReset}>
-                ← Nouvel événement
+                {t('evenement.nouvel_evenement')}
               </button>
               <button
                 className="btn btn-gold"
                 onClick={handleConfirmer}
                 disabled={submitting}
               >
-                {submitting ? 'Enregistrement…' : '✓ Confirmer l\'événement'}
+                {submitting ? t('evenement.enregistrement') : t('evenement.confirmer_evenement')}
               </button>
             </div>
           </div>
@@ -313,22 +319,22 @@ export function EvenementPage() {
             }}
           >
             <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>✓</div>
-            <h3 style={{ color: 'var(--success)', marginBottom: '0.75rem' }}>Événement enregistré !</h3>
+            <h3 style={{ color: 'var(--success)', marginBottom: '0.75rem' }}>{t('evenement.evenement_enregistre')}</h3>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1rem', lineHeight: '1.5' }}>
-              Votre événement a été sauvegardé et votre probabilité de réussite a été mise à jour.
+              {t('evenement.evenement_sauvegarde')}
             </p>
             {sousObjectifImpacte && (
               <div style={{ background: 'rgba(96,165,250,0.08)', border: '1px solid rgba(96,165,250,0.25)', borderRadius: 'var(--radius-md)', padding: '0.6rem 1rem', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <span style={{ color: '#60a5fa', fontSize: '0.8rem' }}>{'↳'}</span>
-                <span style={{ color: '#93c5fd', fontSize: '0.82rem' }}>Sous-objectif impacté : <strong>{sousObjectifImpacte}</strong></span>
+                <span style={{ color: '#93c5fd', fontSize: '0.82rem' }}>{t('evenement.sous_objectif_impacte')} <strong>{sousObjectifImpacte}</strong></span>
               </div>
             )}
             <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
               <button className="btn btn-outline btn-sm" onClick={handleReset}>
-                Nouvel événement
+                {t('evenement.nouvel_evenement')}
               </button>
               <button className="btn btn-primary btn-sm" onClick={() => navigate('/')}>
-                Tableau de bord
+                {t('evenement.tableau_bord')}
               </button>
             </div>
           </div>

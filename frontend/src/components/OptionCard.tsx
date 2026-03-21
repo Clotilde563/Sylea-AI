@@ -12,6 +12,8 @@ interface OptionCardProps {
   onSelect?:     () => void
   /** Probabilité actuelle du profil — nécessaire pour calculer le delta de durée */
   probActuelle?: number
+  /** Plafond temporel en jours — le gain/perte affiché ne peut pas dépasser cette valeur */
+  impactTemporelJours?: number
 }
 
 export function OptionCard({
@@ -21,13 +23,15 @@ export function OptionCard({
   selected,
   onSelect,
   probActuelle,
+  impactTemporelJours,
 }: OptionCardProps) {
   const impactPos = option.impact_probabilite >= 0
 
   // Affichage : durée si probActuelle fournie, sinon % en fallback
+  // Plafonné par impactTemporelJours si fourni
   const impactLabel =
     probActuelle !== undefined
-      ? deltaFromImpact(probActuelle, option.impact_probabilite)
+      ? deltaFromImpact(probActuelle, option.impact_probabilite, impactTemporelJours)
       : `${impactPos ? '+' : ''}${option.impact_probabilite.toFixed(3)}%`
 
   return (

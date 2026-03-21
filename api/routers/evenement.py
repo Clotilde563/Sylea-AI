@@ -27,6 +27,7 @@ from api.schemas import (
     OptionDilemmeOut,
 )
 from api.dependencies import get_profil_repo, get_decision_repo
+from api.context_helper import format_device_context
 
 router = APIRouter(prefix="/api/evenement", tags=["evenement"])
 
@@ -127,10 +128,17 @@ async def _analyser_evenement_claude(
     prob_actuelle: float,
     prob_calculee: float = 0.0,
     profession: str = "",
+    device_context: str = "",
 ) -> dict:
     """Analyse via Claude Haiku."""
     import anthropic as _anthropic
 
+    # Charger .env si pas encore fait
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+    except ImportError:
+        pass
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY absente")
@@ -144,25 +152,34 @@ async def _analyser_evenement_claude(
     temps_str = f"{temps_ans} ans {temps_mois} mois" if temps_ans > 0 else f"{temps_mois} mois"
 
     prompt = (
-        "Tu es un analyste expert en developpement personnel et objectifs de vie.\n\n"
+        "Tu es un robot probabiliste froid et factuel. Tu calcules l'impact reel "
+        "d'un evenement sur un objectif de vie. ZERO emotion, ZERO encouragement, "
+        "ZERO arrondi par sympathie. Uniquement des faits et des chiffres.\n\n"
         "CONTEXTE :\n"
         f"- Objectif de vie : \"{objectif_desc}\"\n"
         f"- Categorie : {objectif_cat}\n"
         f"- Profession : {profession}\n"
         f"- Temps estime restant : {temps_str}\n"
-        f"- Progression actuelle (jauge) : {prob_actuelle:.1f}%\n\n"
+        f"- Progression actuelle (jauge) : {prob_actuelle:.1f}%\n"
+        f"{device_context}\n\n"
         f"EVENEMENT RAPPORTE :\n\"{description}\"\n\n"
-        "REGLES D'ANALYSE :\n"
+        "REGLES D'ANALYSE STRICTES :\n"
         "1. REALISATION DE L'OBJECTIF : Si l'utilisateur declare que l'objectif "
         "est ATTEINT ou realise, tu DOIS donner un impact_probabilite entre "
         f"+{max(90, round(99 - prob_actuelle))} et +{max(95, round(99.5 - prob_actuelle))} "
         "pour que la jauge atteigne quasi 100%. C'est OBLIGATOIRE.\n"
-        f"2. PROPORTIONNALITE : L'impact doit etre proportionnel au temps restant ({temps_str}) :\n"
-        "   - Evenement mineur : +/-0.1 a +/-0.5\n"
-        "   - Evenement significatif (promotion, certification, etc.) : +/-0.5 a +/-3.0\n"
-        "   - Evenement majeur (financement, changement de carriere) : +/-3.0 a +/-8.0\n"
-        "3. COHERENCE : Un petit evenement ne peut pas avoir un impact de plusieurs "
-        f"pourcents sur un objectif estime a {temps_str}.\n\n"
+        "2. RIGUEUR ABSOLUE : Tu es un calculateur probabiliste, PAS un coach.\n"
+        "   - Ne donne JAMAIS un impact par encouragement ou sympathie.\n"
+        "   - Raisonne en termes FACTUELS : quel pourcentage de l'objectif cet evenement "
+        "couvre-t-il concretement ? Quelles barrieres elimine-t-il reellement ?\n"
+        "   - Exemple : un financement de 100 EUR pour un objectif de 3000 EUR/mois freelance "
+        "= 100 EUR ne couvre meme pas 1 mois de loyer, n'elimine aucune barriere majeure "
+        "(competences, clients, portfolio). Impact reel : +0.05 a +0.2% maximum.\n"
+        "   - Exemple : un financement de 1M EUR pour le meme objectif = elimine la barriere "
+        "financiere, permet formation + equipement + reserve. Impact reel : +25 a +40%.\n"
+        "   - Si un evenement ne change RIEN concretement a la trajectoire, impact = 0.\n"
+        f"3. LIBERTE : L'impact peut aller de -{prob_actuelle:.1f} a +{100 - prob_actuelle:.1f}. "
+        "Aucun plafond. Mais chaque point de pourcentage doit etre JUSTIFIE factuellement.\n\n"
         "Reponds UNIQUEMENT avec du JSON valide, sans aucun markdown :\n"
         '{"resume": "...", "impact_probabilite": <float>, "explication": "...", "conseil": "..."}'
     )
@@ -170,15 +187,29 @@ async def _analyser_evenement_claude(
     msg = await asyncio.to_thread(
         lambda: client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=400,
+            max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
         )
     )
     text = msg.content[0].text.strip()
-    match = re.search(r"\{[^}]+\}", text, re.DOTALL)
-    if not match:
-        raise ValueError("JSON invalide")
-    data = json.loads(match.group())
+    # Extraire le JSON — supporter les accolades imbriquées et les guillemets
+    start = text.find('{')
+    if start == -1:
+        raise ValueError("JSON invalide — pas d'accolade ouvrante")
+    depth = 0
+    end = start
+    for i in range(start, len(text)):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    json_str = text[start:end]
+    if not json_str:
+        raise ValueError("JSON invalide — extraction echouee")
+    data = json.loads(json_str)
     return {
         "resume": str(data.get("resume", "")),
         "impact_probabilite": float(data.get("impact_probabilite", 0.5)),
@@ -252,9 +283,13 @@ async def analyser_evenement(
             prob_actuelle=profil.probabilite_actuelle,
             prob_calculee=profil.objectif.probabilite_calculee,
             profession=profil.profession or "",
+            device_context=format_device_context(data.contexte_appareil),
         )
         return AnalyseEvenementOut(**result)
-    except Exception:
+    except Exception as e:
+        import traceback
+        print(f"[EVENEMENT] Claude API error: {e}")
+        traceback.print_exc()
         result = _analyser_evenement_local(data.description, profil.objectif.description)
         return AnalyseEvenementOut(**result)
 
@@ -320,13 +355,54 @@ async def confirmer_evenement(
             so_cible = await _identifier_so_pertinent(data.description, all_so)
             if so_cible is None:
                 so_cible = all_so[0]  # fallback: premier par ordre
+            total_te = sum(max(30, so["temps_estime"] or 180) for so in all_so)
             te = max(30, so_cible["temps_estime"] if so_cible["temps_estime"] else 180)
-            impact_so = abs(data.impact_probabilite) * (93.0 / te)  # events: 20% du progres
-            new_prog = min(100, max(0, so_cible["progression"] + impact_so))
-            db.conn.execute(
-                "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
-                (new_prog, so_cible["id"]),
-            )
+            impact_so = abs(data.impact_probabilite) * (total_te / te)  # amplifie: plus le SO est court, plus l'impact est grand
+            new_prog = so_cible["progression"] + impact_so
+
+            # Si le SO dépasse 100%, redistribuer l'excédent sur les autres SO
+            if new_prog >= 100:
+                overflow = new_prog - 100
+                new_prog = 100
+                db.conn.execute(
+                    "UPDATE sous_objectifs SET progression = 100 WHERE id = ?",
+                    (so_cible["id"],),
+                )
+                # Redistribuer l'overflow sur les SO restants (non complétés)
+                remaining_so = [s for s in all_so if s["id"] != so_cible["id"] and s["progression"] < 100]
+                while overflow > 0.01 and remaining_so:
+                    share = overflow / len(remaining_so)
+                    next_remaining = []
+                    for s in remaining_so:
+                        current = db.conn.execute(
+                            "SELECT progression FROM sous_objectifs WHERE id = ?",
+                            (s["id"],),
+                        ).fetchone()
+                        cur_prog = current["progression"] if current else s["progression"]
+                        new_p = cur_prog + share
+                        if new_p >= 100:
+                            overflow_part = new_p - 100
+                            db.conn.execute(
+                                "UPDATE sous_objectifs SET progression = 100 WHERE id = ?",
+                                (s["id"],),
+                            )
+                            overflow = overflow_part
+                        else:
+                            db.conn.execute(
+                                "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
+                                (new_p, s["id"]),
+                            )
+                            next_remaining.append(s)
+                            overflow = 0
+                    remaining_so = next_remaining
+                    if not remaining_so:
+                        break
+            else:
+                new_prog = max(0, new_prog)
+                db.conn.execute(
+                    "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
+                    (new_prog, so_cible["id"]),
+                )
             db.conn.commit()
             so_titre_impacte = so_cible["titre"]
             # Persister le lien SO dans la décision

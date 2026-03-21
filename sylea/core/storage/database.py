@@ -157,6 +157,13 @@ class DatabaseManager:
             self._conn.execute(_CREATE_BILANS)
             self._conn.execute(_CREATE_SOUS_OBJECTIFS)
             self._conn.execute(_CREATE_TACHES)
+            # Migration : ajouter genre si absent
+            try:
+                self._conn.execute(
+                    "ALTER TABLE profil_utilisateur ADD COLUMN genre TEXT DEFAULT ''"
+                )
+            except Exception:
+                pass  # Colonne deja existante
             # Migration : ajouter heures_objectif si la colonne est absente
             try:
                 self._conn.execute(

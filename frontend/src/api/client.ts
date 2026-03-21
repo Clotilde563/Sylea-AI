@@ -15,6 +15,7 @@ import type {
   TachesCheck,
   CompleterTacheResult,
   PersonnaliteIA,
+  DeviceContext,
 } from '../types'
 
 const BASE = '/api'
@@ -49,8 +50,11 @@ export const api = {
     }),
 
   // Recalculer la probabilité
-  recalculerProbabilite: (): Promise<ProbabiliteResult> =>
-    request<ProbabiliteResult>('/profil/probabilite', { method: 'POST' }),
+  recalculerProbabilite: (contexte_appareil?: DeviceContext): Promise<ProbabiliteResult> =>
+    request<ProbabiliteResult>('/profil/probabilite', {
+      method: 'POST',
+      body: JSON.stringify({ contexte_appareil }),
+    }),
 
   // Supprimer le profil
   supprimerProfil: (): Promise<{ detail: string }> =>
@@ -63,6 +67,7 @@ export const api = {
     question: string
     options: string[]
     impact_temporel_jours?: number
+    contexte_appareil?: DeviceContext
   }): Promise<AnalyseDilemme> =>
     request<AnalyseDilemme>('/dilemme/analyser', {
       method: 'POST',
@@ -82,6 +87,7 @@ export const api = {
     }[]
     choix: string  // "A", "B", "C"...
     impact_temporel_jours?: number
+    contexte_appareil?: DeviceContext
   }): Promise<Decision> =>
     request<Decision>('/dilemme/choisir', {
       method: 'POST',
@@ -97,28 +103,40 @@ export const api = {
   deleteDecision: (id: string): Promise<void> =>
     request<void>(`/historique/${id}`, { method: 'DELETE' }),
 
+  getHistoriquePagine: (params: {
+    page?: number; par_page?: number; tri?: string; recherche?: string
+  } = {}): Promise<{
+    decisions: Decision[]; total: number; page: number; par_page: number; pages_total: number
+  }> => {
+    const p = params.page ?? 1
+    const pp = params.par_page ?? 10
+    const tri = params.tri ?? 'recent'
+    const rech = params.recherche ?? ''
+    return request(`/historique/pagine?page=${p}&par_page=${pp}&tri=${tri}&recherche=${encodeURIComponent(rech)}`)
+  },
+
   // Analyser la journée pour en extraire les scores bien-être
-  analyserJournee: (description: string): Promise<BienEtreScores> =>
+  analyserJournee: (description: string, contexte_appareil?: DeviceContext): Promise<BienEtreScores> =>
     request<BienEtreScores>('/profil/analyser-journee', {
       method: 'POST',
-      body: JSON.stringify({ description }),
+      body: JSON.stringify({ description, contexte_appareil }),
     }),
 
   // Générer 12 questions personnalisées basées sur l'objectif
-  genererQuestions: (description: string): Promise<string[]> =>
+  genererQuestions: (description: string, contexte_appareil?: DeviceContext): Promise<string[]> =>
     request<string[]>('/profil/generer-questions', {
       method: 'POST',
-      body: JSON.stringify({ description }),
+      body: JSON.stringify({ description, contexte_appareil }),
     }),
 
 
   // ── Evenement ──────────────────────────────────────────────────────────────────
 
   // Analyser un evenement (appel IA)
-  analyserEvenement: (description: string): Promise<AnalyseEvenement> =>
+  analyserEvenement: (description: string, contexte_appareil?: DeviceContext): Promise<AnalyseEvenement> =>
     request<AnalyseEvenement>('/evenement/analyser', {
       method: 'POST',
-      body: JSON.stringify({ description }),
+      body: JSON.stringify({ description, contexte_appareil }),
     }),
 
   // Confirmer un evenement et sauvegarder la decision
@@ -126,6 +144,7 @@ export const api = {
     description: string
     impact_probabilite: number
     resume: string
+    contexte_appareil?: DeviceContext
   }): Promise<Decision> =>
     request<Decision>('/evenement/confirmer', {
       method: 'POST',
@@ -166,16 +185,22 @@ export const api = {
   getSousObjectifs: (): Promise<SousObjectif[]> =>
     request<SousObjectif[]>('/sous-objectifs'),
 
-  genererSousObjectifs: (): Promise<SousObjectif[]> =>
-    request<SousObjectif[]>('/sous-objectifs/generer', { method: 'POST' }),
+  genererSousObjectifs: (contexte_appareil?: DeviceContext): Promise<SousObjectif[]> =>
+    request<SousObjectif[]>('/sous-objectifs/generer', {
+      method: 'POST',
+      body: JSON.stringify({ contexte_appareil }),
+    }),
 
   // ── Taches quotidiennes ─────────────────────────────────────────────────
 
   checkTachesAujourdhui: (): Promise<TachesCheck> =>
     request<TachesCheck>('/taches/aujourd-hui'),
 
-  genererTaches: (): Promise<TachesQuotidiennes> =>
-    request<TachesQuotidiennes>('/taches/generer', { method: 'POST' }),
+  genererTaches: (contexte_appareil?: DeviceContext): Promise<TachesQuotidiennes> =>
+    request<TachesQuotidiennes>('/taches/generer', {
+      method: 'POST',
+      body: JSON.stringify({ contexte_appareil }),
+    }),
 
   completerTache: (tache_id: string): Promise<CompleterTacheResult> =>
     request<CompleterTacheResult>('/taches/completer', {
@@ -193,9 +218,9 @@ export const api = {
 
   // ── Service client chatbot ──────────────────────────────────────────
 
-  serviceClientChat: (messages: { role: string; content: string }[]): Promise<{ message: string }> =>
+  serviceClientChat: (messages: { role: string; content: string }[], contexte_appareil?: DeviceContext): Promise<{ message: string }> =>
     request<{ message: string }>('/service-client/chat', {
       method: 'POST',
-      body: JSON.stringify({ messages }),
+      body: JSON.stringify({ messages, contexte_appareil }),
     }),
 }

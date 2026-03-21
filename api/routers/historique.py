@@ -16,7 +16,7 @@ from sylea.core.models.decision import Decision
 from sylea.config.settings import PROB_MIN, PROB_MAX
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
 
-from api.schemas import DecisionOut, OptionDilemmeOut, ActionAgentOut, AgentRapportOut
+from api.schemas import DecisionOut, OptionDilemmeOut, ActionAgentOut, AgentRapportOut, HistoriquePagineOut
 from api.dependencies import get_profil_repo, get_decision_repo
 
 router = APIRouter(prefix="/api/historique", tags=["historique"])
@@ -81,6 +81,36 @@ async def get_historique(
 
     decisions = decision_repo.lister_pour_utilisateur(profil.id, limite=limite)
     return [_decision_to_out(d) for d in decisions]
+
+
+@router.get("/pagine", response_model=HistoriquePagineOut)
+async def get_historique_pagine(
+    page: int = Query(default=1, ge=1),
+    par_page: int = Query(default=10, ge=1, le=50),
+    tri: str = Query(default="recent"),
+    recherche: str = Query(default=""),
+    profil_repo: ProfilRepository = Depends(get_profil_repo),
+    decision_repo: DecisionRepository = Depends(get_decision_repo),
+):
+    """Retourne les decisions paginées avec tri et recherche."""
+    if not profil_repo.existe():
+        raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
+    profil = profil_repo.charger()
+    if profil is None:
+        raise HTTPException(status_code=404, detail="Profil introuvable.")
+
+    rech = recherche.strip() or None
+    total = decision_repo.compter_filtre(profil.id, rech)
+    import math
+    pages_total = max(1, math.ceil(total / par_page))
+    decisions = decision_repo.lister_pagine(profil.id, page, par_page, tri, rech)
+    return HistoriquePagineOut(
+        decisions=[_decision_to_out(d) for d in decisions],
+        total=total,
+        page=page,
+        par_page=par_page,
+        pages_total=pages_total,
+    )
 
 
 @router.get("/agent-rapport", response_model=AgentRapportOut)

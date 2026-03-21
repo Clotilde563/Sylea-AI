@@ -55,6 +55,7 @@ class AnalyseDilemme:
     options: list  # List[AnalyseOption]
     verdict: str
     option_recommandee: str   # "A", "B", "C"...
+    etude_scientifique: str = ""  # Étude scientifique réelle liée au dilemme
 
 
 # ── Agent principal ──────────────────────────────────────────────────────────
@@ -75,6 +76,7 @@ class AgentSylea:
         self,
         profil: ProfilUtilisateur,
         probabilite_calculee: float,
+        device_context: str = "",
     ) -> AnalyseProbabilite:
         """
         Génère une analyse qualitative de la probabilité calculée par le moteur.
@@ -101,6 +103,7 @@ class AgentSylea:
 
 PROFIL UTILISATEUR :
 {profil_resume}
+{device_context}
 
 OBJECTIF DE VIE COMPLET :
 {objectif_desc}
@@ -140,6 +143,7 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
         question: str,
         options: list,
         impact_temporel_jours: int | None = None,
+        device_context: str = "",
     ) -> AnalyseDilemme:
         """
         Analyse un dilemme entre N options et calcule l'impact sur la probabilité.
@@ -175,47 +179,46 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
         )
 
 
-        # Calibrer l'echelle d'impact selon l'impact temporel
+        # Contexte temporel pour l'IA (sans plafond)
         if impact_temporel_jours is not None and impact_temporel_jours > 0:
             if impact_temporel_jours <= 1:
-                echelle_impact = (
-                    f"Impact temporel: 1 jour. Impacts: +/-0.001 a +/-0.01%"
-                )
+                contexte_temporel = f"Ce choix a un impact sur 1 jour."
             elif impact_temporel_jours <= 7:
-                echelle_impact = (
-                    f"Impact temporel: 1 semaine. Impacts: +/-0.005 a +/-0.05%"
-                )
+                contexte_temporel = f"Ce choix a un impact sur ~1 semaine."
             elif impact_temporel_jours <= 30:
-                echelle_impact = (
-                    f"Impact temporel: 1 mois. Impacts: +/-0.01 a +/-0.1%"
-                )
+                contexte_temporel = f"Ce choix a un impact sur ~1 mois."
             elif impact_temporel_jours <= 365:
-                echelle_impact = (
-                    f"Impact temporel: 1 an. Impacts: +/-0.05 a +/-1.0%"
-                )
+                contexte_temporel = f"Ce choix a un impact sur ~{impact_temporel_jours // 30} mois."
             else:
-                echelle_impact = (
-                    f"Impact temporel: {impact_temporel_jours} jours (long terme). Impacts: +/-0.1 a +/-3.0%"
-                )
+                contexte_temporel = f"Ce choix a un impact sur ~{impact_temporel_jours // 365} an(s) (long terme)."
         else:
-            echelle_impact = (
-                f"L'objectif est estime a {temps_estime_str}. "
-                f"Decisions courtes: +/-0.001 a +/-0.02%, "
-                f"decisions strategiques: +/-0.1 a +/-2%"
-            )
+            contexte_temporel = f"L'objectif est estime a {temps_estime_str}."
 
-        prompt = f"""Analyse ce dilemme de vie pour aider l'utilisateur \u00e0 d\u00e9cider.
+        prompt = f"""Tu es un robot probabiliste froid et factuel. Tu analyses un dilemme de vie
+et calcules l'impact REEL de chaque option sur l'objectif. ZERO emotion, ZERO encouragement.
+Chaque point de pourcentage doit etre justifie factuellement.
 
 PROFIL R\u00c9SUM\u00c9 :
 {profil_resume}
+{device_context}
 
 OBJECTIF ULTIME : {objectif_desc}
 PROBABILIT\u00c9 ACTUELLE D'ATTEINDRE L'OBJECTIF : {prob_totale:.2f}%
 TEMPS ESTIME POUR L'OBJECTIF : {temps_estime_str}
+{contexte_temporel}
 
 QUESTION : {question}
 
 {options_text}
+
+REGLES D'IMPACT :
+- AUCUN plafond artificiel. L'impact peut aller de -{prob_totale:.1f} a +{100 - prob_totale:.1f}.
+- Sois FACTUEL : quel pourcentage de l'objectif cette option couvre-t-elle concretement ?
+- COHERENCE TEMPORELLE OBLIGATOIRE : {contexte_temporel} Le gain ou la perte en temps NE PEUT PAS depasser cette duree. Si l'impact est sur 1 jour, le delta en probabilite doit correspondre au maximum a 1 jour de temps gagne/perdu, PAS 2 jours ou plus.
+- Pour convertir : sur un objectif de {temps_estime_str}, 1 jour = environ {1.0 / max(1, _tj) * 100:.4f}% de probabilite.
+- Un choix quotidien banal (regarder une video, manger un repas) = impact quasi nul (+/-0.001 a 0.01%).
+- Un choix strategique majeur (changer de carriere, investissement important) = impact proportionnel a son effet reel.
+- Ne donne JAMAIS un impact par sympathie ou encouragement. Uniquement des faits.
 
 REGLES DE FORMAT STRICTES :
 - pros/cons : tableau de mots-cl\u00e9s de 3 \u00e0 6 mots MAXIMUM chacun. JAMAIS de phrase compl\u00e8te.
@@ -249,6 +252,7 @@ class AgentSylea:
         self,
         profil: ProfilUtilisateur,
         probabilite_calculee: float,
+        device_context: str = "",
     ) -> AnalyseProbabilite:
         """
         Génère une analyse qualitative de la probabilité calculée par le moteur.
@@ -275,6 +279,7 @@ class AgentSylea:
 
 PROFIL UTILISATEUR :
 {profil_resume}
+{device_context}
 
 OBJECTIF DE VIE COMPLET :
 {objectif_desc}
@@ -314,6 +319,7 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
         question: str,
         options: list,
         impact_temporel_jours: int | None = None,
+        device_context: str = "",
     ) -> AnalyseDilemme:
         """
         Analyse un dilemme entre N options et calcule l'impact sur la probabilité.
@@ -353,35 +359,41 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
         if impact_temporel_jours is not None and impact_temporel_jours > 0:
             if impact_temporel_jours <= 1:
                 echelle_impact = (
-                    f"Impact temporel: 1 jour. Impacts: +/-0.001 a +/-0.01%"
+                    f"Impact temporel: {impact_temporel_jours} jour(s). "
+                    f"Impacts: +/-0.01 a +/-0.1%. Choix quotidien avec peu de consequences."
                 )
             elif impact_temporel_jours <= 7:
                 echelle_impact = (
-                    f"Impact temporel: 1 semaine. Impacts: +/-0.005 a +/-0.05%"
+                    f"Impact temporel: ~1 semaine. "
+                    f"Impacts: +/-0.05 a +/-0.5%. Choix hebdomadaire."
                 )
             elif impact_temporel_jours <= 30:
                 echelle_impact = (
-                    f"Impact temporel: 1 mois. Impacts: +/-0.01 a +/-0.1%"
+                    f"Impact temporel: ~1 mois. "
+                    f"Impacts: +/-0.1 a +/-2.0%. Choix mensuel significatif."
                 )
             elif impact_temporel_jours <= 365:
                 echelle_impact = (
-                    f"Impact temporel: 1 an. Impacts: +/-0.05 a +/-1.0%"
+                    f"Impact temporel: ~{impact_temporel_jours // 30} mois ({impact_temporel_jours} jours). "
+                    f"Impacts: +/-1.0 a +/-5.0%. Choix strategique qui affecte la trajectoire sur plusieurs mois."
                 )
             else:
                 echelle_impact = (
-                    f"Impact temporel: {impact_temporel_jours} jours (long terme). Impacts: +/-0.1 a +/-3.0%"
+                    f"Impact temporel: {impact_temporel_jours // 365} an(s) ({impact_temporel_jours} jours, long terme). "
+                    f"Impacts: +/-2.0 a +/-8.0%. Choix de vie majeur avec consequences durables."
                 )
         else:
             echelle_impact = (
                 f"L'objectif est estime a {temps_estime_str}. "
-                f"Decisions courtes: +/-0.001 a +/-0.02%, "
-                f"decisions strategiques: +/-0.1 a +/-2%"
+                f"Decisions courtes (quotidiennes): +/-0.01 a +/-0.5%, "
+                f"decisions strategiques (mois/annees): +/-1.0 a +/-5.0%"
             )
 
         prompt = f"""Analyse ce dilemme de vie pour aider l'utilisateur \u00e0 d\u00e9cider.
 
 PROFIL R\u00c9SUM\u00c9 :
 {profil_resume}
+{device_context}
 
 OBJECTIF ULTIME : {objectif_desc}
 PROBABILIT\u00c9 ACTUELLE D'ATTEINDRE L'OBJECTIF : {prob_totale:.2f}%
@@ -403,10 +415,18 @@ Pour chaque option :
 3. Impact probabilit\u00e9 (delta en %)
    {echelle_impact}
 
+ETUDE SCIENTIFIQUE :
+- Cite UNE etude scientifique REELLE et verifiable en rapport avec le dilemme pose.
+- L'etude doit etre pertinente par rapport au contexte du choix (neurosciences, psychologie, economie comportementale, sociologie, sante, education, etc.)
+- Inclus : le titre ou sujet de l'etude, les auteurs principaux, l'annee de publication, l'institution ou revue, et une phrase expliquant le lien avec le dilemme.
+- Ne donne PAS toujours la meme etude. Varie selon le contexte du dilemme.
+- Exemples de sources possibles : Harvard Business Review, Nature, Science, The Lancet, Journal of Personality and Social Psychology, PNAS, etc.
+
 R\u00e9ponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/apr\u00e8s) :
 {{
   {json_options},
   "verdict": "MAX 15 mots. Inclure {prob_totale:.1f}% et {temps_estime_str}. Ex: Avec 38.4% et 3 ans, Option B prioritaire pour premiers clients.",
+  "etude_scientifique": "Selon l etude de [Auteurs] ([Annee], [Revue/Institution]) sur [sujet], [conclusion cle en lien avec le dilemme]. Cette recherche montre que [impact concret sur la vie].",
   "option_recommandee": "{lettres[0]}"
 }}"""
 
@@ -455,6 +475,7 @@ R\u00e9ponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/apr\u0
             options=parsed_options,
             verdict=_clean_verdict(data.get('verdict', '')),
             option_recommandee=data.get("option_recommandee", lettres[0]),
+            etude_scientifique=data.get("etude_scientifique", ""),
         )
 
     # ── Helpers internes ─────────────────────────────────────────────────────

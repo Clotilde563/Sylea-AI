@@ -1,7 +1,8 @@
 // Store Zustand global — état de l'application Syléa.AI
 
 import { create } from 'zustand'
-import type { Profil, AnalyseDilemme } from '../types'
+import type { Profil, AnalyseDilemme, SousObjectif } from '../types'
+import { api } from '../api/client'
 
 interface SyleaStore {
   // Profil utilisateur
@@ -23,6 +24,11 @@ interface SyleaStore {
   // Probabilité initiale déjà calculée ?
   probCalculee: boolean
   setProbCalculee: (v: boolean) => void
+
+  // Sous-objectifs (partagés entre pages)
+  sousObjectifs: SousObjectif[]
+  setSousObjectifs: (so: SousObjectif[]) => void
+  refreshSousObjectifs: () => Promise<void>
 }
 
 export const useStore = create<SyleaStore>((set) => ({
@@ -40,4 +46,15 @@ export const useStore = create<SyleaStore>((set) => ({
 
   probCalculee: false,
   setProbCalculee: (v) => set({ probCalculee: v }),
+
+  sousObjectifs: [],
+  setSousObjectifs: (so) => set({ sousObjectifs: so }),
+  refreshSousObjectifs: async () => {
+    try {
+      const so = await api.getSousObjectifs()
+      set({ sousObjectifs: so })
+    } catch {
+      // Silently fail — sous-objectifs may not exist yet
+    }
+  },
 }))

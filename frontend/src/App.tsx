@@ -13,16 +13,25 @@ import { EvenementPage }    from './pages/EvenementPage'
 import { BilanPage }        from './pages/BilanPage'
 import { HistoriquePage }   from './pages/HistoriquePage'
 import { ServiceChatbot }   from './components/ServiceChatbot'
+import ParametresPage       from './pages/ParametresPage'
+import AgentsPage           from './pages/AgentsPage'
+import { LanguageProvider, useT } from './i18n/LanguageContext'
+import LockScreen           from './security/LockScreen'
+import { DeviceContextProvider } from './contexts/DeviceContext'
+import { GeoPermissionModal }    from './components/GeoPermissionModal'
 
 // ── Application ───────────────────────────────────────────────────────────────
 
-export default function App() {
+function AppContent() {
   // true = affiche l'animation au lancement | false = désactivé
   const [showSplash, setShowSplash] = useState(true)
   const [chatbotOpen, setChatbotOpen] = useState(false)
+  const t = useT()
 
   return (
     <BrowserRouter>
+      {/* Verrouillage securite */}
+      <LockScreen />
       {/* Animation d'intro Syléa — 8s, plein écran, au-dessus de tout */}
       {showSplash && <SyleaSplash onDone={() => setShowSplash(false)} />}
 
@@ -45,6 +54,8 @@ export default function App() {
                   <Route path="/historique"   element={<HistoriquePage />} />
                   <Route path="/evenement"    element={<EvenementPage />} />
                   <Route path="/bilan"        element={<BilanPage />} />
+                  <Route path="/parametres"   element={<ParametresPage />} />
+                  <Route path="/agents"       element={<AgentsPage />} />
                   <Route path="*"             element={<Navigate to="/" replace />} />
                 </Routes>
               </main>
@@ -66,7 +77,7 @@ export default function App() {
                 </span>
                 <span style={{ color: 'var(--accent-violet-light)' }}>.AI</span>
                 <span style={{ marginLeft: '1rem', letterSpacing: '0.02em' }}>
-                  Votre assistant de vie augmenté
+                  {t('common.votre_assistant')}
                 </span>
               </footer>
             </div>
@@ -77,22 +88,14 @@ export default function App() {
   )
 }
 
-// ── VideoSplash conservée pour usage futur (animation syléa.mp4) ──────────────
-/*
-function VideoSplash({ onDone }: { onDone: () => void }) {
+export default function App() {
   return (
-    <div style={{ position: 'fixed', inset: 0, background: '#000', zIndex: 9999, overflow: 'hidden' }}>
-      <video src="/animation-sylea.mp4" autoPlay muted playsInline onEnded={onDone}
-        style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-      <div style={{ position: 'absolute', top: 0, right: 0, width: '180px', height: '55px',
-        background: '#000', pointerEvents: 'none' }} />
-      <button onClick={onDone} style={{ position: 'absolute', bottom: '2.5rem', right: '2.5rem',
-        background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.18)',
-        color: 'rgba(255,255,255,0.6)', padding: '0.45rem 1.4rem', borderRadius: '3px',
-        cursor: 'pointer', fontSize: '0.72rem', letterSpacing: '0.15em' }}>
-        PASSER ›
-      </button>
-    </div>
+    <LanguageProvider>
+      <DeviceContextProvider>
+        <GeoPermissionModal />
+        <AppContent />
+      </DeviceContextProvider>
+    </LanguageProvider>
   )
 }
-*/
+
