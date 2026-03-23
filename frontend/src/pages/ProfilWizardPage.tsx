@@ -38,39 +38,43 @@ export function ProfilWizardPage() {
   const { ctx: deviceCtx } = useDeviceContext()
   const { profil, setProfil, setProbCalculee } = useStore()
 
+  // Mode creation (profil is null) vs edition (profil exists for this user)
+  const isCreate = !profil
+
   const [step,   setStep]   = useState<Step>('identite')
   const [saving, setSaving] = useState(false)
   const [error,  setError]  = useState<string | null>(null)
   const [showObjectifWarning, setShowObjectifWarning] = useState(false)
 
   // ── Identité ───────────────────────────────────────────────────────────────
-  const [nom,        setNom]        = useState(() => profil?.nom        ?? '')
-  const [age,        setAge]        = useState(() => profil ? String(profil.age) : '')
-  const [genre,      setGenre]      = useState(() => profil?.genre       ?? '')
-  const [profession, setProfession] = useState(() => profil?.profession  ?? '')
-  const [ville,      setVille]      = useState(() => profil?.ville       ?? '')
-  const [sitFam,     setSitFam]     = useState(() => profil?.situation_familiale ?? '')
+  // When creating a new profile, ALL fields start empty regardless of any stale store data
+  const [nom,        setNom]        = useState(() => isCreate ? '' : (profil?.nom        ?? ''))
+  const [age,        setAge]        = useState(() => isCreate ? '' : (profil ? String(profil.age) : ''))
+  const [genre,      setGenre]      = useState(() => isCreate ? '' : (profil?.genre       ?? ''))
+  const [profession, setProfession] = useState(() => isCreate ? '' : (profil?.profession  ?? ''))
+  const [ville,      setVille]      = useState(() => isCreate ? '' : (profil?.ville       ?? ''))
+  const [sitFam,     setSitFam]     = useState(() => isCreate ? '' : (profil?.situation_familiale ?? ''))
 
   // Objectif (description seule — sans catégorie ni deadline)
   const [objDesc, setObjDesc] = useState(() => {
-    if (!profil?.objectif) return ''
+    if (isCreate || !profil?.objectif) return ''
     const parts = profil.objectif.description.split('\n\n--- Contexte personnalisé ---\n')
     return parts[0]
   })
 
   // Tags
-  const [competences, setCompetences] = useState<string[]>(() => profil?.competences ?? [])
+  const [competences, setCompetences] = useState<string[]>(() => isCreate ? [] : (profil?.competences ?? []))
   const [compInput,   setCompInput]   = useState('')
-  const [diplomes,    setDiplomes]    = useState<string[]>(() => profil?.diplomes    ?? [])
+  const [diplomes,    setDiplomes]    = useState<string[]>(() => isCreate ? [] : (profil?.diplomes    ?? []))
   const [diplInput,   setDiplInput]   = useState('')
-  const [langues,     setLangues]     = useState<string[]>(() => profil?.langues     ?? [])
+  const [langues,     setLangues]     = useState<string[]>(() => isCreate ? [] : (profil?.langues     ?? []))
   const [langInput,   setLangInput]   = useState('')
 
   // Champs financiers préservés (non affichés)
-  const revenu     = profil?.revenu_annuel      ?? 0
-  const patrimoine = profil?.patrimoine_estime  ?? 0
-  const charges    = profil?.charges_mensuelles ?? 0
-  const objFin     = profil?.objectif_financier ?? null
+  const revenu     = isCreate ? 0    : (profil?.revenu_annuel      ?? 0)
+  const patrimoine = isCreate ? 0    : (profil?.patrimoine_estime  ?? 0)
+  const charges    = isCreate ? 0    : (profil?.charges_mensuelles ?? 0)
+  const objFin     = isCreate ? null : (profil?.objectif_financier ?? null)
 
   // ── Questions ──────────────────────────────────────────────────────────────
   const [questionsGenerees,   setQuestionsGenerees]   = useState<string[]>([])
@@ -81,17 +85,17 @@ export function ProfilWizardPage() {
   const [activeVoiceIdx, setActiveVoiceIdx] = useState<number>(-1)
 
   // ── Bien-être — scores ────────────────────────────────────────────────────
-  const [sante,   setSante]   = useState(() => profil?.niveau_sante   ?? 7)
-  const [stress,  setStress]  = useState(() => profil?.niveau_stress  ?? 5)
-  const [energie, setEnergie] = useState(() => profil?.niveau_energie ?? 7)
-  const [bonheur, setBonheur] = useState(() => profil?.niveau_bonheur ?? 7)
+  const [sante,   setSante]   = useState(() => isCreate ? 7 : (profil?.niveau_sante   ?? 7))
+  const [stress,  setStress]  = useState(() => isCreate ? 5 : (profil?.niveau_stress  ?? 5))
+  const [energie, setEnergie] = useState(() => isCreate ? 7 : (profil?.niveau_energie ?? 7))
+  const [bonheur, setBonheur] = useState(() => isCreate ? 7 : (profil?.niveau_bonheur ?? 7))
 
   // ── Bien-être — temps quotidien ───────────────────────────────────────────
-  const [hTravail,   setHTravail]   = useState(() => profil?.heures_travail   ?? 8)
-  const [hSommeil,   setHSommeil]   = useState(() => profil?.heures_sommeil   ?? 7)
-  const [hLoisirs,   setHLoisirs]   = useState(() => profil?.heures_loisirs   ?? 2)
-  const [hTransport, setHTransport] = useState(() => profil?.heures_transport ?? 1)
-  const [hObjectif,  setHObjectif]  = useState(() => (profil as any)?.heures_objectif ?? 1)
+  const [hTravail,   setHTravail]   = useState(() => isCreate ? 8 : (profil?.heures_travail   ?? 8))
+  const [hSommeil,   setHSommeil]   = useState(() => isCreate ? 7 : (profil?.heures_sommeil   ?? 7))
+  const [hLoisirs,   setHLoisirs]   = useState(() => isCreate ? 2 : (profil?.heures_loisirs   ?? 2))
+  const [hTransport, setHTransport] = useState(() => isCreate ? 1 : (profil?.heures_transport ?? 1))
+  const [hObjectif,  setHObjectif]  = useState(() => isCreate ? 1 : ((profil as any)?.heures_objectif ?? 1))
 
   // ── Journée ────────────────────────────────────────────────────────────────
   const [descJournee, setDescJournee] = useState('')

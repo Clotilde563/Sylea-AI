@@ -25,12 +25,21 @@ export function verifyPattern(pattern: number[], hash: string): Promise<boolean>
 
 /** Calcule un score de securite 0-100 */
 export function computeSecurityLevel(): number {
+  let score = 0
+
+  // +40% si connecté avec un compte email
+  const authToken = localStorage.getItem('sylea_auth_token')
+  if (authToken) score += 40
+
   const lockType = localStorage.getItem('sylea-lock-type')
-  if (!lockType) return 0
-  if (lockType === 'pattern') return 60
-  // password
-  const strength = parseInt(localStorage.getItem('sylea-pwd-strength') || '0', 10)
-  return Math.min(100, 40 + strength)  // 40 base + strength bonus
+  if (lockType === 'pattern') {
+    score += 35  // schéma = +35%
+  } else if (lockType === 'password') {
+    const strength = parseInt(localStorage.getItem('sylea-pwd-strength') || '0', 10)
+    score += 20 + Math.min(40, strength)  // mot de passe = 20 base + bonus force (max 40)
+  }
+
+  return Math.min(100, score)
 }
 
 /** Calcule la force d'un mot de passe (0-60 bonus) */

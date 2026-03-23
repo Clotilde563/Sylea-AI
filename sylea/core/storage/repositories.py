@@ -20,9 +20,11 @@ class ProfilRepository:
     def __init__(self, db: DatabaseManager) -> None:
         self._db = db
 
-    def sauvegarder(self, profil: ProfilUtilisateur) -> None:
+    def sauvegarder(self, profil: ProfilUtilisateur, auth_user_id: str | None = None) -> None:
         """Insère ou met à jour le profil en base."""
         data = profil.to_dict()
+        if auth_user_id is not None:
+            data["auth_user_id"] = auth_user_id
         cols = ", ".join(data.keys())
         placeholders = ", ".join(f":{k}" for k in data.keys())
         updates = ", ".join(
@@ -35,31 +37,50 @@ class ProfilRepository:
         with self._db.conn:
             self._db.conn.execute(sql, data)
 
-    def charger(self) -> Optional[ProfilUtilisateur]:
-        """Charge le premier profil trouvé (Syléa ne gère qu'un seul profil local)."""
-        row = self._db.conn.execute(
-            "SELECT * FROM profil_utilisateur ORDER BY cree_le LIMIT 1"
-        ).fetchone()
+    def charger(self, auth_user_id: str | None = None) -> Optional[ProfilUtilisateur]:
+        """Charge le profil. Si auth_user_id fourni, filtre par auth_user_id (multi-user).
+        Sinon, charge le premier profil (CLI / mode sans auth)."""
+        if auth_user_id is not None:
+            row = self._db.conn.execute(
+                "SELECT * FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1",
+                (auth_user_id,),
+            ).fetchone()
+        else:
+            row = self._db.conn.execute(
+                "SELECT * FROM profil_utilisateur ORDER BY cree_le LIMIT 1"
+            ).fetchone()
         if row is None:
             return None
         return ProfilUtilisateur.from_dict(dict(row))
 
-    def existe(self) -> bool:
-        """Retourne True si au moins un profil existe en base."""
-        count = self._db.conn.execute(
-            "SELECT COUNT(*) FROM profil_utilisateur"
-        ).fetchone()[0]
+    def existe(self, auth_user_id: str | None = None) -> bool:
+        """Retourne True si un profil existe. Filtre par auth_user_id si fourni."""
+        if auth_user_id is not None:
+            count = self._db.conn.execute(
+                "SELECT COUNT(*) FROM profil_utilisateur WHERE auth_user_id = ?",
+                (auth_user_id,),
+            ).fetchone()[0]
+        else:
+            count = self._db.conn.execute(
+                "SELECT COUNT(*) FROM profil_utilisateur"
+            ).fetchone()[0]
         return count > 0
 
-    def supprimer(self, user_id: str) -> None:
+    def supprimer(self, user_id: str, auth_user_id: str | None = None) -> None:
         """Supprime le profil et toutes ses décisions associées."""
         with self._db.conn:
             self._db.conn.execute(
                 "DELETE FROM decisions WHERE user_id = ?", (user_id,)
             )
-            self._db.conn.execute(
-                "DELETE FROM profil_utilisateur WHERE id = ?", (user_id,)
-            )
+            if auth_user_id is not None:
+                self._db.conn.execute(
+                    "DELETE FROM profil_utilisateur WHERE id = ? AND auth_user_id = ?",
+                    (user_id, auth_user_id),
+                )
+            else:
+                self._db.conn.execute(
+                    "DELETE FROM profil_utilisateur WHERE id = ?", (user_id,)
+                )
 
 
 class DecisionRepository:
@@ -84,13 +105,22 @@ class DecisionRepository:
             self._db.conn.execute(sql, data)
 
     def lister_pour_utilisateur(
-        self, user_id: str, limite: int = 20
+        self, user_id: str, limite: int = 20, auth_user_id: str | None = None,
     ) -> List[Decision]:
         """Retourne les dernières décisions d'un utilisateur, du plus récent au plus ancien."""
-        rows = self._db.conn.execute(
-            "SELECT * FROM decisions WHERE user_id = ? ORDER BY cree_le DESC LIMIT ?",
-            (user_id, limite),
-        ).fetchall()
+        if auth_user_id is not None:
+            rows = self._db.conn.execute(
+                "SELECT d.* FROM decisions d "
+                "JOIN profil_utilisateur p ON d.user_id = p.id "
+                "WHERE d.user_id = ? AND p.auth_user_id = ? "
+                "ORDER BY d.cree_le DESC LIMIT ?",
+                (user_id, auth_user_id, limite),
+            ).fetchall()
+        else:
+            rows = self._db.conn.execute(
+                "SELECT * FROM decisions WHERE user_id = ? ORDER BY cree_le DESC LIMIT ?",
+                (user_id, limite),
+            ).fetchall()
         return [Decision.from_dict(dict(r)) for r in rows]
 
     def compter(self, user_id: str) -> int:
@@ -156,7 +186,16 @@ class DecisionRepository:
             f"SELECT COUNT(*) FROM decisions WHERE {where}", params
         ).fetchone()[0]
 
-    def effacer_decisions_utilisateur(self, user_id: str) -> None:
+    def effacer_decisions_utilisateur(self, user_id: str, auth_user_id: str | None = None) -> None:
         """Supprime toutes les décisions d’un utilisateur."""
         with self._db.conn:
-            self._db.conn.execute("DELETE FROM decisions WHERE user_id = ?", (user_id,))
+            if auth_user_id is not None:
+                self._db.conn.execute(
+                    "DELETE FROM decisions WHERE user_id IN "
+                    "(SELECT d.user_id FROM decisions d "
+                    "JOIN profil_utilisateur p ON d.user_id = p.id "
+                    "WHERE d.user_id = ? AND p.auth_user_id = ?)",
+                    (user_id, auth_user_id),
+                )
+            else:
+                self._db.conn.execute("DELETE FROM decisions WHERE user_id = ?", (user_id,))

@@ -52,72 +52,6 @@ const localeLoaders: Record<string, () => Promise<{ default: Translations }>> = 
   ko: () => import('./locales/ko.json'),
   tr: () => import('./locales/tr.json'),
   hi: () => import('./locales/hi.json'),
-  nl: () => import('./locales/nl.json'),
-  pl: () => import('./locales/pl.json'),
-  sv: () => import('./locales/sv.json'),
-  th: () => import('./locales/th.json'),
-  vi: () => import('./locales/vi.json'),
-  id: () => import('./locales/id.json'),
-  el: () => import('./locales/el.json'),
-  ro: () => import('./locales/ro.json'),
-  uk: () => import('./locales/uk.json'),
-  fi: () => import('./locales/fi.json'),
-  cs: () => import('./locales/cs.json'),
-  hu: () => import('./locales/hu.json'),
-  da: () => import('./locales/da.json'),
-  no: () => import('./locales/no.json'),
-  he: () => import('./locales/he.json'),
-  ms: () => import('./locales/ms.json'),
-  tl: () => import('./locales/tl.json'),
-  sw: () => import('./locales/sw.json'),
-  fa: () => import('./locales/fa.json'),
-  af: () => import('./locales/af.json'),
-  sq: () => import('./locales/sq.json'),
-  am: () => import('./locales/am.json'),
-  hy: () => import('./locales/hy.json'),
-  az: () => import('./locales/az.json'),
-  eu: () => import('./locales/eu.json'),
-  bn: () => import('./locales/bn.json'),
-  bs: () => import('./locales/bs.json'),
-  bg: () => import('./locales/bg.json'),
-  my: () => import('./locales/my.json'),
-  ca: () => import('./locales/ca.json'),
-  'zh-TW': () => import('./locales/zh-TW.json'),
-  hr: () => import('./locales/hr.json'),
-  et: () => import('./locales/et.json'),
-  gl: () => import('./locales/gl.json'),
-  ka: () => import('./locales/ka.json'),
-  gu: () => import('./locales/gu.json'),
-  ha: () => import('./locales/ha.json'),
-  is: () => import('./locales/is.json'),
-  ig: () => import('./locales/ig.json'),
-  ga: () => import('./locales/ga.json'),
-  kn: () => import('./locales/kn.json'),
-  kk: () => import('./locales/kk.json'),
-  km: () => import('./locales/km.json'),
-  la: () => import('./locales/la.json'),
-  lv: () => import('./locales/lv.json'),
-  lt: () => import('./locales/lt.json'),
-  lo: () => import('./locales/lo.json'),
-  mk: () => import('./locales/mk.json'),
-  ml: () => import('./locales/ml.json'),
-  mt: () => import('./locales/mt.json'),
-  mr: () => import('./locales/mr.json'),
-  mn: () => import('./locales/mn.json'),
-  ne: () => import('./locales/ne.json'),
-  pa: () => import('./locales/pa.json'),
-  sr: () => import('./locales/sr.json'),
-  si: () => import('./locales/si.json'),
-  sk: () => import('./locales/sk.json'),
-  sl: () => import('./locales/sl.json'),
-  ta: () => import('./locales/ta.json'),
-  te: () => import('./locales/te.json'),
-  ur: () => import('./locales/ur.json'),
-  uz: () => import('./locales/uz.json'),
-  cy: () => import('./locales/cy.json'),
-  xh: () => import('./locales/xh.json'),
-  yo: () => import('./locales/yo.json'),
-  zu: () => import('./locales/zu.json'),
 }
 
 // ── Traductions embarquees pour les principales langues ──────────────────────
@@ -175,7 +109,12 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     setLocaleState(code)
   }, [])
 
-  const t = useCallback((key: string) => lookup(translations, key), [translations])
+  const t = useCallback((key: string) => {
+    const val = lookup(translations, key)
+    // Si la clé n'est pas trouvée dans la langue courante, fallback vers le français
+    if (val === key) return lookup(frJson as Translations, key)
+    return val
+  }, [translations])
 
   return (
     <LanguageContext.Provider value={{ locale, setLocale, t }}>

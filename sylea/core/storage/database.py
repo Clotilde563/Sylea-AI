@@ -108,6 +108,17 @@ CREATE TABLE IF NOT EXISTS taches_quotidiennes (
 );
 """
 
+_CREATE_USERS = """
+CREATE TABLE IF NOT EXISTS users (
+    id                  TEXT PRIMARY KEY,
+    email               TEXT UNIQUE NOT NULL,
+    hashed_password     TEXT,
+    provider            TEXT DEFAULT 'local',
+    provider_id         TEXT,
+    created_at          TEXT NOT NULL
+);
+"""
+
 
 class DatabaseManager:
     """Gestionnaire de connexion et de schéma SQLite."""
@@ -157,6 +168,14 @@ class DatabaseManager:
             self._conn.execute(_CREATE_BILANS)
             self._conn.execute(_CREATE_SOUS_OBJECTIFS)
             self._conn.execute(_CREATE_TACHES)
+            self._conn.execute(_CREATE_USERS)
+            # Migration : ajouter auth_user_id dans profil
+            try:
+                self._conn.execute(
+                    "ALTER TABLE profil_utilisateur ADD COLUMN auth_user_id TEXT DEFAULT NULL"
+                )
+            except Exception:
+                pass  # Colonne deja existante
             # Migration : ajouter genre si absent
             try:
                 self._conn.execute(

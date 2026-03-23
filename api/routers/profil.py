@@ -20,7 +20,7 @@ from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
 from sylea.core.engine.probability import MoteurProbabilite
 
 from api.schemas import ProfilIn, ProfilOut, ObjectifOut, ProbabiliteOut, ProbabiliteIn, JourneeIn, BienEtreScoresOut, QuestionsObjectifIn
-from api.dependencies import get_profil_repo, get_decision_repo, get_moteur, get_agent
+from api.dependencies import get_profil_repo, get_decision_repo, get_moteur, get_agent, get_optional_user
 from api.context_helper import format_device_context
 
 router = APIRouter(prefix="/api/profil", tags=["profil"])
@@ -136,11 +136,14 @@ def _profil_in_to_model(data: ProfilIn, existing: Optional[ProfilUtilisateur] = 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("", response_model=ProfilOut)
-async def get_profil(repo: ProfilRepository = Depends(get_profil_repo)):
+async def get_profil(
+    repo: ProfilRepository = Depends(get_profil_repo),
+    user_id: str | None = Depends(get_optional_user),
+):
     """Retourne le profil existant (404 si aucun profil)."""
-    if not repo.existe():
+    if not repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
-    profil = repo.charger()
+    profil = repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
     return _to_profil_out(profil)
@@ -151,9 +154,10 @@ async def upsert_profil(
     data: ProfilIn,
     repo: ProfilRepository = Depends(get_profil_repo),
     decision_repo: DecisionRepository = Depends(get_decision_repo),
+    user_id: str | None = Depends(get_optional_user),
 ):
     """Crée un nouveau profil ou met à jour l'existant."""
-    existing = repo.charger() if repo.existe() else None
+    existing = repo.charger(auth_user_id=user_id) if repo.existe(auth_user_id=user_id) else None
     try:
         profil = _profil_in_to_model(data, existing)
     except ValueError as e:
@@ -175,7 +179,7 @@ async def upsert_profil(
             pass
 
     profil.marquer_modification()
-    repo.sauvegarder(profil)
+    repo.sauvegarder(profil, auth_user_id=user_id)
     return _to_profil_out(profil)
 
 
@@ -185,6 +189,7 @@ async def recalculer_probabilite(
     repo: ProfilRepository = Depends(get_profil_repo),
     moteur: MoteurProbabilite = Depends(get_moteur),
     agent=Depends(get_agent),
+    user_id: str | None = Depends(get_optional_user),
 ):
     """
     Recalcule la probabilité de réussite.
@@ -192,9 +197,9 @@ async def recalculer_probabilite(
     1. Calcul déterministe local (MoteurProbabilite)
     2. Enrichissement IA si l'agent Claude est disponible
     """
-    if not repo.existe():
+    if not repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
-    profil = repo.charger()
+    profil = repo.charger(auth_user_id=user_id)
     if profil is None or not profil.objectif:
         raise HTTPException(status_code=400, detail="Profil ou objectif manquant.")
 
@@ -397,11 +402,12 @@ async def analyser_journee(data: JourneeIn):
 @router.delete("")
 async def supprimer_profil(
     repo: ProfilRepository = Depends(get_profil_repo),
+    user_id: str | None = Depends(get_optional_user),
 ):
     """Supprime le profil et toutes ses décisions."""
-    if not repo.existe():
+    if not repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil à supprimer.")
-    profil = repo.charger()
+    profil = repo.charger(auth_user_id=user_id)
     if profil:
-        repo.supprimer(profil.id)
+        repo.supprimer(profil.id, auth_user_id=user_id)
     return {"detail": "Profil supprimé."}

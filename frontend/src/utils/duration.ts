@@ -88,21 +88,32 @@ export function probFromJours(totalJ: number): number {
  * La durée inclut des heures si le delta est inférieur à 1 jour.
  */
 export function deltaFromImpact(probActuelle: number, impactPoints: number, maxJours?: number): string {
+  // Conversion via la formule globale probabilité → temps (toujours utilisée)
   const pAvant = Math.max(0, Math.min(100, probActuelle))
   const pApres = Math.max(0, Math.min(100, probActuelle + impactPoints))
   const dAvant = dureeFromProb(pAvant)
   const dApres = dureeFromProb(pApres)
-  // positif = gain de temps (bonne décision), négatif = perte
-  let deltaFloat = dAvant.totalJours - dApres.totalJours
-  // Plafonner par l'impact temporel si fourni (le gain/perte ne peut pas dépasser le cadre temporel)
-  if (maxJours !== undefined && maxJours > 0) {
-    deltaFloat = Math.max(-maxJours, Math.min(maxJours, deltaFloat))
-  }
+  const deltaFloat = dAvant.totalJours - dApres.totalJours
   const sign = deltaFloat >= 0 ? '+' : '-'
   const abs  = Math.abs(deltaFloat)
 
-  if (abs < 1) {
-    const totalMin = Math.round(abs * 24 * 60)
+  // Plafonner le delta par le cadre temporel si fourni
+  const cappedAbs = (maxJours !== undefined && maxJours > 0)
+    ? Math.min(abs, maxJours)
+    : abs
+
+  // Pour les cadres courts (≤ 7 jours), afficher en heures/minutes
+  if (maxJours !== undefined && maxJours <= 7) {
+    const totalMin = Math.round(cappedAbs * 24 * 60)
+    if (totalMin < 1) return '0min'
+    if (totalMin < 60) return `${sign}${totalMin}min`
+    const h = Math.floor(totalMin / 60)
+    const m = totalMin % 60
+    return m > 0 ? `${sign}${h}h${m}min` : `${sign}${h}h`
+  }
+
+  if (cappedAbs < 1) {
+    const totalMin = Math.round(cappedAbs * 24 * 60)
     if (totalMin < 60) {
       return totalMin === 0 ? '0min' : `${sign}${totalMin}min`
     }
@@ -111,7 +122,7 @@ export function deltaFromImpact(probActuelle: number, impactPoints: number, maxJ
     return m > 0 ? `${sign}${h}h${m}min` : `${sign}${h}h`
   }
 
-  const absJ  = Math.round(abs)
+  const absJ  = Math.round(cappedAbs)
   const ans   = Math.floor(absJ / 365)
   const restJ = absJ % 365
   const mois  = Math.floor(restJ / 30)

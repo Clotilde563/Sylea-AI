@@ -238,31 +238,49 @@ export function DashboardPage() {
         {sousObjectifs.length > 0 && (() => {
           const activeIdx = sousObjectifs.findIndex(so => so.progression < 100)
           // Calcul proportionnel : chaque SO affiche sa part du temps total réel
+          // Avec correction d'arrondi pour que la somme = total exact
           const totalJoursObjectif = duree.totalJours
           const sumTempsEstime = sousObjectifs.reduce((s, so) => s + (so.temps_estime || 0), 0)
+          // Pré-calculer les jours exacts puis ajuster le dernier pour que la somme soit exacte
+          const soJoursRaw = sousObjectifs.map(so =>
+            sumTempsEstime > 0 ? (so.temps_estime / sumTempsEstime) * totalJoursObjectif : 0
+          )
+          const sumRaw = soJoursRaw.reduce((s, j) => s + Math.round(j), 0)
+          const diff = Math.round(totalJoursObjectif) - sumRaw
+          // Ajouter la différence d'arrondi au dernier SO
+          const soJoursAjustes = soJoursRaw.map((j, i) =>
+            i === soJoursRaw.length - 1 ? Math.round(j) + diff : Math.round(j)
+          )
           return (
             <div className="card animate-fade-in" style={{ marginBottom: '1.5rem', padding: '1.25rem' }}>
               <h3 style={{ fontSize: '0.75rem', fontWeight: 700, letterSpacing: '0.1em', color: 'var(--accent-violet-light)', textTransform: 'uppercase', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <span>{'\u25c7'}</span> {t('dashboard.sous_objectifs')}
               </h3>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-              {sousObjectifs.map((so, idx) => {
+              {(() => { const SO_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#10b981']; const SO_COLORS_LIGHT = ['#60a5fa', '#a78bfa', '#fbbf24', '#34d399']; return sousObjectifs.map((so, idx) => {
                   const isCompleted = so.progression >= 100
                   const isActive = idx === activeIdx
-                  const barColor = isCompleted ? 'linear-gradient(90deg, #22c55e, #16a34a)' : isActive ? 'linear-gradient(90deg, #60a5fa, #818cf8)' : 'linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.04))'
-                  const textColor = isCompleted ? '#4ade80' : isActive ? 'var(--text-primary)' : 'var(--text-muted)'
-                  // Temps proportionnel au temps total de l'objectif de vie
-                  const soJours = sumTempsEstime > 0 ? (so.temps_estime / sumTempsEstime) * totalJoursObjectif : 0
-                  const tempsLabel = soJours > 0 ? (soJours >= 365 ? `${Math.round(soJours / 365)} an${soJours >= 730 ? 's' : ''}` : soJours >= 30 ? `${Math.round(soJours / 30)} mois` : `${Math.round(soJours)} j`) : null
+                  const soColor = SO_COLORS[idx % SO_COLORS.length]
+                  const soColorLight = SO_COLORS_LIGHT[idx % SO_COLORS_LIGHT.length]
+                  const barColor = isCompleted ? 'linear-gradient(90deg, #22c55e, #16a34a)' : isActive ? `linear-gradient(90deg, ${soColor}, ${soColorLight})` : `linear-gradient(90deg, ${soColor}66, ${soColor}33)`
+                  const textColor = isCompleted ? '#4ade80' : isActive ? 'var(--text-primary)' : `${soColor}B3`
+                  // Temps proportionnel ajusté (somme = total objectif exact)
+                  const soJours = soJoursAjustes[idx]
+                  const tempsLabel = soJours > 0 ? (
+                    soJours >= 365 ? (() => { const ans = Math.floor(soJours / 365); const moisR = Math.round((soJours % 365) / 30); return moisR > 0 ? `${ans} an${ans > 1 ? 's' : ''} ${moisR} mois` : `${ans} an${ans > 1 ? 's' : ''}`; })()
+                    : soJours >= 30 ? (() => { const mois = Math.floor(soJours / 30); const joursR = soJours - mois * 30; return joursR > 0 ? `${mois} mois ${joursR} jour${joursR > 1 ? 's' : ''}` : `${mois} mois`; })()
+                    : soJours >= 1 ? `${soJours} jour${soJours > 1 ? 's' : ''}`
+                    : `${Math.round(soJours * 24)}h`
+                  ) : null
                   return (
                     <div key={so.id} style={{
                       transition: 'all 0.3s',
                       ...(isActive ? {
-                        background: 'linear-gradient(135deg, rgba(96,165,250,0.08), rgba(129,140,248,0.04))',
-                        border: '1px solid rgba(96,165,250,0.3)',
+                        background: `linear-gradient(135deg, ${soColor}14, ${soColor}0A)`,
+                        border: `1px solid ${soColor}4D`,
                         borderRadius: 'var(--radius-md)',
                         padding: '0.65rem 0.75rem',
-                        boxShadow: '0 0 16px rgba(96,165,250,0.12)',
+                        boxShadow: `0 0 16px ${soColor}1F`,
                       } : {
                         padding: '0.3rem 0.75rem',
                       })
@@ -270,7 +288,7 @@ export function DashboardPage() {
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.3rem' }}>
                         <span style={{ fontSize: '0.82rem', color: textColor, display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: isActive ? 600 : 400 }}>
                           {isCompleted && <span style={{ color: '#22c55e' }}>{'✓'}</span>}
-                          {isActive && <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#60a5fa', boxShadow: '0 0 8px rgba(96,165,250,0.6)', animation: 'pulse 2s infinite' }} />}
+                          {isActive && <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: soColor, boxShadow: `0 0 8px ${soColor}99`, animation: 'pulse 2s infinite' }} />}
                           {so.titre}
                           {isActive && (
                             <span style={{
@@ -278,9 +296,9 @@ export function DashboardPage() {
                               fontWeight: 700,
                               letterSpacing: '0.08em',
                               textTransform: 'uppercase',
-                              color: '#60a5fa',
-                              background: 'rgba(96,165,250,0.12)',
-                              border: '1px solid rgba(96,165,250,0.3)',
+                              color: soColor,
+                              background: `${soColor}1F`,
+                              border: `1px solid ${soColor}4D`,
                               borderRadius: '10px',
                               padding: '0.15rem 0.5rem',
                               marginLeft: '0.25rem',
@@ -288,17 +306,18 @@ export function DashboardPage() {
                             }}>{t('dashboard.a_prioriser')}</span>
                           )}
                         </span>
-                        <span style={{ fontSize: '0.72rem', color: isCompleted ? '#4ade80' : 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          {tempsLabel && <span style={{ color: isActive ? 'var(--accent-violet-light)' : 'var(--text-muted)', fontSize: '0.68rem', opacity: isActive ? 1 : 0.7 }}>~{tempsLabel}</span>}
-                          {so.progression.toFixed(0)}%
-                        </span>
+                        {tempsLabel && (
+                          <span style={{ fontSize: isActive ? '0.82rem' : '0.75rem', fontWeight: isActive ? 600 : 500, color: isCompleted ? '#4ade80' : isActive ? 'var(--accent-violet-light)' : `${soColor}B3`, opacity: isActive ? 1 : 0.8 }}>
+                            {tempsLabel}
+                          </span>
+                        )}
                       </div>
                       <div style={{ height: '6px', background: 'rgba(255,255,255,0.06)', borderRadius: '3px', overflow: 'hidden' }}>
-                        <div style={{ height: '100%', width: `${Math.min(100, so.progression)}%`, background: barColor, borderRadius: '3px', transition: 'width 0.5s ease', boxShadow: isActive ? '0 0 8px rgba(96,165,250,0.4)' : 'none' }} />
+                        <div style={{ height: '100%', width: `${Math.min(100, so.progression)}%`, background: barColor, borderRadius: '3px', transition: 'width 0.5s ease', boxShadow: isActive ? `0 0 8px ${soColor}66` : 'none' }} />
                       </div>
                     </div>
                   )
-                })}
+                }); })()}
               </div>
               {loadingSO && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.75rem', color: 'var(--text-muted)' }}>

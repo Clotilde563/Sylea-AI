@@ -12,11 +12,12 @@ from __future__ import annotations
 
 from typing import AsyncGenerator
 
-from fastapi import Depends
+from fastapi import Depends, Request
 
 from sylea.core.storage.database import DatabaseManager
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
 from sylea.core.engine.probability import MoteurProbabilite
+from api.auth.security import decode_token
 
 
 async def get_db() -> AsyncGenerator[DatabaseManager, None]:
@@ -48,6 +49,19 @@ def get_decision_repo(db: DatabaseManager = Depends(get_db)) -> DecisionReposito
 def get_moteur() -> MoteurProbabilite:
     """Retourne le moteur de probabilité (stateless, réutilisable)."""
     return MoteurProbabilite()
+
+
+async def get_optional_user(request: Request) -> str | None:
+    """Extract user_id from JWT Bearer token if present, return None otherwise.
+
+    This allows endpoints to work both with and without authentication:
+    - With auth: filters data by auth_user_id (multi-user web mode)
+    - Without auth: loads first profil (CLI / single-user mode)
+    """
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return decode_token(auth[7:])
+    return None
 
 
 def get_agent():

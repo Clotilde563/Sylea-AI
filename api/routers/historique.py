@@ -17,7 +17,7 @@ from sylea.config.settings import PROB_MIN, PROB_MAX
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
 
 from api.schemas import DecisionOut, OptionDilemmeOut, ActionAgentOut, AgentRapportOut, HistoriquePagineOut
-from api.dependencies import get_profil_repo, get_decision_repo
+from api.dependencies import get_profil_repo, get_decision_repo, get_optional_user
 
 router = APIRouter(prefix="/api/historique", tags=["historique"])
 
@@ -70,12 +70,13 @@ async def get_historique(
     limite: int = Query(default=20, ge=1, le=100),
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     decision_repo: DecisionRepository = Depends(get_decision_repo),
+    user_id: str | None = Depends(get_optional_user),
 ):
     """Retourne les N dernières décisions de l'utilisateur."""
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
 
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
@@ -91,11 +92,12 @@ async def get_historique_pagine(
     recherche: str = Query(default=""),
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     decision_repo: DecisionRepository = Depends(get_decision_repo),
+    user_id: str | None = Depends(get_optional_user),
 ):
     """Retourne les decisions paginées avec tri et recherche."""
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
@@ -117,12 +119,13 @@ async def get_historique_pagine(
 async def get_agent_rapport(
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     decision_repo: DecisionRepository = Depends(get_decision_repo),
+    user_id: str | None = Depends(get_optional_user),
 ):
     """Retourne le rapport des actions effectuées par l'agent."""
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
 
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
@@ -140,12 +143,13 @@ async def supprimer_decision(
     decision_id: str,
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     decision_repo: DecisionRepository = Depends(get_decision_repo),
+    user_id: str | None = Depends(get_optional_user),
 ):
     """Supprime une décision et recalcule la probabilité actuelle."""
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
 
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 

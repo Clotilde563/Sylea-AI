@@ -26,7 +26,7 @@ from api.schemas import (
     DecisionOut,
     OptionDilemmeOut,
 )
-from api.dependencies import get_profil_repo, get_decision_repo, get_agent
+from api.dependencies import get_profil_repo, get_decision_repo, get_agent, get_optional_user
 from api.context_helper import format_device_context
 
 router = APIRouter(prefix="/api/dilemme", tags=["dilemme"])
@@ -70,6 +70,7 @@ async def analyser_dilemme(
     data: DilemmeIn,
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     agent=Depends(get_agent),
+    user_id: str | None = Depends(get_optional_user),
 ):
     """
     Analyse un dilemme via l'IA Claude.
@@ -77,10 +78,10 @@ async def analyser_dilemme(
     Retourne pros/cons + impact sur la probabilité pour N options.
     Si pas d'agent Claude disponible, retourne une analyse basique locale.
     """
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
 
-    profil: ProfilUtilisateur = profil_repo.charger()
+    profil: ProfilUtilisateur = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
@@ -193,16 +194,17 @@ async def choisir_option(
     data: ChoixIn,
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     decision_repo: DecisionRepository = Depends(get_decision_repo),
+    user_id: str | None = Depends(get_optional_user),
 ):
     """
     Enregistre le choix de l'utilisateur et met à jour sa probabilité.
 
     Crée une Decision dans la base, met à jour probabilite_actuelle du profil.
     """
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
 
-    profil: ProfilUtilisateur = profil_repo.charger()
+    profil: ProfilUtilisateur = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 

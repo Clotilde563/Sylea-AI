@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useT, useLocale } from '../i18n/LanguageContext'
 import { LANGUAGES } from '../i18n/languages'
 import { api } from '../api/client'
 import { useStore } from '../store/useStore'
+import { useAuthStore } from '../auth/authStore'
 import SecurityGauge from '../security/SecurityGauge'
 import PatternGrid from '../security/PatternGrid'
 import {
@@ -89,6 +91,8 @@ export default function ParametresPage() {
   const t = useT()
   const { locale, setLocale } = useLocale()
   const profil = useStore(s => s.profil)
+  const authUser = useAuthStore(s => s.user)
+  const authToken = useAuthStore(s => s.token)
   const [openSection, setOpenSection] = useState<string | null>(null)
 
   const toggle = (key: string) => setOpenSection(prev => prev === key ? null : key)
@@ -112,7 +116,7 @@ export default function ParametresPage() {
           title={t('settings.profil')} description={t('settings.profil_desc')}
           icon={IconUser} open={openSection === 'profil'} onClick={() => toggle('profil')}
         >
-          <ProfilSection profil={profil} t={t} />
+          <ProfilSection profil={profil} t={t} authUser={authUser} authToken={authToken} />
         </SettingsCard>
 
         {/* 2. Langue */}
@@ -128,7 +132,7 @@ export default function ParametresPage() {
           title={t('settings.securite')} description={t('settings.securite_desc')}
           icon={IconShield} open={openSection === 'securite'} onClick={() => toggle('securite')}
         >
-          <SecuriteSection t={t} />
+          <SecuriteSection t={t} authUser={authUser} />
         </SettingsCard>
 
         {/* 4. Archives */}
@@ -146,8 +150,9 @@ export default function ParametresPage() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 1 : Mon profil
 // ═══════════════════════════════════════════════════════════════════════════════
-function ProfilSection({ profil, t }: { profil: ReturnType<typeof useStore>['profil']; t: (k: string) => string }) {
-  if (!profil) return <p style={{ color: 'var(--text-muted)', padding: '1rem 0' }}>{t('settings.non_defini')}</p>
+function ProfilSection({ profil, t, authUser, authToken }: { profil: ReturnType<typeof useStore>['profil']; t: (k: string) => string; authUser: { id: string; email: string; provider: string } | null; authToken: string | null }) {
+  const navigate = useNavigate()
+  const logout = useAuthStore(s => s.logout)
 
   const Field = ({ label, value }: { label: string; value: string | number | null | undefined }) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.45rem 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
@@ -185,38 +190,71 @@ function ProfilSection({ profil, t }: { profil: ReturnType<typeof useStore>['pro
 
   return (
     <div style={{ paddingTop: '0.75rem' }}>
-      {/* Identite */}
-      <h4 style={sectionTitle}>{t('settings.identite')}</h4>
-      <Field label={t('settings.genre')} value={profil.genre || t('settings.non_renseigne')} />
-      <Field label={t('settings.nom')} value={profil.nom} />
-      <Field label={t('settings.age')} value={`${profil.age} ${t('settings.ans')}`} />
-      <Field label={t('settings.profession')} value={profil.profession} />
-      <Field label={t('settings.ville')} value={profil.ville} />
-      <Field label={t('settings.situation')} value={profil.situation_familiale} />
-
-      {/* Objectif */}
-      {profil.objectif && (
+      {/* Compte */}
+      {authUser && (
         <>
-          <h4 style={{ ...sectionTitle, marginTop: '1rem' }}>{t('settings.objectif')}</h4>
-          <Field label={t('settings.categorie')} value={profil.objectif.categorie} />
-          <Field label={t('settings.deadline')} value={profil.objectif.deadline || t('settings.non_renseigne')} />
-          <Field label={t('settings.probabilite')} value={`${profil.probabilite_actuelle?.toFixed(1) ?? 0}%`} />
-          <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: '0.4rem', lineHeight: 1.5 }}>
-            {profil.objectif.description?.slice(0, 200)}{(profil.objectif.description?.length ?? 0) > 200 ? '...' : ''}
-          </div>
+          <h4 style={sectionTitle}>COMPTE</h4>
+          <Field label="E-mail" value={authUser.email} />
+          <Field label="Connexion via" value={authUser.provider === 'google' ? 'Google' : authUser.provider === 'github' ? 'GitHub' : 'E-mail / Mot de passe'} />
+          <Field label="Statut" value={authToken ? 'Connecté' : 'Déconnecté'} />
+          <button
+            onClick={() => { logout(); navigate('/login', { replace: true }) }}
+            style={{
+              marginTop: '0.75rem', width: '100%', padding: '0.65rem',
+              background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
+              borderRadius: '0.6rem', color: '#ef4444', fontSize: '0.85rem',
+              fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.2)' }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.1)' }}
+          >
+            Se déconnecter
+          </button>
+          <div style={{ height: 1, background: 'rgba(255,255,255,0.06)', margin: '0.75rem 0' }} />
         </>
       )}
 
-      {/* Competences, diplomes, langues */}
-      <h4 style={{ ...sectionTitle, marginTop: '1rem' }}>{t('settings.competences')}</h4>
-      <Tags items={profil.competences || []} />
-      <h4 style={{ ...sectionTitle, marginTop: '0.75rem' }}>{t('settings.diplomes')}</h4>
-      <Tags items={profil.diplomes || []} />
-      <h4 style={{ ...sectionTitle, marginTop: '0.75rem' }}>{t('settings.langues')}</h4>
-      <Tags items={profil.langues || []} />
+      {/* Si pas de profil Syléa */}
+      {!profil && (
+        <p style={{ color: 'var(--text-muted)', padding: '0.5rem 0', fontSize: '0.85rem', fontStyle: 'italic' }}>
+          Profil Syléa non créé. Rendez-vous sur le tableau de bord pour créer votre profil.
+        </p>
+      )}
 
-      {/* Bien-etre */}
-      <h4 style={{ ...sectionTitle, marginTop: '1rem' }}>{t('settings.bien_etre')}</h4>
+      {/* Identite + tout le profil Syléa */}
+      {profil && (
+        <>
+          <h4 style={sectionTitle}>{t('settings.identite')}</h4>
+          <Field label={t('settings.genre')} value={profil.genre || t('settings.non_renseigne')} />
+          <Field label={t('settings.nom')} value={profil.nom} />
+          <Field label={t('settings.age')} value={`${profil.age} ${t('settings.ans')}`} />
+          <Field label={t('settings.profession')} value={profil.profession} />
+          <Field label={t('settings.ville')} value={profil.ville} />
+          <Field label={t('settings.situation')} value={profil.situation_familiale} />
+
+          {/* Objectif */}
+          {profil.objectif && (
+            <>
+              <h4 style={{ ...sectionTitle, marginTop: '1rem' }}>{t('settings.objectif')}</h4>
+              <Field label={t('settings.categorie')} value={profil.objectif.categorie} />
+              <Field label={t('settings.deadline')} value={profil.objectif.deadline || t('settings.non_renseigne')} />
+              <Field label={t('settings.probabilite')} value={`${profil.probabilite_actuelle?.toFixed(1) ?? 0}%`} />
+              <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: '0.4rem', lineHeight: 1.5 }}>
+                {profil.objectif.description?.slice(0, 200)}{(profil.objectif.description?.length ?? 0) > 200 ? '...' : ''}
+              </div>
+            </>
+          )}
+
+          {/* Competences, diplomes, langues */}
+          <h4 style={{ ...sectionTitle, marginTop: '1rem' }}>{t('settings.competences')}</h4>
+          <Tags items={profil.competences || []} />
+          <h4 style={{ ...sectionTitle, marginTop: '0.75rem' }}>{t('settings.diplomes')}</h4>
+          <Tags items={profil.diplomes || []} />
+          <h4 style={{ ...sectionTitle, marginTop: '0.75rem' }}>{t('settings.langues')}</h4>
+          <Tags items={profil.langues || []} />
+
+          {/* Bien-etre */}
+          <h4 style={{ ...sectionTitle, marginTop: '1rem' }}>{t('settings.bien_etre')}</h4>
       <ScoreBar label={t('settings.sante')} value={profil.niveau_sante} />
       <ScoreBar label={t('settings.stress')} value={profil.niveau_stress} />
       <ScoreBar label={t('settings.energie')} value={profil.niveau_energie} />
@@ -229,6 +267,8 @@ function ProfilSection({ profil, t }: { profil: ReturnType<typeof useStore>['pro
       <Field label={t('settings.loisirs')} value={`${profil.heures_loisirs} ${t('settings.h_jour')}`} />
       <Field label={t('settings.transport')} value={`${profil.heures_transport} ${t('settings.h_jour')}`} />
       <Field label={t('settings.objectif_h')} value={`${profil.heures_objectif} ${t('settings.h_jour')}`} />
+        </>
+      )}
     </div>
   )
 }
@@ -292,7 +332,7 @@ function LangueSection({ locale, setLocale, t }: { locale: string; setLocale: (c
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 3 : Securite
 // ═══════════════════════════════════════════════════════════════════════════════
-function SecuriteSection({ t }: { t: (k: string) => string }) {
+function SecuriteSection({ t, authUser }: { t: (k: string) => string; authUser: { id: string; email: string; provider: string } | null }) {
   const [secLevel, setSecLevel] = useState(computeSecurityLevel)
   const [lockType, setLockType] = useState<string | null>(localStorage.getItem('sylea-lock-type'))
   const [mode, setMode] = useState<'idle' | 'password' | 'pattern'>('idle')
@@ -363,6 +403,36 @@ function SecuriteSection({ t }: { t: (k: string) => string }) {
   return (
     <div style={{ paddingTop: '0.75rem', textAlign: 'center' }}>
       <SecurityGauge level={secLevel} />
+
+      {/* Info compte connecté */}
+      {authUser && (
+        <div style={{
+          marginTop: '0.75rem', padding: '0.75rem 1rem', borderRadius: '0.75rem',
+          background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)',
+          textAlign: 'left',
+        }}>
+          <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#3b82f6', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '0.4rem' }}>
+            Authentification
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', marginBottom: '0.2rem' }}>
+            <span style={{ color: 'var(--text-muted)' }}>E-mail</span>
+            <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{authUser.email}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', marginBottom: '0.2rem' }}>
+            <span style={{ color: 'var(--text-muted)' }}>Methode</span>
+            <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>
+              {authUser.provider === 'google' ? 'Google OAuth' : authUser.provider === 'github' ? 'GitHub OAuth' : 'E-mail / Mot de passe'}
+            </span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem' }}>
+            <span style={{ color: 'var(--text-muted)' }}>Statut</span>
+            <span style={{ color: '#4ade80', fontWeight: 500, display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80' }} />
+              Connecte
+            </span>
+          </div>
+        </div>
+      )}
 
       {lockType && (
         <div style={{

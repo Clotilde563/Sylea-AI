@@ -19,16 +19,33 @@ import type {
 } from '../types'
 
 const BASE = '/api'
+const AUTH_TOKEN_KEY = 'sylea_auth_token'
+
+function getAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const token = localStorage.getItem(AUTH_TOKEN_KEY)
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  return headers
+}
 
 async function request<T>(
   path: string,
   options?: RequestInit,
 ): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     ...options,
   })
   if (!res.ok) {
+    // Token expiré ou invalide → déconnexion automatique
+    if (res.status === 401) {
+      localStorage.removeItem(AUTH_TOKEN_KEY)
+      localStorage.removeItem('sylea_auth_user')
+      window.location.href = '/login'
+      throw new Error('Session expirée')
+    }
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail || `Erreur ${res.status}`)
   }
@@ -223,4 +240,34 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ messages, contexte_appareil }),
     }),
+
+  // ── Agent companion (Agent Sylea 1) ──────────────────────────────────
+
+  agentChat: (messages: Array<{ role: string; content: string }>, contexte_appareil?: DeviceContext): Promise<{ message: string }> =>
+    request<{ message: string }>('/agent/chat', {
+      method: 'POST',
+      body: JSON.stringify({ messages, contexte_appareil }),
+    }),
+
+  // ── Auth ────────────────────────────────────────────────────────────────
+  authLogin: (email: string, password: string): Promise<{ token: string; user: { id: string; email: string; provider: string } }> =>
+    request('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
+
+  authRegister: (email: string, password: string): Promise<{ requires_verification?: boolean; message?: string; token?: string }> =>
+    request('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
+
+  authVerify: (email: string, code: string): Promise<{ access_token: string }> =>
+    request('/auth/verify', {
+      method: 'POST',
+      body: JSON.stringify({ email, code }),
+    }),
+
+  authMe: (): Promise<{ id: string; email: string; provider: string }> =>
+    request('/auth/me'),
 }

@@ -326,3 +326,20 @@ class MoteurProbabilite:
                 "Attention : cette décision impacte significativement votre objectif. "
                 "Réorientez-vous rapidement."
             )
+
+
+def jours_vers_probabilite(prob_actuelle: float, impact_jours: float) -> float:
+    """Convert time impact (days) to probability impact (%).
+
+    Args:
+        prob_actuelle: Current probability (0-100)
+        impact_jours: Days gained (positive) or lost (negative)
+
+    Returns:
+        Probability delta in percentage points
+    """
+    prob_totale = max(0.01, min(99.99, prob_actuelle))
+    temps_j = min(73000, max(1, round(900 * ((100 - prob_totale) / prob_totale) ** 0.675)))
+    temps_apres = max(1, temps_j - impact_jours)
+    prob_apres = 100.0 / (1.0 + (temps_apres / 900.0) ** (1.0 / 0.675))
+    return round(prob_apres - prob_totale, 4)

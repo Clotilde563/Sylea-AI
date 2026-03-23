@@ -174,63 +174,78 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
 
         # Construire le JSON attendu
         json_options = ",\n  ".join(
-            f'"option_{l.lower()}": {{"pros": ["5 mots max", "5 mots max"], "cons": ["5 mots max"], "impact_probabilite": 0.0, "resume": "5 mots max"}}'
+            f'"option_{l.lower()}": {{"pros": ["5 mots max", "5 mots max"], "cons": ["5 mots max"], "impact_jours": 0.0, "resume": "5 mots max"}}'
             for l in lettres
         )
 
 
-        # Contexte temporel pour l'IA (sans plafond)
+        # Contexte temporel pour l'IA
         if impact_temporel_jours is not None and impact_temporel_jours > 0:
-            if impact_temporel_jours <= 1:
-                contexte_temporel = f"Ce choix a un impact sur 1 jour."
-            elif impact_temporel_jours <= 7:
-                contexte_temporel = f"Ce choix a un impact sur ~1 semaine."
-            elif impact_temporel_jours <= 30:
-                contexte_temporel = f"Ce choix a un impact sur ~1 mois."
-            elif impact_temporel_jours <= 365:
-                contexte_temporel = f"Ce choix a un impact sur ~{impact_temporel_jours // 30} mois."
+            cadre_jours = impact_temporel_jours
+            if cadre_jours <= 1:
+                cadre_str = "1 jour (24 heures)"
+                unite_impact = "heures (ex: +2.5 = 2h30 gagnees, -1.0 = 1h perdue)"
+            elif cadre_jours <= 7:
+                cadre_str = f"{cadre_jours} jours"
+                unite_impact = "heures (ex: +8.0 = 8h gagnees, -3.5 = 3h30 perdues)"
+            elif cadre_jours <= 30:
+                cadre_str = f"~1 mois ({cadre_jours} jours)"
+                unite_impact = "jours (ex: +5.0 = 5 jours gagnes, -2.0 = 2 jours perdus)"
+            elif cadre_jours <= 365:
+                cadre_str = f"~{cadre_jours // 30} mois ({cadre_jours} jours)"
+                unite_impact = "jours (ex: +30.0 = 1 mois gagne, -15.0 = 15 jours perdus)"
             else:
-                contexte_temporel = f"Ce choix a un impact sur ~{impact_temporel_jours // 365} an(s) (long terme)."
+                cadre_str = f"TOUTE LA DUREE DE L'OBJECTIF ({temps_estime_str}, soit {_tj} jours)"
+                unite_impact = "jours (ex: +90.0 = 3 mois gagnes, -30.0 = 1 mois perdu)"
         else:
-            contexte_temporel = f"L'objectif est estime a {temps_estime_str}."
+            cadre_jours = _tj
+            cadre_str = f"TOUTE LA DUREE DE L'OBJECTIF ({temps_estime_str}, soit {_tj} jours)"
+            unite_impact = "jours (ex: +90.0 = 3 mois gagnes, -30.0 = 1 mois perdu)"
 
-        prompt = f"""Tu es un robot probabiliste froid et factuel. Tu analyses un dilemme de vie
-et calcules l'impact REEL de chaque option sur l'objectif. ZERO emotion, ZERO encouragement.
-Chaque point de pourcentage doit etre justifie factuellement.
+        prompt = f"""Tu es un robot probabiliste froid et factuel. Tu analyses un dilemme de vie.
+ZERO emotion, ZERO encouragement. Tu raisonnes en TEMPS, pas en pourcentage.
 
 PROFIL R\u00c9SUM\u00c9 :
 {profil_resume}
 {device_context}
 
 OBJECTIF ULTIME : {objectif_desc}
-PROBABILIT\u00c9 ACTUELLE D'ATTEINDRE L'OBJECTIF : {prob_totale:.2f}%
-TEMPS ESTIME POUR L'OBJECTIF : {temps_estime_str}
-{contexte_temporel}
+PROBABILIT\u00c9 ACTUELLE : {prob_totale:.2f}%
+TEMPS ESTIME RESTANT : {temps_estime_str} ({_tj} jours)
+
+CADRE TEMPOREL DE CE CHOIX : {cadre_str}
 
 QUESTION : {question}
 
 {options_text}
 
-REGLES D'IMPACT :
-- AUCUN plafond artificiel. L'impact peut aller de -{prob_totale:.1f} a +{100 - prob_totale:.1f}.
-- Sois FACTUEL : quel pourcentage de l'objectif cette option couvre-t-elle concretement ?
-- COHERENCE TEMPORELLE OBLIGATOIRE : {contexte_temporel} Le gain ou la perte en temps NE PEUT PAS depasser cette duree. Si l'impact est sur 1 jour, le delta en probabilite doit correspondre au maximum a 1 jour de temps gagne/perdu, PAS 2 jours ou plus.
-- Pour convertir : sur un objectif de {temps_estime_str}, 1 jour = environ {1.0 / max(1, _tj) * 100:.4f}% de probabilite.
-- Un choix quotidien banal (regarder une video, manger un repas) = impact quasi nul (+/-0.001 a 0.01%).
-- Un choix strategique majeur (changer de carriere, investissement important) = impact proportionnel a son effet reel.
-- Ne donne JAMAIS un impact par sympathie ou encouragement. Uniquement des faits.
+METHODE DE CALCUL (OBLIGATOIRE) :
+1. PENSE EN TEMPS D'ABORD : combien de temps (heures ou jours) cette option fait-elle
+   REELLEMENT gagner ou perdre sur l'objectif, DANS LA LIMITE du cadre temporel ({cadre_str}) ?
+2. Le champ "impact_jours" doit contenir ce temps en {unite_impact}.
+3. L'impact ne peut JAMAIS depasser le cadre temporel ({cadre_jours} jours max en valeur absolue).
+4. Exemples concrets pour un cadre de 1 jour :
+   - Dormir 8h au lieu de coder = -0h productive mais +2h de productivite le lendemain = NET +2.0 (heures)
+   - Aller courir 1h = -1h de travail mais +1.5h de clarte mentale = NET +0.5 (heures)
+5. Exemples concrets pour un cadre de 1 mois :
+   - Apprendre l'anglais vs l'espagnol = l'anglais fait gagner ~5-10 jours, l'espagnol ~1-3 jours
+6. Sois REALISTE et FACTUEL. Pas d'impact par encouragement.
+
+ETUDE SCIENTIFIQUE :
+- Cite UNE etude scientifique REELLE et verifiable en rapport avec le dilemme pose.
+- Inclus : auteurs, annee, revue/institution, et lien avec le dilemme.
+- Varie l'etude selon le contexte. Sources : Nature, Science, The Lancet, PNAS, etc.
 
 REGLES DE FORMAT STRICTES :
 - pros/cons : tableau de mots-cl\u00e9s de 3 \u00e0 6 mots MAXIMUM chacun. JAMAIS de phrase compl\u00e8te.
-  BON : "Portfolio visible pour clients"
-  MAUVAIS : "Un portfolio solide est le levier n\u00b01 pour d\u00e9crocher les premiers clients freelance"
 - resume : 3 \u00e0 6 mots MAXIMUM
-- verdict : 1 seule phrase de 15 mots MAXIMUM incluant la probabilit\u00e9 et le temps
+- verdict : 1 seule phrase de 15 mots MAXIMUM
 
 R\u00e9ponds UNIQUEMENT avec ce JSON :
 {{
   {json_options},
-  "verdict": "2-3 phrases naturelles et motivantes. NE PAS mentionner de pourcentage. Explique pourquoi cette option est meilleure pour l objectif de vie.",
+  "verdict": "2-3 phrases naturelles. NE PAS mentionner de pourcentage. Explique pourquoi cette option est meilleure.",
+  "etude_scientifique": "Selon l etude de [Auteurs] ([Annee], [Revue]) sur [sujet], [conclusion cle].",
   "option_recommandee": "{lettres[0]}"
 }}"""
 
@@ -350,83 +365,78 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
 
         # Construire le JSON attendu
         json_options = ",\n  ".join(
-            f'"option_{l.lower()}": {{"pros": ["5 mots max", "5 mots max"], "cons": ["5 mots max"], "impact_probabilite": 0.0, "resume": "5 mots max"}}'
+            f'"option_{l.lower()}": {{"pros": ["5 mots max", "5 mots max"], "cons": ["5 mots max"], "impact_jours": 0.0, "resume": "5 mots max"}}'
             for l in lettres
         )
 
 
-        # Calibrer l'echelle d'impact selon l'impact temporel
+        # Contexte temporel pour l'IA
         if impact_temporel_jours is not None and impact_temporel_jours > 0:
-            if impact_temporel_jours <= 1:
-                echelle_impact = (
-                    f"Impact temporel: {impact_temporel_jours} jour(s). "
-                    f"Impacts: +/-0.01 a +/-0.1%. Choix quotidien avec peu de consequences."
-                )
-            elif impact_temporel_jours <= 7:
-                echelle_impact = (
-                    f"Impact temporel: ~1 semaine. "
-                    f"Impacts: +/-0.05 a +/-0.5%. Choix hebdomadaire."
-                )
-            elif impact_temporel_jours <= 30:
-                echelle_impact = (
-                    f"Impact temporel: ~1 mois. "
-                    f"Impacts: +/-0.1 a +/-2.0%. Choix mensuel significatif."
-                )
-            elif impact_temporel_jours <= 365:
-                echelle_impact = (
-                    f"Impact temporel: ~{impact_temporel_jours // 30} mois ({impact_temporel_jours} jours). "
-                    f"Impacts: +/-1.0 a +/-5.0%. Choix strategique qui affecte la trajectoire sur plusieurs mois."
-                )
+            cadre_jours = impact_temporel_jours
+            if cadre_jours <= 1:
+                cadre_str = "1 jour (24 heures)"
+                unite_impact = "heures (ex: +2.5 = 2h30 gagnees, -1.0 = 1h perdue)"
+            elif cadre_jours <= 7:
+                cadre_str = f"{cadre_jours} jours"
+                unite_impact = "heures (ex: +8.0 = 8h gagnees, -3.5 = 3h30 perdues)"
+            elif cadre_jours <= 30:
+                cadre_str = f"~1 mois ({cadre_jours} jours)"
+                unite_impact = "jours (ex: +5.0 = 5 jours gagnes, -2.0 = 2 jours perdus)"
+            elif cadre_jours <= 365:
+                cadre_str = f"~{cadre_jours // 30} mois ({cadre_jours} jours)"
+                unite_impact = "jours (ex: +30.0 = 1 mois gagne, -15.0 = 15 jours perdus)"
             else:
-                echelle_impact = (
-                    f"Impact temporel: {impact_temporel_jours // 365} an(s) ({impact_temporel_jours} jours, long terme). "
-                    f"Impacts: +/-2.0 a +/-8.0%. Choix de vie majeur avec consequences durables."
-                )
+                cadre_str = f"TOUTE LA DUREE DE L'OBJECTIF ({temps_estime_str}, soit {_tj} jours)"
+                unite_impact = "jours (ex: +90.0 = 3 mois gagnes, -30.0 = 1 mois perdu)"
         else:
-            echelle_impact = (
-                f"L'objectif est estime a {temps_estime_str}. "
-                f"Decisions courtes (quotidiennes): +/-0.01 a +/-0.5%, "
-                f"decisions strategiques (mois/annees): +/-1.0 a +/-5.0%"
-            )
+            cadre_jours = _tj
+            cadre_str = f"TOUTE LA DUREE DE L'OBJECTIF ({temps_estime_str}, soit {_tj} jours)"
+            unite_impact = "jours (ex: +90.0 = 3 mois gagnes, -30.0 = 1 mois perdu)"
 
-        prompt = f"""Analyse ce dilemme de vie pour aider l'utilisateur \u00e0 d\u00e9cider.
+        prompt = f"""Tu es un robot probabiliste froid et factuel. Tu analyses un dilemme de vie.
+ZERO emotion, ZERO encouragement. Tu raisonnes en TEMPS, pas en pourcentage.
 
-PROFIL R\u00c9SUM\u00c9 :
+PROFIL RESUME :
 {profil_resume}
 {device_context}
 
 OBJECTIF ULTIME : {objectif_desc}
-PROBABILIT\u00c9 ACTUELLE D'ATTEINDRE L'OBJECTIF : {prob_totale:.2f}%
-TEMPS ESTIME POUR L'OBJECTIF : {temps_estime_str}
+PROBABILITE ACTUELLE : {prob_totale:.2f}%
+TEMPS ESTIME RESTANT : {temps_estime_str} ({_tj} jours)
+
+CADRE TEMPOREL DE CE CHOIX : {cadre_str}
 
 QUESTION : {question}
 
 {options_text}
 
-REGLE ABSOLUE DE FORMAT :
-- Chaque 'pros' et 'cons' = MAXIMUM 5 mots. Exemples : 'Portfolio visible pour clients', 'Comp\u00e9tence mobile demand\u00e9e'
-- 'resume' = MAXIMUM 5 mots. Exemple : 'Priorit\u00e9 portfolio cette semaine'
-- 'verdict' = 1 phrase courte MAXIMUM
-- INTERDIT d'\u00e9crire des phrases compl\u00e8tes ou des explications d\u00e9taill\u00e9es
-
-Pour chaque option :
-1. Avantages (mots-cl\u00e9s de 3-5 mots)
-2. Inconv\u00e9nients (mots-cl\u00e9s de 3-5 mots)
-3. Impact probabilit\u00e9 (delta en %)
-   {echelle_impact}
+METHODE DE CALCUL (OBLIGATOIRE) :
+1. PENSE EN TEMPS D'ABORD : combien de temps (heures ou jours) cette option fait-elle
+   REELLEMENT gagner ou perdre sur l'objectif, DANS LA LIMITE du cadre temporel ({cadre_str}) ?
+2. Le champ "impact_jours" doit contenir ce temps en {unite_impact}.
+3. L'impact ne peut JAMAIS depasser le cadre temporel ({cadre_jours} jours max en valeur absolue).
+4. Exemples concrets pour un cadre de 1 jour :
+   - Dormir 8h au lieu de coder = +2.0 (heures de productivite gagnees)
+   - Aller courir 1h = +0.5 (heures de clarte mentale gagnees)
+5. Exemples concrets pour un cadre de 1 mois :
+   - Apprendre l'anglais vs l'espagnol = l'anglais fait gagner ~5-10 jours, l'espagnol ~1-3 jours
+6. Sois REALISTE et FACTUEL. Pas d'impact par encouragement.
 
 ETUDE SCIENTIFIQUE :
 - Cite UNE etude scientifique REELLE et verifiable en rapport avec le dilemme pose.
-- L'etude doit etre pertinente par rapport au contexte du choix (neurosciences, psychologie, economie comportementale, sociologie, sante, education, etc.)
-- Inclus : le titre ou sujet de l'etude, les auteurs principaux, l'annee de publication, l'institution ou revue, et une phrase expliquant le lien avec le dilemme.
-- Ne donne PAS toujours la meme etude. Varie selon le contexte du dilemme.
-- Exemples de sources possibles : Harvard Business Review, Nature, Science, The Lancet, Journal of Personality and Social Psychology, PNAS, etc.
+- Inclus : auteurs, annee, revue/institution, et lien avec le dilemme.
+- Varie l'etude selon le contexte. Sources : Nature, Science, The Lancet, PNAS, etc.
 
-R\u00e9ponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/apr\u00e8s) :
+REGLES DE FORMAT STRICTES :
+- pros/cons : tableau de mots-cles de 3 a 6 mots MAXIMUM chacun. JAMAIS de phrase complete.
+- resume : 3 a 6 mots MAXIMUM
+- verdict : 1 seule phrase de 15 mots MAXIMUM
+
+Reponds UNIQUEMENT avec ce JSON :
 {{
   {json_options},
-  "verdict": "MAX 15 mots. Inclure {prob_totale:.1f}% et {temps_estime_str}. Ex: Avec 38.4% et 3 ans, Option B prioritaire pour premiers clients.",
-  "etude_scientifique": "Selon l etude de [Auteurs] ([Annee], [Revue/Institution]) sur [sujet], [conclusion cle en lien avec le dilemme]. Cette recherche montre que [impact concret sur la vie].",
+  "verdict": "2-3 phrases naturelles. NE PAS mentionner de pourcentage. Explique pourquoi cette option est meilleure.",
+  "etude_scientifique": "Selon l etude de [Auteurs] ([Annee], [Revue]) sur [sujet], [conclusion cle].",
   "option_recommandee": "{lettres[0]}"
 }}"""
 
@@ -458,10 +468,27 @@ R\u00e9ponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/apr\u0
             return " ".join(words[:max_words])
 
         def _parse_option(raw: dict) -> AnalyseOption:
+            # L'IA retourne impact_jours (en jours ou heures selon le cadre)
+            # On convertit en % via la formule inverse : delta_jours → delta_%
+            impact_jours_raw = float(raw.get("impact_jours", raw.get("impact_probabilite", 0.0)))
+
+            # Pour cadres courts (≤7j), l'IA retourne des heures → convertir en jours
+            if impact_temporel_jours is not None and impact_temporel_jours <= 7:
+                impact_jours_val = impact_jours_raw / 24.0  # heures → jours
+            else:
+                impact_jours_val = impact_jours_raw  # déjà en jours
+
+            # Convertir jours → % via la formule : prob_apres = f(temps_avant - delta)
+            # temps_avant = _tj jours, temps_apres = _tj - impact_jours
+            temps_apres = max(1, _tj - impact_jours_val)
+            # Formule inverse de dureeFromProb : prob = 100 / (1 + (temps/900)^(1/0.675))
+            prob_apres = 100.0 / (1.0 + (temps_apres / 900.0) ** (1.0 / 0.675))
+            impact_pct = prob_apres - prob_totale
+
             return AnalyseOption(
                 pros=[_truncate(p) for p in raw.get("pros", [])],
                 cons=[_truncate(c) for c in raw.get("cons", [])],
-                impact_probabilite=float(raw.get("impact_probabilite", 0.0)),
+                impact_probabilite=round(impact_pct, 4),
                 resume=_truncate(raw.get("resume", ""), 8),
             )
 

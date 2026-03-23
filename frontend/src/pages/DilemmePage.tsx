@@ -83,22 +83,25 @@ export function DilemmePage() {
     return map[impactTemporel] || 'ce mois-ci'
   }
 
+  // Durée max = durée restante de l'objectif
+  const objectifMaxDays = (() => {
+    if (profil?.objectif?.deadline) {
+      const d = new Date(profil.objectif.deadline)
+      const now = new Date()
+      return Math.max(1, Math.ceil((d.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
+    }
+    return 3650
+  })()
+
   const getImpactDays = (): number => {
     switch (impactTemporel) {
       case '1_jour': return 1
       case '1_semaine': return 7
       case '1_mois': return 30
       case '1_an': return 365
-      case 'long_terme': {
-        if (profil?.objectif?.deadline) {
-          const d = new Date(profil.objectif.deadline)
-          const now = new Date()
-          return Math.max(1, Math.ceil((d.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
-        }
-        return 3650
-      }
+      case 'long_terme': return objectifMaxDays
       case 'personnalise':
-        return Math.max(1, customYears * 365 + customMonths * 30 + customDays)
+        return Math.max(1, Math.min(objectifMaxDays, customYears * 365 + customMonths * 30 + customDays))
       default: return 30
     }
   }
@@ -110,6 +113,10 @@ export function DilemmePage() {
     }
     if (impactTemporel === 'personnalise' && customYears === 0 && customMonths === 0 && customDays === 0) {
       setError(t('dilemme.duree_personnalisee_vide'))
+      return
+    }
+    if (impactTemporel === 'personnalise' && (customYears * 365 + customMonths * 30 + customDays) > objectifMaxDays) {
+      setError(`La durée ne peut pas dépasser celle de votre objectif (~${Math.floor(objectifMaxDays / 365)}a ${Math.floor((objectifMaxDays % 365) / 30)}m).`)
       return
     }
     setError(null)

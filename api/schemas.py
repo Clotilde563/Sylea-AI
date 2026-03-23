@@ -359,6 +359,11 @@ class ServiceClientChatIn(BaseModel):
     contexte_appareil: Optional[DeviceContextIn] = None
 
 
+class VerifyCodeIn(BaseModel):
+    email: str
+    code: str
+
+
 class ProbabiliteIn(BaseModel):
     contexte_appareil: Optional[DeviceContextIn] = None
 

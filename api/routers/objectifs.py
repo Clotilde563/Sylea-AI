@@ -22,7 +22,7 @@ from api.schemas import (
     PersonnaliteOut,
     GenererSousObjectifsIn, GenererTachesIn,
 )
-from api.dependencies import get_profil_repo, get_db
+from api.dependencies import get_profil_repo, get_db, get_optional_user
 from api.context_helper import format_device_context
 
 router = APIRouter(tags=["objectifs"])
@@ -107,10 +107,11 @@ def _get_past_task_descriptions(db, user_id: str, days: int = 60) -> list[dict]:
 async def liste_sous_objectifs(
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     db=Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
 ):
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
     rows = db.conn.execute(
@@ -132,10 +133,11 @@ async def generer_sous_objectifs(
     data: GenererSousObjectifsIn,
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     db=Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
 ):
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None or not profil.objectif:
         raise HTTPException(status_code=400, detail="Profil ou objectif manquant.")
     # Verifier si des sous-objectifs existent deja -> ne jamais regenerer
@@ -212,10 +214,11 @@ async def generer_sous_objectifs(
 async def check_taches_aujourdhui(
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     db=Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
 ):
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
     today = date.today().isoformat()
@@ -242,10 +245,11 @@ async def generer_taches(
     data: GenererTachesIn,
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     db=Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
 ):
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None or not profil.objectif:
         raise HTTPException(status_code=400, detail="Profil ou objectif manquant.")
     today = date.today().isoformat()
@@ -362,10 +366,11 @@ async def completer_tache(
     data: CompleterTacheIn,
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     db=Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
 ):
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
     today = date.today().isoformat()
@@ -450,10 +455,11 @@ async def completer_tache(
 async def abandonner_taches(
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     db=Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
 ):
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
     today = date.today().isoformat()
@@ -472,10 +478,11 @@ async def abandonner_taches(
 async def get_personnalite(
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     db=Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
 ):
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
     # Verifier si la phrase est deja stockee en DB (generee une seule fois)

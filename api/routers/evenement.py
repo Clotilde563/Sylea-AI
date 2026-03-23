@@ -26,7 +26,7 @@ from api.schemas import (
     DecisionOut,
     OptionDilemmeOut,
 )
-from api.dependencies import get_profil_repo, get_decision_repo
+from api.dependencies import get_profil_repo, get_decision_repo, get_optional_user
 from api.context_helper import format_device_context
 
 router = APIRouter(prefix="/api/evenement", tags=["evenement"])
@@ -153,35 +153,33 @@ async def _analyser_evenement_claude(
 
     prompt = (
         "Tu es un robot probabiliste froid et factuel. Tu calcules l'impact reel "
-        "d'un evenement sur un objectif de vie. ZERO emotion, ZERO encouragement, "
-        "ZERO arrondi par sympathie. Uniquement des faits et des chiffres.\n\n"
+        "d'un evenement sur un objectif de vie. ZERO emotion, ZERO encouragement. "
+        "Tu raisonnes en TEMPS D'ABORD, puis tu convertis en jours.\n\n"
         "CONTEXTE :\n"
         f"- Objectif de vie : \"{objectif_desc}\"\n"
         f"- Categorie : {objectif_cat}\n"
         f"- Profession : {profession}\n"
-        f"- Temps estime restant : {temps_str}\n"
+        f"- Temps estime restant : {temps_str} ({temps_j} jours)\n"
         f"- Progression actuelle (jauge) : {prob_actuelle:.1f}%\n"
         f"{device_context}\n\n"
         f"EVENEMENT RAPPORTE :\n\"{description}\"\n\n"
-        "REGLES D'ANALYSE STRICTES :\n"
-        "1. REALISATION DE L'OBJECTIF : Si l'utilisateur declare que l'objectif "
-        "est ATTEINT ou realise, tu DOIS donner un impact_probabilite entre "
-        f"+{max(90, round(99 - prob_actuelle))} et +{max(95, round(99.5 - prob_actuelle))} "
-        "pour que la jauge atteigne quasi 100%. C'est OBLIGATOIRE.\n"
-        "2. RIGUEUR ABSOLUE : Tu es un calculateur probabiliste, PAS un coach.\n"
-        "   - Ne donne JAMAIS un impact par encouragement ou sympathie.\n"
-        "   - Raisonne en termes FACTUELS : quel pourcentage de l'objectif cet evenement "
-        "couvre-t-il concretement ? Quelles barrieres elimine-t-il reellement ?\n"
-        "   - Exemple : un financement de 100 EUR pour un objectif de 3000 EUR/mois freelance "
-        "= 100 EUR ne couvre meme pas 1 mois de loyer, n'elimine aucune barriere majeure "
-        "(competences, clients, portfolio). Impact reel : +0.05 a +0.2% maximum.\n"
-        "   - Exemple : un financement de 1M EUR pour le meme objectif = elimine la barriere "
-        "financiere, permet formation + equipement + reserve. Impact reel : +25 a +40%.\n"
-        "   - Si un evenement ne change RIEN concretement a la trajectoire, impact = 0.\n"
-        f"3. LIBERTE : L'impact peut aller de -{prob_actuelle:.1f} a +{100 - prob_actuelle:.1f}. "
-        "Aucun plafond. Mais chaque point de pourcentage doit etre JUSTIFIE factuellement.\n\n"
+        "METHODE DE CALCUL (OBLIGATOIRE) :\n"
+        "1. PENSE EN TEMPS D'ABORD : combien de JOURS cet evenement fait-il reellement "
+        f"gagner ou perdre sur l'objectif (temps restant = {temps_j} jours) ?\n"
+        "2. Le champ 'impact_jours' doit contenir ce nombre de jours "
+        "(positif = temps gagne, negatif = temps perdu).\n"
+        f"3. L'impact ne peut pas depasser {temps_j} jours (la duree totale de l'objectif).\n"
+        "4. REALISATION DE L'OBJECTIF : Si l'utilisateur declare que l'objectif "
+        f"est ATTEINT ou realise, impact_jours = {temps_j} (toute la duree restante).\n"
+        "5. RIGUEUR ABSOLUE — Exemples :\n"
+        "   - Financement de 100 EUR pour objectif 3000 EUR/mois freelance : "
+        "ne couvre pas 1 mois de loyer, n'elimine aucune barriere. impact_jours = +1 a +5.\n"
+        "   - Financement de 1M EUR pour le meme objectif : elimine la barriere "
+        f"financiere totalement. impact_jours = +{min(temps_j, int(temps_j * 0.7))} a +{min(temps_j, int(temps_j * 0.9))}.\n"
+        "   - Evenement sans impact concret = impact_jours = 0.\n"
+        "6. Sois FACTUEL. Pas d'impact par sympathie.\n\n"
         "Reponds UNIQUEMENT avec du JSON valide, sans aucun markdown :\n"
-        '{"resume": "...", "impact_probabilite": <float>, "explication": "...", "conseil": "..."}'
+        '{"resume": "...", "impact_jours": <float>, "explication": "...", "conseil": "..."}'
     )
 
     msg = await asyncio.to_thread(
@@ -210,9 +208,18 @@ async def _analyser_evenement_claude(
     if not json_str:
         raise ValueError("JSON invalide — extraction echouee")
     data = json.loads(json_str)
+
+    # L'IA retourne impact_jours (en jours). On convertit en % via la formule inverse.
+    impact_jours_val = float(data.get("impact_jours", data.get("impact_probabilite", 0.0)))
+    # temps_apres = temps_j - impact_jours (moins de temps restant = plus de probabilite)
+    temps_apres = max(1, temps_j - impact_jours_val)
+    # Formule inverse : prob = 100 / (1 + (temps/900)^(1/0.675))
+    prob_apres = 100.0 / (1.0 + (temps_apres / 900.0) ** (1.0 / 0.675))
+    impact_pct = round(prob_apres - prob_totale, 4)
+
     return {
         "resume": str(data.get("resume", "")),
-        "impact_probabilite": float(data.get("impact_probabilite", 0.5)),
+        "impact_probabilite": impact_pct,
         "explication": str(data.get("explication", "")),
         "conseil": str(data.get("conseil", "")),
     }
@@ -267,11 +274,12 @@ async def _identifier_so_pertinent(description: str, sous_objectifs: list) -> di
 async def analyser_evenement(
     data: EvenementIn,
     profil_repo: ProfilRepository = Depends(get_profil_repo),
+    user_id: str | None = Depends(get_optional_user),
 ):
     """Analyse l'impact d'un evenement sur l'objectif de vie."""
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None or not profil.objectif:
         raise HTTPException(status_code=400, detail="Profil ou objectif manquant.")
 
@@ -299,11 +307,12 @@ async def confirmer_evenement(
     data: ConfirmerEvenementIn,
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     decision_repo: DecisionRepository = Depends(get_decision_repo),
+    user_id: str | None = Depends(get_optional_user),
 ):
     """Enregistre l'evenement et met a jour la probabilite."""
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 

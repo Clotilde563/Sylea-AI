@@ -6,8 +6,8 @@ import { useEffect, useState, useId } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store/useStore'
 import { api } from '../api/client'
-import { dureeFromProb, probFromJours, buildTimeTicks } from '../utils/duration'
-import type { Decision, Profil } from '../types'
+import { dureeFromProb, buildTimeTicks } from '../utils/duration'
+import type { Decision, Profil, SousObjectif } from '../types'
 import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal'
 import { useT } from '../i18n/LanguageContext'
 
@@ -20,18 +20,6 @@ const PAD = { top: 24, right: 24, bottom: 52, left: 58 }
 const innerW = (w = W) => w - PAD.left - PAD.right
 const innerH = (h = H) => h - PAD.top  - PAD.bottom
 
-/**
- * X depuis des jours restants (graphique 1) — axe INVERSÉ :
- * days=MAX_DAYS (beaucoup de temps restant) → gauche (PAD.left)
- * days=0        (objectif atteint)          → droite (W - PAD.right)
- */
-function xFromDays(days: number, maxDays: number): number {
-  return PAD.left + (1 - Math.min(days / maxDays, 1)) * innerW()
-}
-/** Y depuis une probabilité % (0→bas, 100→haut) */
-function yFromProb(prob: number): number {
-  return PAD.top + innerH() * (1 - Math.max(0, Math.min(100, prob)) / 100)
-}
 /** X depuis un temps réel elapsed (ms) sur total elapsed */
 function xFromElapsed(elapsedMs: number, totalMs: number): number {
   return PAD.left + Math.min(elapsedMs / totalMs, 1) * innerW()
@@ -40,25 +28,12 @@ function xFromElapsed(elapsedMs: number, totalMs: number): number {
 // Constantes chart 1 (Y fixe, X dynamique selon duree estimee)
 const Y_TICKS = [0, 25, 50, 75, 100]
 
-/** Genere des ticks annees pour l axe X du chart 1 */
-function buildChartYearTicks(maxAns: number): number[] {
-  const r = Math.ceil(maxAns)
-  if (r <= 2)   return [0, 1, 2].filter(v => v <= r)
-  if (r <= 5)   return [0, 1, 2, 3, 4, 5].filter(v => v <= r)
-  if (r <= 10)  return [0, 2, 5, 10].filter(v => v <= r)
-  if (r <= 20)  return [0, 5, 10, 15, 20].filter(v => v <= r)
-  if (r <= 40)  return [0, 5, 10, 20, 30, 40].filter(v => v <= r)
-  if (r <= 60)  return [0, 10, 20, 30, 40, 50, 60].filter(v => v <= r)
-  if (r <= 100) return [0, 25, 50, 75, 100].filter(v => v <= r)
-  return [0, 25, 50, 75, 100, 150, 200].filter(v => v <= r)
-}
-
 // ── Composant principal ───────────────────────────────────────────────────────
 export function StatistiquesPage() {
   const t        = useT()
   const uid      = useId().replace(/\W/g, '')
   const navigate = useNavigate()
-  const { profil, setProfil, refreshSousObjectifs } = useStore()
+  const { profil, setProfil, refreshSousObjectifs, sousObjectifs } = useStore()
   const [decisions, setDecisions] = useState<Decision[]>([])
 
   const handleDeleteDecision = async (id: string) => {
@@ -76,7 +51,8 @@ export function StatistiquesPage() {
   }
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [loading, setLoading]     = useState(true)
-  const [hover1, setHover1]       = useState<{ days: number; x: number; y: number } | null>(null)
+  const [zoomChart1, setZoomChart1] = useState<'7j' | '30j' | '90j' | 'max'>('max')
+  const [smoothChart1, setSmoothChart1] = useState(true)
   const [zoomChart2, setZoomChart2] = useState<'7j' | '30j' | '90j' | 'max'>('max')
   const [smoothChart2, setSmoothChart2] = useState(true)
 
@@ -87,6 +63,7 @@ export function StatistiquesPage() {
       .then(setDecisions)
       .catch(() => setDecisions([]))
       .finally(() => setLoading(false))
+    refreshSousObjectifs()
   }, [])
 
   // ── Stats résumées ────────────────────────────────────────────────────────
@@ -97,13 +74,6 @@ export function StatistiquesPage() {
   const probInitiale  = Math.max(0, Math.min(100, probActuelle - gainTotal))
   const dureeActuelle = dureeFromProb(probTemps)
   const dureeInitiale = dureeFromProb(probCalculee + probInitiale)
-  // Chart 1 FIXE : axe X = duree estimee initiale (ne change JAMAIS)
-  const maxDaysChart1 = Math.max(Math.round(dureeInitiale.totalJours * 1.05), 365)
-  const maxAnsChart1  = Math.ceil(maxDaysChart1 / 365)
-  const xTicks1       = buildChartYearTicks(maxAnsChart1)
-  // Normalisation : la courbe theorique doit demarrer a 0% en Y
-  const probBase  = probFromJours(maxDaysChart1)   // proba brute au bord gauche (~24%)
-  const normProb  = (rawP: number) => Math.max(0, Math.min(100, (rawP - probBase) / (100 - probBase) * 100))
   const tempsGagne    = Math.max(0, dureeInitiale.totalJours - dureeActuelle.totalJours)
   const tgAns         = Math.floor(tempsGagne / 365)
   const tgMois        = Math.floor((tempsGagne % 365) / 30)
@@ -141,175 +111,87 @@ export function StatistiquesPage() {
           className="card"
           style={{ background: 'linear-gradient(135deg, var(--bg-surface), #0b1525)', border: '1px solid var(--border)', padding: '1.5rem', marginBottom: '1.5rem', overflowX: 'auto' }}
         >
-          {/* ── Graphique 1 : courbe théorique ── */}
-          <div style={{ marginBottom: '0.6rem' }}>
+          {/* ── Graphique 1 : progression des sous-objectifs ── */}
+          <div style={{ marginBottom: '0.6rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
             <span style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.12em', color: 'var(--accent-violet-light)', textTransform: 'uppercase' }}>
-              ◈ {t('stats.proba_theorique')}
+              {'\u25C8'} PROGRESSION DES SOUS-OBJECTIFS
             </span>
+            <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+              <button
+                onClick={() => setSmoothChart1(v => !v)}
+                style={{
+                  padding: '0.25rem 0.625rem',
+                  borderRadius: '999px',
+                  fontSize: '0.65rem',
+                  fontWeight: 600,
+                  letterSpacing: '0.06em',
+                  border: smoothChart1 ? '1px solid #8b5cf6' : '1px solid var(--border)',
+                  background: smoothChart1 ? 'rgba(139,92,246,0.15)' : 'transparent',
+                  color: smoothChart1 ? '#a78bfa' : 'var(--text-muted)',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s',
+                }}
+              >
+                {t('stats.dynamique')}
+              </button>
+              <div style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 0.15rem' }} />
+              {(['7j', '30j', '90j', 'max'] as const).map((period) => (
+                <button
+                  key={period}
+                  onClick={() => setZoomChart1(period)}
+                  style={{
+                    padding: '0.25rem 0.625rem',
+                    borderRadius: '999px',
+                    fontSize: '0.7rem',
+                    fontWeight: 600,
+                    letterSpacing: '0.06em',
+                    border: zoomChart1 === period ? '1px solid #8b5cf6' : '1px solid var(--border)',
+                    background: zoomChart1 === period ? 'rgba(139,92,246,0.15)' : 'transparent',
+                    color: zoomChart1 === period ? '#a78bfa' : 'var(--text-muted)',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  {period === 'max' ? 'MAX' : period.toUpperCase()}
+                </button>
+              ))}
+            </div>
           </div>
 
-          <svg
-            width={W} height={H}
-            viewBox={`0 0 ${W} ${H}`}
-            style={{ display: 'block', maxWidth: '100%', overflow: 'visible' }}
-            onMouseMove={(e) => {
-              const rect   = (e.currentTarget as SVGSVGElement).getBoundingClientRect()
-              const scaleX = W / rect.width
-              const mx     = (e.clientX - rect.left) * scaleX
-              if (mx < PAD.left || mx > W - PAD.right) { setHover1(null); return }
-              // Axe X inversé : frac=0 (gauche) → MAX_DAYS, frac=1 (droite) → 0
-              const frac = (mx - PAD.left) / innerW()
-              const d    = Math.max(0, Math.min(maxDaysChart1, Math.round((1 - frac) * maxDaysChart1)))
-              setHover1({ days: d, x: xFromDays(d, maxDaysChart1), y: yFromProb(normProb(probFromJours(d))) })
-            }}
-            onMouseLeave={() => setHover1(null)}
-          >
-            <defs>
-              <linearGradient id={`sg1-line-${uid}`} x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%"   stopColor="#5520b8"/>
-                <stop offset="50%"  stopColor="#0090e0"/>
-                <stop offset="100%" stopColor="#00c8ff"/>
-              </linearGradient>
-              <linearGradient id={`sg1-area-${uid}`} x1="0%" y1="0%" x2="0%" y2="100%">
-                <stop offset="0%"   stopColor="#0090e0" stopOpacity="0.15"/>
-                <stop offset="100%" stopColor="#0090e0" stopOpacity="0.01"/>
-              </linearGradient>
-              <filter id={`sg1-glow-${uid}`}>
-                <feGaussianBlur stdDeviation="2" result="b"/>
-                <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-              </filter>
-            </defs>
+          {profil && (
+            <ChartSousObjectifs
+              uid={uid}
+              profil={profil}
+              sousObjectifs={sousObjectifs}
+              decisions={decisions}
+              histPoints={histPoints}
+              totalElapsedMs={totalElapsedMs}
+              loading={loading}
+              zoomPeriod={zoomChart1}
+              smooth={smoothChart1}
+            />
+          )}
 
-            {/* Grille Y (probabilités) */}
-            {Y_TICKS.map((p) => {
-              const yy = yFromProb(p)
+          {/* Legende chart 1 — sous-objectifs */}
+          <div style={{ display: 'flex', gap: '1.25rem', marginTop: '0.75rem', marginBottom: '2rem', flexWrap: 'wrap' }}>
+            {sousObjectifs.map((so, idx) => {
+              const colors = ['#3b82f6', '#8b5cf6', '#f59e0b', '#10b981']
+              const color = colors[idx % colors.length]
+              const isActive = idx === sousObjectifs.findIndex(s => s.progression < 100)
               return (
-                <g key={p}>
-                  <line x1={PAD.left} y1={yy} x2={W - PAD.right} y2={yy}
-                    stroke="rgba(255,255,255,0.05)" strokeWidth="1"
-                    strokeDasharray={p === 0 || p === 100 ? '' : '4 4'} />
-                  <text x={PAD.left - 6} y={yy} textAnchor="end" dominantBaseline="middle"
-                    fontSize="10" fill="rgba(232,232,240,0.35)"
-                    fontFamily="Inter, system-ui, sans-serif">
-                    {p}%
-                  </text>
-                </g>
+                <div key={so.id} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  <span style={{
+                    width: 8, height: 8, borderRadius: '50%', background: color, display: 'inline-block',
+                    boxShadow: isActive ? `0 0 8px ${color}` : 'none',
+                    border: isActive ? `2px solid ${color}` : 'none',
+                  }} />
+                  <span style={{ fontSize: '0.72rem', color: isActive ? 'var(--text-primary)' : 'var(--text-muted)', fontWeight: isActive ? 600 : 400 }}>
+                    {so.titre}{isActive ? ' *' : ''}
+                  </span>
+                </div>
               )
             })}
-
-            {/* Grille X (années — axe inversé : 10a gauche → 0 droite) */}
-            {xTicks1.map((ans) => {
-              // avec xFromDays inversé : ans=MAX_ANS → gauche, ans=0 → droite
-              const xx = xFromDays(ans * 365, maxDaysChart1)
-              return (
-                <g key={ans}>
-                  <line x1={xx} y1={PAD.top} x2={xx} y2={H - PAD.bottom}
-                    stroke="rgba(255,255,255,0.05)" strokeWidth="1"
-                    strokeDasharray={ans === 0 || ans === maxAnsChart1 ? '' : '4 4'} />
-                  <text x={xx} y={H - PAD.bottom + 14} textAnchor="middle"
-                    fontSize="10" fill="rgba(232,232,240,0.35)"
-                    fontFamily="Inter, system-ui, sans-serif">
-                    {ans === 0 ? '0' : `${ans}a`}
-                  </text>
-                </g>
-              )
-            })}
-
-            {/* Labels axes */}
-            <text x={PAD.left + innerW() / 2} y={H - 4} textAnchor="middle"
-              fontSize="10" fill="rgba(232,232,240,0.4)"
-              fontFamily="Inter, system-ui, sans-serif" letterSpacing="0.08em">
-              {t('stats.temps_restant_label')}
-            </text>
-            <text x={10} y={PAD.top + innerH() / 2} textAnchor="middle"
-              fontSize="10" fill="rgba(232,232,240,0.4)"
-              fontFamily="Inter, system-ui, sans-serif" letterSpacing="0.08em"
-              transform={`rotate(-90, 10, ${PAD.top + innerH() / 2})`}>
-              {t('stats.probabilite_label')}
-            </text>
-
-            {/* Aire + courbe théorique */}
-            {(() => {
-              // On génère les pts de gauche (MAX_DAYS) vers droite (0) pour suivre l'axe
-              const pts = []
-              for (let d = maxDaysChart1; d >= 0; d -= 18) {
-                pts.push({ x: xFromDays(d, maxDaysChart1), y: yFromProb(normProb(probFromJours(d))) })
-              }
-              // Premier pt = gauche, bas (MAX_DAYS, 0%) — Dernier pt = droite, haut (0, 100%)
-              const lineD = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
-              // Aire : fermer vers bas-droite puis Z remonte au premier pt (bas-gauche)
-              const areaD = lineD +
-                ` L ${(W - PAD.right).toFixed(1)} ${(H - PAD.bottom).toFixed(1)}` +
-                ` L ${PAD.left.toFixed(1)} ${(H - PAD.bottom).toFixed(1)} Z`
-              return (
-                <>
-                  <path d={areaD} fill={`url(#sg1-area-${uid})`}/>
-                  <path d={lineD} fill="none" stroke={`url(#sg1-line-${uid})`}
-                    strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
-                    style={{ filter: `url(#sg1-glow-${uid})` }}/>
-                </>
-              )
-            })()}
-
-            {/* Point position actuelle sur la courbe théorique */}
-            {profil && (() => {
-              // Le curseur démarre au bord gauche (0%) et avance uniquement
-              // grâce au temps économisé par les décisions réelles.
-              const cursorDays = Math.max(0, maxDaysChart1 - tempsGagne)
-              const px = xFromDays(cursorDays, maxDaysChart1)
-              const py = yFromProb(normProb(probFromJours(cursorDays)))
-              return (
-                <g>
-                  <line x1={px} y1={PAD.top} x2={px} y2={H - PAD.bottom}
-                    stroke="rgba(0,200,255,0.2)" strokeWidth="1" strokeDasharray="3 3"/>
-                  <circle cx={px} cy={py} r={7}
-                    fill="#00c8ff" stroke="#020509" strokeWidth="2"
-                    style={{ filter: 'drop-shadow(0 0 8px rgba(0,200,255,0.9))' }}/>
-                  <circle cx={px} cy={py} r={3} fill="#020509"/>
-                  <text x={px} y={py - 13} textAnchor="middle"
-                    fontSize="9" fill="rgba(0,200,255,0.85)"
-                    fontFamily="Inter, system-ui, sans-serif"
-                    fontWeight="600" letterSpacing="0.06em">
-                    {t('stats.maintenant')}
-                  </text>
-                </g>
-              )
-            })()}
-
-            {/* Tooltip survol chart 1 */}
-            {hover1 && (() => {
-              const rawProb = probFromJours(hover1.days)
-              const prob    = normProb(rawProb)
-              const duree   = dureeFromProb(rawProb)
-              const tipX   = hover1.x > W - PAD.right - 130 ? hover1.x - 130 : hover1.x + 10
-              const tipY   = hover1.y < PAD.top + 55 ? hover1.y + 10 : hover1.y - 55
-              return (
-                <g>
-                  <line x1={hover1.x} y1={PAD.top} x2={hover1.x} y2={H - PAD.bottom}
-                    stroke="rgba(255,255,255,0.13)" strokeWidth="1" strokeDasharray="3 3"/>
-                  <circle cx={hover1.x} cy={hover1.y} r={4} fill="white" opacity={0.8}
-                    style={{ filter: 'drop-shadow(0 0 3px white)' }}/>
-                  <rect x={tipX} y={tipY} width={122} height={46} rx={6}
-                    fill="#13131f" stroke="rgba(64,144,240,0.4)" strokeWidth="1"/>
-                  <text x={tipX + 8} y={tipY + 15}
-                    fontSize="9" fill="rgba(232,232,240,0.5)"
-                    fontFamily="Inter, system-ui, sans-serif" letterSpacing="0.06em">
-                    {t('stats.temps_label')} {duree.ligne1}{duree.ligne2 ? ` ${duree.ligne2}` : ''}
-                  </text>
-                  <text x={tipX + 8} y={tipY + 31}
-                    fontSize="12" fontWeight="700" fill="#4090f0"
-                    fontFamily="Inter, system-ui, sans-serif">
-                    {prob.toFixed(1)} % {t('stats.reussite')}
-                  </text>
-                </g>
-              )
-            })()}
-          </svg>
-
-          {/* Légende chart 1 */}
-          <div style={{ display: 'flex', gap: '1.5rem', marginBottom: '2rem', flexWrap: 'wrap' }}>
-            <LegendItem colorLine="#4090f0" label={t('stats.courbe_theorique')} />
-            <LegendItem colorDot="#00c8ff" label={t('stats.position_actuelle')} />
           </div>
 
           {/* Séparateur */}
@@ -462,6 +344,335 @@ export function StatistiquesPage() {
         )}
       </div>
     </div>
+  )
+}
+
+// ── Graphique 1 (progression des sous-objectifs) ─────────────────────────────
+const SO_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#10b981']
+
+function ChartSousObjectifs({
+  uid, profil, sousObjectifs, decisions, histPoints, totalElapsedMs, loading, zoomPeriod = 'max', smooth = false,
+}: {
+  uid: string
+  profil: Profil
+  sousObjectifs: SousObjectif[]
+  decisions: Decision[]
+  histPoints: { elapsedMs: number; prob: number }[]
+  totalElapsedMs: number
+  loading: boolean
+  zoomPeriod?: '7j' | '30j' | '90j' | 'max'
+  smooth?: boolean
+}) {
+  const t = useT()
+  const [hover, setHover] = useState<{ x: number; soData: { soId: string; titre: string; prog: number; color: string }[] } | null>(null)
+
+  const MS_DAY = 24 * 60 * 60 * 1000
+  const cutoffMs = zoomPeriod === '7j' ? 7 * MS_DAY
+                 : zoomPeriod === '30j' ? 30 * MS_DAY
+                 : zoomPeriod === '90j' ? 90 * MS_DAY
+                 : totalElapsedMs
+  const windowStartMs = Math.max(0, totalElapsedMs - cutoffMs)
+  const isZoomed = zoomPeriod !== 'max'
+  const windowMs = isZoomed ? cutoffMs : totalElapsedMs
+
+  const elapsedDays = windowMs / MS_DAY
+  const xTicks = buildTimeTicks(elapsedDays)
+
+  // Active SO index
+  const activeIdx = sousObjectifs.findIndex(so => so.progression < 100)
+
+  // Build per-SO progression timeline from decisions
+  // Each decision with sous_objectif_impacte tells us which SO was impacted
+  const soTimelines = (() => {
+    if (sousObjectifs.length === 0) return []
+
+    const sorted = [...decisions]
+      .filter(d => d.cree_le)
+      .sort((a, b) => new Date(a.cree_le).getTime() - new Date(b.cree_le).getTime())
+
+    const oml = profil.objectif_modifie_le
+    const refDate = oml
+      ? oml
+      : (sorted.length === 0 ? new Date().toISOString() : profil.cree_le)
+    const t0 = new Date(refDate).getTime()
+
+    // Build progression timeline per SO
+    // We know the current progression of each SO. We reconstruct history by
+    // working backwards from current state using decisions that have sous_objectif_impacte.
+    // However, since impact_net is the main probability impact, not the SO progression delta,
+    // we use a simpler approach: accumulate SO progression from decisions.
+
+    // Start all SOs at 0%
+    const soProgression: Record<string, number> = {}
+    for (const so of sousObjectifs) {
+      soProgression[so.id] = 0
+    }
+
+    // Build points per SO: start at 0
+    const timelines: Map<string, { elapsedMs: number; prog: number }[]> = new Map()
+    for (const so of sousObjectifs) {
+      timelines.set(so.id, [{ elapsedMs: 0, prog: 0 }])
+    }
+
+    // Process decisions in chronological order
+    for (const d of sorted) {
+      if (!d.sous_objectif_impacte) continue
+      const soId = d.sous_objectif_impacte
+      if (!timelines.has(soId)) continue
+
+      const tMs = Math.max(0, new Date(d.cree_le).getTime() - t0)
+      const impact = Math.abs(d.impact_net ?? 0)
+      // Each decision adds some progression to the impacted SO
+      // Use impact_net as a proxy for progression increment (scaled)
+      soProgression[soId] = Math.min(100, soProgression[soId] + impact * 2)
+      timelines.get(soId)!.push({ elapsedMs: tMs, prog: soProgression[soId] })
+    }
+
+    // Adjust final points to match actual current progression
+    for (const so of sousObjectifs) {
+      const timeline = timelines.get(so.id)!
+      const lastProg = timeline[timeline.length - 1].prog
+      const currentProg = so.progression
+
+      // If we have decision-based data, scale to match current progression
+      if (timeline.length > 1 && lastProg > 0) {
+        const scale = currentProg / lastProg
+        for (let i = 1; i < timeline.length; i++) {
+          timeline[i].prog = Math.min(100, timeline[i].prog * scale)
+        }
+      }
+
+      // Add final point at current time with current progression
+      timeline.push({ elapsedMs: totalElapsedMs, prog: currentProg })
+    }
+
+    // Apply zoom filtering
+    return sousObjectifs.map((so, idx) => {
+      let pts = timelines.get(so.id) || [{ elapsedMs: 0, prog: 0 }]
+
+      if (isZoomed) {
+        const inWindow = pts.filter(p => p.elapsedMs >= windowStartMs)
+        if (inWindow.length === 0 && pts.length > 0) {
+          inWindow.push(pts[pts.length - 1])
+        }
+        if (inWindow.length > 0 && inWindow[0].elapsedMs > windowStartMs && pts.length > 0) {
+          // Interpolate start point
+          let startProg = 0
+          for (const p of pts) {
+            if (p.elapsedMs <= windowStartMs) startProg = p.prog
+            else break
+          }
+          inWindow.unshift({ elapsedMs: windowStartMs, prog: startProg })
+        }
+        pts = inWindow.map(p => ({ ...p, elapsedMs: p.elapsedMs - windowStartMs }))
+      }
+
+      return {
+        soId: so.id,
+        titre: so.titre,
+        color: SO_COLORS[idx % SO_COLORS.length],
+        isActive: idx === activeIdx,
+        points: pts,
+      }
+    })
+  })()
+
+  // Y: progression 0-100%
+  const Y_PROG_TICKS = [0, 25, 50, 75, 100]
+  function yProg(prog: number): number {
+    const clamped = Math.max(0, Math.min(100, prog))
+    return PAD.top + innerH() * (1 - clamped / 100)
+  }
+
+  // Build paths — même logique sigmoïde que Chart2 pour un lissage identique
+  const soPaths = soTimelines.map(so => {
+    if (so.points.length < 2) return { ...so, pathD: '' }
+
+    let pathD: string
+    if (smooth && so.points.length >= 2) {
+      // Mode lisse : somme de sigmoïdes + échantillonnage uniforme (identique à Chart2)
+      const baseProg = so.points[0].prog
+      const totalRange = windowMs || 1
+      const avgGap = so.points.length > 1
+        ? (so.points[so.points.length - 1].elapsedMs - so.points[0].elapsedMs) / (so.points.length - 1)
+        : totalRange
+      const transWidth = Math.max(avgGap * 0.6, totalRange * 0.06)
+
+      function smoothProg(ems: number): number {
+        let prog = baseProg
+        for (let i = 1; i < so.points.length; i++) {
+          const delta = so.points[i].prog - so.points[i - 1].prog
+          const center = so.points[i].elapsedMs
+          const x = (ems - center) / transWidth
+          const sig = 1 / (1 + Math.exp(-3 * x))
+          prog += delta * sig
+        }
+        return prog
+      }
+
+      const numSamples = 150
+      const startEms = so.points[0].elapsedMs
+      const endEms = so.points[so.points.length - 1].elapsedMs
+      const rangeEms = endEms - startEms || 1
+
+      const pts: { x: number; y: number }[] = []
+      for (let s = 0; s <= numSamples; s++) {
+        const ems = startEms + (rangeEms * s) / numSamples
+        const prog = smoothProg(ems)
+        pts.push({
+          x: xFromElapsed(ems, windowMs),
+          y: yProg(prog),
+        })
+      }
+      pathD = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
+    } else {
+      // Step path (same as Chart2 non-smooth)
+      pathD = so.points.map((p, i) => {
+        const x = xFromElapsed(p.elapsedMs, windowMs)
+        const y = yProg(p.prog)
+        if (i === 0) return `M ${x.toFixed(1)} ${y.toFixed(1)}`
+        return `H ${x.toFixed(1)} V ${y.toFixed(1)}`
+      }).join(' ')
+    }
+
+    return { ...so, pathD }
+  })
+
+  return (
+    <svg
+      width={W} height={H}
+      viewBox={`0 0 ${W} ${H}`}
+      style={{ display: 'block', maxWidth: '100%', overflow: 'visible' }}
+      onMouseMove={(e) => {
+        const rect = (e.currentTarget as SVGSVGElement).getBoundingClientRect()
+        const scaleX = W / rect.width
+        const mx = (e.clientX - rect.left) * scaleX
+        if (mx < PAD.left || mx > W - PAD.right) { setHover(null); return }
+        const frac = (mx - PAD.left) / innerW()
+        const ems = frac * windowMs
+
+        // Find progression value for each SO at this time
+        const soData = soTimelines.map(so => {
+          let prog = 0
+          for (const p of so.points) {
+            if (p.elapsedMs <= ems) prog = p.prog
+            else break
+          }
+          return { soId: so.soId, titre: so.titre, prog, color: so.color }
+        })
+
+        setHover({ x: PAD.left + frac * innerW(), soData })
+      }}
+      onMouseLeave={() => setHover(null)}
+    >
+      <defs>
+        <filter id={`sg1-glow-${uid}`}>
+          <feGaussianBlur stdDeviation="2" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+
+      {/* Grille Y (progression %) */}
+      {Y_PROG_TICKS.map((p) => {
+        const yy = yProg(p)
+        return (
+          <g key={p}>
+            <line x1={PAD.left} y1={yy} x2={W - PAD.right} y2={yy}
+              stroke="rgba(255,255,255,0.05)" strokeWidth="1"
+              strokeDasharray={p === 0 || p === 100 ? '' : '4 4'}/>
+            <text x={PAD.left - 6} y={yy} textAnchor="end" dominantBaseline="middle"
+              fontSize="10" fill="rgba(232,232,240,0.35)"
+              fontFamily="Inter, system-ui, sans-serif">
+              {p}%
+            </text>
+          </g>
+        )
+      })}
+
+      {/* Grille X (temps reel) */}
+      {xTicks.map(({ valueDays, label }, ti) => {
+        const xx = xFromElapsed(valueDays * 24 * 60 * 60 * 1000, windowMs)
+        if (xx < PAD.left - 1 || xx > W - PAD.right + 1) return null
+        return (
+          <g key={`xt-${ti}`}>
+            <line x1={xx} y1={PAD.top} x2={xx} y2={H - PAD.bottom}
+              stroke="rgba(255,255,255,0.05)" strokeWidth="1"
+              strokeDasharray={ti === 0 ? '' : '4 4'}/>
+            <text x={xx} y={H - PAD.bottom + 14} textAnchor="middle"
+              fontSize="10" fill="rgba(232,232,240,0.35)"
+              fontFamily="Inter, system-ui, sans-serif">
+              {label}
+            </text>
+          </g>
+        )
+      })}
+
+      {/* Labels axes */}
+      <text x={PAD.left + innerW() / 2} y={H - 4} textAnchor="middle"
+        fontSize="10" fill="rgba(232,232,240,0.4)"
+        fontFamily="Inter, system-ui, sans-serif" letterSpacing="0.08em">
+        {t('stats.temps_ecoule')}
+      </text>
+      <text x={10} y={PAD.top + innerH() / 2} textAnchor="middle"
+        fontSize="10" fill="rgba(232,232,240,0.4)"
+        fontFamily="Inter, system-ui, sans-serif" letterSpacing="0.08em"
+        transform={`rotate(-90, 10, ${PAD.top + innerH() / 2})`}>
+        Progression
+      </text>
+
+      {/* Lines per SO */}
+      {!loading && soPaths.map(so => so.pathD ? (
+        <path key={so.soId} d={so.pathD} fill="none" stroke={so.color}
+          strokeWidth={so.isActive ? 3 : 2}
+          strokeLinecap="round" strokeLinejoin="round"
+          opacity={so.isActive ? 1 : 0.7}
+          style={{ filter: so.isActive ? `url(#sg1-glow-${uid})` : undefined }}/>
+      ) : null)}
+
+      {/* End dots per SO (current progression) */}
+      {!loading && !smooth && soPaths.map(so => {
+        if (so.points.length === 0) return null
+        const last = so.points[so.points.length - 1]
+        const px = xFromElapsed(last.elapsedMs, windowMs)
+        const py = yProg(last.prog)
+        return (
+          <circle key={`dot-${so.soId}`} cx={px} cy={py} r={so.isActive ? 6 : 4}
+            fill={so.color} stroke="#020509" strokeWidth="2"
+            style={{ filter: so.isActive ? `drop-shadow(0 0 6px ${so.color})` : undefined }}/>
+        )
+      })}
+
+      {/* Tooltip */}
+      {hover && hover.soData.length > 0 && (() => {
+        const tipW = 155
+        const tipH = 14 + hover.soData.length * 16 + 6
+        const tipX = hover.x > W - PAD.right - tipW - 10 ? hover.x - tipW - 10 : hover.x + 10
+        const tipY = Math.min(PAD.top + 10, H - PAD.bottom - tipH - 10)
+        return (
+          <g>
+            <line x1={hover.x} y1={PAD.top} x2={hover.x} y2={H - PAD.bottom}
+              stroke="rgba(255,255,255,0.13)" strokeWidth="1" strokeDasharray="3 3"/>
+            <rect x={tipX} y={tipY} width={tipW} height={tipH} rx={6}
+              fill="#13131f" stroke="rgba(139,92,246,0.4)" strokeWidth="1"/>
+            {hover.soData.map((so, i) => (
+              <g key={so.soId}>
+                <circle cx={tipX + 10} cy={tipY + 14 + i * 16} r={3} fill={so.color}/>
+                <text x={tipX + 18} y={tipY + 14 + i * 16 + 1} dominantBaseline="middle"
+                  fontSize="9" fill="rgba(232,232,240,0.7)"
+                  fontFamily="Inter, system-ui, sans-serif">
+                  {so.titre.length > 12 ? so.titre.slice(0, 12) + '..' : so.titre}
+                </text>
+                <text x={tipX + tipW - 8} y={tipY + 14 + i * 16 + 1} textAnchor="end" dominantBaseline="middle"
+                  fontSize="10" fontWeight="700" fill={so.color}
+                  fontFamily="Inter, system-ui, sans-serif">
+                  {so.prog.toFixed(0)}%
+                </text>
+              </g>
+            ))}
+          </g>
+        )
+      })()}
+    </svg>
   )
 }
 

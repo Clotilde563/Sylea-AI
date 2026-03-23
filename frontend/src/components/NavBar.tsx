@@ -32,11 +32,12 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
     return () => document.removeEventListener('mousedown', handler)
   }, [dropdownOpen])
 
-  const links = [
+  // Masquer tous les liens tant que le profil n'est pas créé
+  const links = profil ? [
     { to: '/', label: t('nav.dashboard') },
     { to: '/dilemme', label: t('nav.analyser') },
     { to: '/statistiques', label: t('nav.statistiques') },
-  ]
+  ] : []
 
   return (
     <>
@@ -201,7 +202,7 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
                 onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
                 onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={profil ? '#ef4444' : 'var(--accent-violet-light)'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                   <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                 </svg>
@@ -239,8 +240,8 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
               </Link>
             )
           })}
-          {/* Mes agents Syléa — lien scintillant */}
-          {(() => {
+          {/* Mes agents Syléa — lien scintillant (masqué sans profil) */}
+          {profil && (() => {
             const agentsActive = pathname === '/agents' || pathname.startsWith('/agents')
             return (
               <Link

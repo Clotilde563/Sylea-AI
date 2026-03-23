@@ -371,6 +371,28 @@
     "modifier_proba": "Changing your personal information will trigger a probability recalculation.",
     "modifier_objectif": "Changing your life objective will reset all your history (decisions, sub-objectives, tasks)."
   },
+  "agents": {
+    "page_subtitle": "Your personal AI assistants",
+    "subtitle": "Your personal companion",
+    "description": "This AI agent accompanies you daily. It checks in on you regularly, learns about you and enriches your profile for ever more precise analyses.",
+    "feature_messages": "Regular messages to check in on you",
+    "feature_voice": "Two-way voice messages",
+    "feature_learning": "Continuous learning of your profile",
+    "feature_data": "Automatic data enrichment",
+    "status_active": "ACTIVE",
+    "status_inactive": "INACTIVE",
+    "btn_activate": "Activate this agent",
+    "btn_chat": "Chat with this agent",
+    "btn_deactivate": "Deactivate this agent",
+    "modal_activate_title": "Activate Agent Sylea 1?",
+    "modal_activate_text": "Once activated, this agent will contact you regularly to check in and enrich your profile. You can deactivate it at any time.",
+    "modal_activate_confirm": "Confirm activation",
+    "modal_deactivate_title": "Deactivate Agent Sylea 1?",
+    "modal_deactivate_text": "The agent will stop sending you messages. Your conversation history will be preserved.",
+    "modal_deactivate_confirm": "Confirm deactivation",
+    "input_placeholder": "Write to your agent...",
+    "thinking": "Thinking..."
+  },
   "option": {
     "temps_gagne": "time saved",
     "temps_perdu": "time lost",

@@ -106,7 +106,9 @@
     "obligatoires": "Veuillez remplir les champs obligatoires (*).",
     "homme": "Homme",
     "femme": "Femme",
-    "selectionner": "\u2014 S\u00e9lectionner \u2014"
+    "selectionner": "\u2014 S\u00e9lectionner \u2014",
+    "geo_title": "Autorisation de géolocalisation requise",
+    "geo_desc": "Syléa.AI a besoin de votre localisation pour personnaliser les analyses IA (météo, contexte local)."
   },
   "dashboard": {
     "bon_retour": "Bon retour parmi nous",
@@ -170,7 +172,21 @@
     "nouveau_dilemme": "← Nouveau dilemme",
     "selectionnez_option": "Sélectionnez une option",
     "analyser_choix": "Analyser un choix",
-    "analyser_desc": "Syléa.AI analyse votre situation pour calculer votre probabilité de réussite."
+    "analyser_desc": "Syléa.AI analyse votre situation pour calculer votre probabilité de réussite.",
+    "analyse_en_cours": "Analyse en cours...",
+    "annees": "Année(s)",
+    "calcul_impact": "Calcul de l'impact sur votre objectif...",
+    "choix_sauvegarde": "Votre choix a été sauvegardé et pris en compte dans vos statistiques.",
+    "decision_enregistree": "Décision enregistrée !",
+    "enregistrement": "Enregistrement...",
+    "impact_temporel_desc": "Sur quelle durée ce choix aura-t-il un impact ?",
+    "jours": "Jour(s)",
+    "mois": "Mois",
+    "option": "Option",
+    "sous_objectif_impacte": "Sous-objectif impacté",
+    "supprimer_option": "Supprimer cette option",
+    "tableau_de_bord": "Tableau de bord",
+    "valider_option": "Valider l'option"
   },
   "stats": {
     "dashboard_avance": "Tableau de bord avanc\u00e9",
@@ -370,6 +386,28 @@
     "modifier_profil": "Modifier mon profil ?",
     "modifier_proba": "Modifier vos informations personnelles entra\u00eenera un recalcul de votre probabilit\u00e9.",
     "modifier_objectif": "Modifier votre objectif de vie r\u00e9initialisera tout votre historique (d\u00e9cisions, sous-objectifs, t\u00e2ches)."
+  },
+  "agents": {
+    "page_subtitle": "Vos assistants IA personnels",
+    "subtitle": "Votre compagnon personnel",
+    "description": "Cet agent IA vous accompagne au quotidien. Il prend de vos nouvelles regulierement, apprend a vous connaitre et enrichit votre profil pour des analyses toujours plus precises.",
+    "feature_messages": "Messages reguliers pour prendre de vos nouvelles",
+    "feature_voice": "Messages vocaux bidirectionnels",
+    "feature_learning": "Apprentissage continu de votre profil",
+    "feature_data": "Enrichissement automatique des donnees",
+    "status_active": "ACTIF",
+    "status_inactive": "INACTIF",
+    "btn_activate": "Activer cet agent",
+    "btn_chat": "Discuter avec cet agent",
+    "btn_deactivate": "Desactiver cet agent",
+    "modal_activate_title": "Activer l'Agent Sylea 1 ?",
+    "modal_activate_text": "Une fois active, cet agent vous contactera regulierement pour prendre de vos nouvelles et enrichir votre profil. Vous pourrez le desactiver a tout moment.",
+    "modal_activate_confirm": "Confirmer l'activation",
+    "modal_deactivate_title": "Desactiver l'Agent Sylea 1 ?",
+    "modal_deactivate_text": "L'agent arretera de vous envoyer des messages. Votre historique de conversation sera conserve.",
+    "modal_deactivate_confirm": "Confirmer la desactivation",
+    "input_placeholder": "Ecrivez a votre agent...",
+    "thinking": "Reflexion..."
   },
   "option": {
     "temps_gagne": "temps gagn\u00e9",
