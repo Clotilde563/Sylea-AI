@@ -873,15 +873,20 @@ Exemples qui N'ONT PAS BESOIN de contexte:
 - "J'ai obtenu une promotion" -> Clair en soi
 
 Reponds UNIQUEMENT en JSON:
-{{"needs_context": true/false, "question": "ta question si besoin (1 phrase, tutoiement)", "choices": null}}
+{{"needs_context": true/false, "question": "ta question si besoin (1 phrase, tutoiement)", "choices": ["choix1", "choix2", "choix3"] ou null}}
 
 REGLES POUR LES CHOIX QCM :
-- Par DEFAUT, choices = null (l'utilisateur repond en texte ou vocal)
-- Propose des choix QCM UNIQUEMENT quand la reponse est categorisable avec certitude
-  (ex: "C'est dans quel domaine ?" -> ["Tech", "Finance", "Sante", "Autre"])
-- Ne propose JAMAIS de QCM quand tu demandes de DECRIRE quelqu'un ou quelque chose
-  (ex: "Qui est Claire ?" -> PAS de QCM, l'utilisateur doit decrire librement)
-- Ne propose JAMAIS de QCM quand les choix seraient des suppositions de ta part
+- Propose un QCM quand les reponses possibles sont des CATEGORIES CONNUES :
+  * Type de financement -> ["Pret bancaire", "Investisseur", "Financement familial", "Aide publique", "Autre"]
+  * Type de relation -> ["Ami(e)", "Collegue", "Famille", "Relation amoureuse"]
+  * Fourchette de montant -> ["Moins de 1000€", "1000-5000€", "5000-10000€", "Plus de 10000€"]
+  * Fourchette de taux -> ["0%", "0-2%", "2-4%", "Plus de 4%"]
+  * Domaine -> ["Tech", "Finance", "Sante", "Education", "Autre"]
+  * Temporalite -> ["Ponctuel", "Recurrent", "Long terme"]
+- Ne propose PAS de QCM quand tu demandes de DECRIRE quelqu'un ou une situation en detail
+  (ex: "Qui est Claire ?" -> PAS de QCM, reponse libre en texte/vocal)
+- Ne propose PAS de QCM quand les choix seraient des suppositions incertaines
+- Maximum 5 choix par QCM, toujours inclure "Autre" comme dernier choix si pertinent
 
 Si pas besoin de contexte, question et choices doivent etre null."""
 

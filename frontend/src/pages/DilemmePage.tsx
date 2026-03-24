@@ -163,11 +163,24 @@ export function DilemmePage() {
     try {
       const questionAuto = `${options.map(o => o.trim()).join(' vs ')}`
       await api.agentSaveContext(text.trim(), `dilemme: ${questionAuto}`)
+      setContextInput('')
+      // Re-check if MORE context is needed (cascade)
+      const recheck = await api.agentCheckContext(
+        'dilemme', questionAuto, options.map(o => o.trim()), deviceCtx ?? undefined,
+      )
+      if (recheck.needs_context) {
+        // Agent needs more info — show next question
+        setContextQuestion(recheck.agent_question)
+        setContextChoices(recheck.choices)
+      } else {
+        // All context gathered — unlock analysis
+        setContextProvided(true)
+        setContextNeeded(false)
+      }
+    } catch {
+      // On error, unlock anyway
       setContextProvided(true)
       setContextNeeded(false)
-      setContextInput('')
-    } catch {
-      // Silent fail
     } finally {
       setContextLoading(false)
     }

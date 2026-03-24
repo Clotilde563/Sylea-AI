@@ -136,11 +136,24 @@ export function EvenementPage() {
     setContextLoading(true)
     try {
       await api.agentSaveContext(text.trim(), `evenement: ${description.trim().slice(0, 50)}`)
+      setContextInput('')
+      // Re-check if MORE context is needed (cascade)
+      const recheck = await api.agentCheckContext(
+        'evenement', description.trim(), undefined, deviceCtx ?? undefined,
+      )
+      if (recheck.needs_context) {
+        // Agent needs more info — show next question
+        setContextQuestion(recheck.agent_question)
+        setContextChoices(recheck.choices)
+      } else {
+        // All context gathered — unlock analysis
+        setContextProvided(true)
+        setContextNeeded(false)
+      }
+    } catch {
+      // On error, unlock anyway
       setContextProvided(true)
       setContextNeeded(false)
-      setContextInput('')
-    } catch {
-      // Silent fail
     } finally {
       setContextLoading(false)
     }
