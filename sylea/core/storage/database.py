@@ -119,6 +119,28 @@ CREATE TABLE IF NOT EXISTS users (
 );
 """
 
+_CREATE_AGENT_MESSAGES = """
+CREATE TABLE IF NOT EXISTS agent_messages (
+    id TEXT PRIMARY KEY,
+    auth_user_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    type TEXT DEFAULT 'text',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (auth_user_id) REFERENCES users(id)
+);
+"""
+
+_CREATE_AGENT_COLLECTED_INFO = """
+CREATE TABLE IF NOT EXISTS agent_collected_info (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    field TEXT NOT NULL,
+    value TEXT NOT NULL,
+    collected_at TEXT NOT NULL
+);
+"""
+
 
 class DatabaseManager:
     """Gestionnaire de connexion et de schéma SQLite."""
@@ -169,6 +191,8 @@ class DatabaseManager:
             self._conn.execute(_CREATE_SOUS_OBJECTIFS)
             self._conn.execute(_CREATE_TACHES)
             self._conn.execute(_CREATE_USERS)
+            self._conn.execute(_CREATE_AGENT_MESSAGES)
+            self._conn.execute(_CREATE_AGENT_COLLECTED_INFO)
             # Migration : ajouter auth_user_id dans profil
             try:
                 self._conn.execute(

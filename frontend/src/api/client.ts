@@ -243,11 +243,53 @@ export const api = {
 
   // ── Agent companion (Agent Sylea 1) ──────────────────────────────────
 
-  agentChat: (messages: Array<{ role: string; content: string }>, contexte_appareil?: DeviceContext): Promise<{ message: string }> =>
-    request<{ message: string }>('/agent/chat', {
+  agentChat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext): Promise<{ message: string; choices?: string[] }> =>
+    request<{ message: string; choices?: string[] }>('/agent/chat', {
       method: 'POST',
       body: JSON.stringify({ messages, contexte_appareil }),
     }),
+
+  getAgentMessages: (): Promise<Array<{ id: string; role: string; content: string; type: string; created_at: string }>> =>
+    request('/agent/messages'),
+
+  clearAgentMessages: (): Promise<{ detail: string }> =>
+    request('/agent/messages', { method: 'DELETE' }),
+
+  agentProactive: (): Promise<{ message: string | null }> =>
+    request('/agent/proactive', { method: 'POST' }),
+
+  agentCheckContext: (type: string, question: string, options?: string[], deviceContext?: DeviceContext): Promise<{ needs_context: boolean; agent_question: string | null; choices: string[] | null }> =>
+    request('/agent/check-context', {
+      method: 'POST',
+      body: JSON.stringify({ type, question, options, contexte_appareil: deviceContext }),
+    }),
+
+  agentSaveContext: (contextText: string, relatedTo: string): Promise<{ ok: boolean }> =>
+    request('/agent/save-context', {
+      method: 'POST',
+      body: JSON.stringify({ context_text: contextText, related_to: relatedTo }),
+    }),
+
+  agentTTS: async (text: string): Promise<Blob | null> => {
+    try {
+      const token = localStorage.getItem('sylea_auth_token')
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+
+      const res = await fetch(`${BASE}/agent/tts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ text }),
+      })
+      if (res.ok) {
+        const blob = await res.blob()
+        if (blob.size > 0) return blob
+      }
+      return null
+    } catch {
+      return null
+    }
+  },
 
   // ── Auth ────────────────────────────────────────────────────────────────
   authLogin: (email: string, password: string): Promise<{ token: string; user: { id: string; email: string; provider: string } }> =>

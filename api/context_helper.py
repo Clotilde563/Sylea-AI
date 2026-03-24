@@ -18,26 +18,40 @@ def _moment_du_jour(heure: int) -> str:
         return "nuit"
 
 
-def format_device_context(ctx: Optional["DeviceContextIn"]) -> str:
+def format_device_context(ctx) -> str:
     """Formate le contexte appareil pour injection dans les prompts Claude.
 
+    Accepte un objet Pydantic (DeviceContextIn) ou un dict brut.
     Retourne une chaine vide si le contexte est None.
     """
     if ctx is None:
         return ""
-    moment = _moment_du_jour(ctx.heure)
+    # Support both Pydantic objects and raw dicts
+    def _get(key, default=None):
+        if isinstance(ctx, dict):
+            return ctx.get(key, default)
+        return getattr(ctx, key, default)
+    moment = _moment_du_jour(_get('heure', 12))
+    heure = _get('heure', 12)
+    minute = _get('minute', 0)
+    fuseau = _get('fuseau_horaire', '')
+    ville = _get('ville', '')
+    latitude = _get('latitude', None)
+    longitude = _get('longitude', None)
+    meteo = _get('meteo', '')
+    temperature = _get('temperature', 0)
     parts = [
         "\nCONTEXTE ACTUEL DE L'UTILISATEUR :",
-        f"- Heure locale : {ctx.heure:02d}:{ctx.minute:02d} ({moment})"
-        + (f", fuseau {ctx.fuseau_horaire}" if ctx.fuseau_horaire else ""),
+        f"- Heure locale : {heure:02d}:{minute:02d} ({moment})"
+        + (f", fuseau {fuseau}" if fuseau else ""),
     ]
-    if ctx.ville:
+    if ville:
         parts.append(
-            f"- Localisation : {ctx.ville}"
-            + (f" ({ctx.latitude:.4f}, {ctx.longitude:.4f})" if ctx.latitude else "")
+            f"- Localisation : {ville}"
+            + (f" ({latitude:.4f}, {longitude:.4f})" if latitude else "")
         )
-    if ctx.meteo and ctx.meteo != "Inconnu":
-        parts.append(f"- Meteo : {ctx.temperature:.0f} degres C, {ctx.meteo}")
+    if meteo and meteo != "Inconnu":
+        parts.append(f"- Meteo : {temperature:.0f} degres C, {meteo}")
     parts.append(
         "IMPORTANT : Utilise ces informations pour contextualiser ton analyse. "
         "Par exemple, recommande des activites exterieures si le temps est favorable, "

@@ -7,6 +7,26 @@ import { useStore } from '../store/useStore'
 import { useT } from '../i18n/LanguageContext'
 import { ConfirmProfilModal } from './ConfirmProfilModal'
 
+// Small red dot shown when there are unread proactive agent messages
+function AgentNotificationDot() {
+  const unread = useStore((s) => s.unreadAgentMessages)
+  if (unread <= 0) return null
+  return (
+    <span style={{
+      position: 'absolute',
+      top: 2,
+      right: 2,
+      width: 9,
+      height: 9,
+      borderRadius: '50%',
+      background: '#ef4444',
+      border: '2px solid rgba(3,7,15,0.94)',
+      boxShadow: '0 0 6px rgba(239,68,68,0.6)',
+      animation: 'agent-pulse-dot-nav 2s ease-in-out infinite',
+    }} />
+  )
+}
+
 interface NavBarProps {
   onOpenChatbot?: () => void
 }
@@ -274,6 +294,8 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
                 }}>
                   {t('nav.agents')}
                 </span>
+                {/* Notification dot for unread proactive messages */}
+                <AgentNotificationDot />
               </Link>
             )
           })()}

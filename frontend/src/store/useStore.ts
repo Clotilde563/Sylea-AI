@@ -29,6 +29,12 @@ interface SyleaStore {
   sousObjectifs: SousObjectif[]
   setSousObjectifs: (so: SousObjectif[]) => void
   refreshSousObjectifs: () => Promise<void>
+
+  // Unread agent proactive messages count
+  unreadAgentMessages: number
+  setUnreadAgentMessages: (n: number) => void
+  incrementUnreadAgentMessages: () => void
+  clearUnreadAgentMessages: () => void
 }
 
 export const useStore = create<SyleaStore>((set) => ({
@@ -57,4 +63,9 @@ export const useStore = create<SyleaStore>((set) => ({
       // Silently fail — sous-objectifs may not exist yet
     }
   },
+
+  unreadAgentMessages: 0,
+  setUnreadAgentMessages: (n) => set({ unreadAgentMessages: n }),
+  incrementUnreadAgentMessages: () => set((s) => ({ unreadAgentMessages: s.unreadAgentMessages + 1 })),
+  clearUnreadAgentMessages: () => set({ unreadAgentMessages: 0 }),
 }))

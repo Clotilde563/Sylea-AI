@@ -257,7 +257,9 @@ export function DashboardPage() {
                 <span>{'\u25c7'}</span> {t('dashboard.sous_objectifs')}
               </h3>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-              {(() => { const SO_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#10b981']; const SO_COLORS_LIGHT = ['#60a5fa', '#a78bfa', '#fbbf24', '#34d399']; return sousObjectifs.map((so, idx) => {
+              {sousObjectifs.map((so, idx) => {
+                  const SO_COLORS = ['#3b82f6', '#8b5cf6', '#f59e0b', '#10b981']
+                  const SO_COLORS_LIGHT = ['#60a5fa', '#a78bfa', '#fbbf24', '#34d399']
                   const isCompleted = so.progression >= 100
                   const isActive = idx === activeIdx
                   const soColor = SO_COLORS[idx % SO_COLORS.length]
@@ -317,7 +319,7 @@ export function DashboardPage() {
                       </div>
                     </div>
                   )
-                }); })()}
+                })}
               </div>
               {loadingSO && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.75rem', color: 'var(--text-muted)' }}>
