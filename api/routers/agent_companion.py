@@ -855,22 +855,25 @@ DEMANDE: {data.question}{options_text}
 PROFIL UTILISATEUR:
 {json.dumps(profil_data, ensure_ascii=False)}
 
-INFORMATIONS COLLECTEES:
+INFORMATIONS CONNUES SUR L'UTILISATEUR (contexte general, PAS lie a cette demande):
 {collected_info or "Aucune"}
 
-QUESTION: As-tu assez d'informations pour analyser cette demande de maniere pertinente ?
-Si la demande mentionne des personnes, des lieux, des situations que tu ne connais pas,
-tu as BESOIN de contexte supplementaire.
+QUESTION: Analyse UNIQUEMENT le texte de la DEMANDE ci-dessus.
+As-tu assez d'informations DANS LA DEMANDE ELLE-MEME pour faire une analyse pertinente ?
+IGNORE les informations collectees ci-dessus sauf si elles sont DIRECTEMENT pertinentes.
 
 Exemples qui NECESSITENT du contexte:
 - "Me mettre en couple avec Claire ou Laura" -> Tu ne connais ni Claire ni Laura
 - "Accepter l'offre de Jean" -> Tu ne sais pas qui est Jean ni quelle offre
-- "Demenager a Bordeaux" -> Tu ne sais pas pourquoi Bordeaux specifiquement
 
 Exemples qui N'ONT PAS BESOIN de contexte:
-- "Apprendre l'anglais ou l'espagnol" -> Assez generique
-- "Manger ou aller courir" -> Activites courantes
-- "J'ai obtenu une promotion" -> Clair en soi
+- "Apprendre l'anglais ou l'espagnol" -> Assez generique, analyse directe
+- "Manger ou aller courir" -> Activites courantes, analyse directe
+- "J'ai obtenu une promotion" -> Clair en soi, analyse directe
+- "J'ai recu un financement de 10000 euros" -> Le montant est clair MAIS le type de financement manque -> QCM
+
+IMPORTANT: Ne mentionne JAMAIS des personnes ou des infos des "informations connues" dans ta question
+si elles ne sont PAS mentionnees dans la DEMANDE.
 
 Reponds UNIQUEMENT en JSON:
 {{"needs_context": true/false, "question": "ta question si besoin (1 phrase, tutoiement)", "choices": ["choix1", "choix2", "choix3"] ou null}}
