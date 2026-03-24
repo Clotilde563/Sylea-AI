@@ -873,9 +873,16 @@ Exemples qui N'ONT PAS BESOIN de contexte:
 - "J'ai obtenu une promotion" -> Clair en soi
 
 Reponds UNIQUEMENT en JSON:
-{{"needs_context": true/false, "question": "ta question si besoin (1 phrase, tutoiement)", "choices": ["choix1", "choix2"] ou null}}
+{{"needs_context": true/false, "question": "ta question si besoin (1 phrase, tutoiement)", "choices": null}}
 
-Si tu poses une question, propose des choix QCM quand c'est possible (max 4).
+REGLES POUR LES CHOIX QCM :
+- Par DEFAUT, choices = null (l'utilisateur repond en texte ou vocal)
+- Propose des choix QCM UNIQUEMENT quand la reponse est categorisable avec certitude
+  (ex: "C'est dans quel domaine ?" -> ["Tech", "Finance", "Sante", "Autre"])
+- Ne propose JAMAIS de QCM quand tu demandes de DECRIRE quelqu'un ou quelque chose
+  (ex: "Qui est Claire ?" -> PAS de QCM, l'utilisateur doit decrire librement)
+- Ne propose JAMAIS de QCM quand les choix seraient des suppositions de ta part
+
 Si pas besoin de contexte, question et choices doivent etre null."""
 
     try:

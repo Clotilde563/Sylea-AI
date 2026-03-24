@@ -78,20 +78,6 @@ export function DilemmePage() {
   const [isListeningCtx, setIsListeningCtx] = useState(false)
   const recognitionCtxRef = useRef<any>(null)
 
-  if (!profil) {
-    return (
-      <div className="page">
-        <div className="container page-content" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '1rem' }}>
-          <p style={{ color: 'var(--text-muted)' }}>{t('dilemme.creer_profil_msg')}</p>
-          <button className="btn btn-primary" onClick={() => navigate('/profil')}>
-            {t('dilemme.creer_profil')}
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-
   const TEMPORAL_OPTIONS = [
     { value: '1_jour', label: t('dilemme.jour') },
     { value: '1_semaine', label: t('dilemme.semaine') },
@@ -305,6 +291,19 @@ export function DilemmePage() {
     const next = [...options]
     next[index] = value
     setOptions(next)
+  }
+
+  if (!profil) {
+    return (
+      <div className="page">
+        <div className="container page-content" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '1rem' }}>
+          <p style={{ color: 'var(--text-muted)' }}>{t('dilemme.creer_profil_msg')}</p>
+          <button className="btn btn-primary" onClick={() => navigate('/profil')}>
+            {t('dilemme.creer_profil')}
+          </button>
+        </div>
+      </div>
+    )
   }
 
   return (
