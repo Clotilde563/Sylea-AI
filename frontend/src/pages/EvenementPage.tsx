@@ -131,27 +131,36 @@ export function EvenementPage() {
     setIsListeningCtx(true)
   }, [isListeningCtx])
 
+  const contextCascadeRef = useRef(0)
+  const contextAnswersRef = useRef<string[]>([])
+
   const handleSendContext = async (text: string) => {
     if (!text.trim()) return
     setContextLoading(true)
+    contextCascadeRef.current += 1
+    contextAnswersRef.current.push(text.trim())
     try {
       await api.agentSaveContext(text.trim(), `evenement: ${description.trim().slice(0, 50)}`)
       setContextInput('')
-      // Re-check if MORE context is needed (cascade)
+      // Max 2 cascade questions, then unlock
+      if (contextCascadeRef.current >= 2) {
+        setContextProvided(true)
+        setContextNeeded(false)
+        return
+      }
+      // Re-check with enriched description (include previous answers so Claude doesn't repeat)
+      const enrichedDescription = `${description.trim()} [Contexte deja fourni: ${contextAnswersRef.current.join(', ')}]`
       const recheck = await api.agentCheckContext(
-        'evenement', description.trim(), undefined, deviceCtx ?? undefined,
+        'evenement', enrichedDescription, undefined, deviceCtx ?? undefined,
       )
-      if (recheck.needs_context) {
-        // Agent needs more info — show next question
+      if (recheck.needs_context && recheck.agent_question) {
         setContextQuestion(recheck.agent_question)
-        setContextChoices(recheck.choices)
+        setContextChoices(recheck.choices || null)
       } else {
-        // All context gathered — unlock analysis
         setContextProvided(true)
         setContextNeeded(false)
       }
     } catch {
-      // On error, unlock anyway
       setContextProvided(true)
       setContextNeeded(false)
     } finally {
