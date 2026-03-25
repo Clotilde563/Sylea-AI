@@ -131,15 +131,35 @@ async def analyser_dilemme(
         with open("debug_dilemme_error.txt", "w", encoding="utf-8") as ef:
             ef.write(f"ERROR in message extraction: {e}\nuser_id: {user_id}\n")
 
-    device_ctx = format_device_context(data.contexte_appareil) + collected_context
+    # Aussi charger les infos collectées par l'agent (agent_collected_info)
+    try:
+        info_rows = db.conn.execute(
+            "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 20",
+            (user_id or "",),
+        ).fetchall()
+        if info_rows:
+            # Filtrer les infos pertinentes aux options du dilemme
+            relevant_infos = []
+            for field, value in info_rows:
+                value_lower = value.lower()
+                for opt in options_list:
+                    for word in opt.split():
+                        if len(word) > 3 and word.lower() in value_lower:
+                            relevant_infos.append(f"  {field}: {value[:300]}")
+                            break
+                    else:
+                        continue
+                    break
+            if relevant_infos:
+                collected_context += (
+                    "\n\n=== CONTEXTE SUPPLEMENTAIRE COLLECTE ===\n"
+                    + "\n".join(relevant_infos[:10])
+                    + "\n=== FIN DU CONTEXTE SUPPLEMENTAIRE ===\n"
+                )
+    except Exception:
+        pass
 
-    # DEBUG: écrire dans un fichier pour vérifier
-    with open("debug_dilemme.txt", "w", encoding="utf-8") as f:
-        f.write(f"user_id: {user_id}\n")
-        f.write(f"options_list: {options_list}\n")
-        f.write(f"collected_context length: {len(collected_context)}\n")
-        f.write(f"collected_context:\n{collected_context}\n")
-        f.write(f"\ndevice_ctx complet:\n{device_ctx}\n")
+    device_ctx = format_device_context(data.contexte_appareil) + collected_context
 
     if agent is not None:
         try:
