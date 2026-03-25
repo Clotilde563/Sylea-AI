@@ -26,7 +26,8 @@ from api.schemas import (
     DecisionOut,
     OptionDilemmeOut,
 )
-from api.dependencies import get_profil_repo, get_decision_repo, get_agent, get_optional_user
+from api.dependencies import get_profil_repo, get_decision_repo, get_agent, get_optional_user, get_db
+from sylea.core.storage.database import DatabaseManager
 from api.context_helper import format_device_context
 
 router = APIRouter(prefix="/api/dilemme", tags=["dilemme"])
@@ -69,6 +70,7 @@ def _decision_to_out(d: Decision, sous_objectif_impacte: str | None = None) -> D
 async def analyser_dilemme(
     data: DilemmeIn,
     profil_repo: ProfilRepository = Depends(get_profil_repo),
+    db: DatabaseManager = Depends(get_db),
     agent=Depends(get_agent),
     user_id: str | None = Depends(get_optional_user),
 ):
@@ -94,50 +96,50 @@ async def analyser_dilemme(
 
     lettres = [chr(65 + i) for i in range(len(options_list))]
 
-    # Charger les infos collectées + messages agent pour enrichir le contexte
+    # Chercher UNIQUEMENT les messages agent pertinents aux options du dilemme
     collected_context = ""
-    try:
-        rows = db.conn.execute(
-            "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 20",
-            (user_id or "",),
-        ).fetchall()
-        if rows:
-            collected_context = "\nCONTEXTE ADDITIONNEL COLLECTE PAR L'AGENT :\n" + "\n".join(
-                f"  - {r[0]}: {r[1]}" for r in rows
-            )
-    except Exception:
-        pass
-    # Chercher dans les messages agent les infos sur les personnes mentionnées dans les options
     try:
         msg_rows = db.conn.execute(
             "SELECT role, content FROM agent_messages WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT 30",
             (user_id or "",),
         ).fetchall()
         if msg_rows:
-            # Extraire les noms des options
-            all_text = " ".join(options_list).lower()
-            # Filtrer uniquement les messages qui mentionnent des termes des options
             relevant_msgs = []
+            seen = set()
             for r in msg_rows:
                 content_lower = r[1].lower()
                 for opt in options_list:
-                    # Chercher chaque mot significatif de l'option (> 3 lettres)
                     for word in opt.split():
                         if len(word) > 3 and word.lower() in content_lower:
-                            relevant_msgs.append(f"{'Utilisateur' if r[0] == 'user' else 'Agent'}: {r[1][:250]}")
+                            key = r[1][:50]
+                            if key not in seen:
+                                seen.add(key)
+                                relevant_msgs.append(f"{'Utilisateur' if r[0] == 'user' else 'Agent'}: {r[1][:300]}")
                             break
                     else:
                         continue
                     break
             if relevant_msgs:
-                collected_context += "\n\nINFORMATIONS PERTINENTES SUR LES PERSONNES/SUJETS MENTIONNES (issues de conversations precedentes) :\n" + "\n".join(
-                    f"  - {m}" for m in relevant_msgs[:5]
+                collected_context = (
+                    "\n\n=== INFORMATIONS CRITIQUES SUR LES PERSONNES MENTIONNEES ===\n"
+                    "L'utilisateur a precedemment partage ces informations via l'Agent Sylea 1.\n"
+                    "Tu DOIS les utiliser dans ton analyse :\n\n"
+                    + "\n".join(f"  {m}" for m in relevant_msgs[:5])
+                    + "\n\n=== FIN DES INFORMATIONS CRITIQUES ===\n"
                 )
-                collected_context += "\n\nIMPORTANT : Utilise ces informations pour personnaliser ton analyse. Par exemple, si un ami est decrit comme negatif/demotivant, cela DOIT impacter ton verdict."
-    except Exception:
-        pass
+    except Exception as e:
+        with open("debug_dilemme_error.txt", "w", encoding="utf-8") as ef:
+            ef.write(f"ERROR in message extraction: {e}\nuser_id: {user_id}\n")
 
     device_ctx = format_device_context(data.contexte_appareil) + collected_context
+
+    # DEBUG: écrire dans un fichier pour vérifier
+    with open("debug_dilemme.txt", "w", encoding="utf-8") as f:
+        f.write(f"user_id: {user_id}\n")
+        f.write(f"options_list: {options_list}\n")
+        f.write(f"collected_context length: {len(collected_context)}\n")
+        f.write(f"collected_context:\n{collected_context}\n")
+        f.write(f"\ndevice_ctx complet:\n{device_ctx}\n")
 
     if agent is not None:
         try:
