@@ -207,13 +207,14 @@ ZERO emotion, ZERO encouragement. Tu raisonnes en TEMPS, pas en pourcentage.
 
 PROFIL R\u00c9SUM\u00c9 :
 {profil_resume}
-{device_context}
 
 OBJECTIF ULTIME : {objectif_desc}
 PROBABILIT\u00c9 ACTUELLE : {prob_totale:.2f}%
 TEMPS ESTIME RESTANT : {temps_estime_str} ({_tj} jours)
 
 CADRE TEMPOREL DE CE CHOIX : {cadre_str}
+
+{device_context}
 
 QUESTION : {question}
 

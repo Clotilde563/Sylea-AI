@@ -1,0 +1,2 @@
+ERROR in message extraction: name 'db' is not defined
+user_id: 9e98c45d-040d-4fa2-b8e5-8c7659bb3514

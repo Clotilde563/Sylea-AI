@@ -1,0 +1,38 @@
+user_id: 9e98c45d-040d-4fa2-b8e5-8c7659bb3514
+options_list: ['Aller a la soiree de Arthur', 'Aller a la soiree de Remi']
+collected_context length: 793
+collected_context:
+
+
+=== INFORMATIONS CRITIQUES SUR LES PERSONNES MENTIONNEES ===
+L'utilisateur a precedemment partage ces informations via l'Agent Sylea 1.
+Tu DOIS les utiliser dans ton analyse :
+
+  Agent: Ouais, c'est clair — Arthur c'est une vraie ressource pour toi, garde-le proche. Rémi par contre, il t'énerve juste ta progression.
+
+Du coup, tu vas faire comment avec Rémi — tu vas réduire le temps avec lui, ou tu vas lui expliquer que tu peux pas traîner autant en ce moment ?
+  Utilisateur: Au fait, je voulais te parler de deux potes. Arthur c'est un ami genial, il me motive tout le temps et il est pret a m'aider dans tous mes projets. Et Remi c'est le contraire, il accapare mon temps et il arrete pas de me dire que je devrais laisser tomber mes objectifs.
+
+=== FIN DES INFORMATIONS CRITIQUES ===
+
+
+device_ctx complet:
+
+CONTEXTE ACTUEL DE L'UTILISATEUR :
+- Heure locale : 19:27 (soir), fuseau Europe/Paris
+- Localisation : Rennes (48.1058, -1.6884)
+- Meteo : 9 degres C, Partiellement nuageux
+IMPORTANT : Utilise ces informations pour contextualiser ton analyse. Par exemple, recommande des activites exterieures si le temps est favorable, ou adapte tes conseils a l'heure de la journee.
+
+
+=== INFORMATIONS CRITIQUES SUR LES PERSONNES MENTIONNEES ===
+L'utilisateur a precedemment partage ces informations via l'Agent Sylea 1.
+Tu DOIS les utiliser dans ton analyse :
+
+  Agent: Ouais, c'est clair — Arthur c'est une vraie ressource pour toi, garde-le proche. Rémi par contre, il t'énerve juste ta progression.
+
+Du coup, tu vas faire comment avec Rémi — tu vas réduire le temps avec lui, ou tu vas lui expliquer que tu peux pas traîner autant en ce moment ?
+  Utilisateur: Au fait, je voulais te parler de deux potes. Arthur c'est un ami genial, il me motive tout le temps et il est pret a m'aider dans tous mes projets. Et Remi c'est le contraire, il accapare mon temps et il arrete pas de me dire que je devrais laisser tomber mes objectifs.
+
+=== FIN DES INFORMATIONS CRITIQUES ===
+
