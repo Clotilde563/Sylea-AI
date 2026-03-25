@@ -782,6 +782,15 @@ class CheckContextOut(BaseModel):
 class SaveContextIn(BaseModel):
     context_text: str
     related_to: str  # "dilemme: question" or "evenement: description"
+    type: str = "dilemme"  # "dilemme" or "evenement"
+    question: str = ""  # the original dilemma question or event description
+    options: list[str] | None = None
+
+
+class SaveContextOut(BaseModel):
+    ok: bool
+    sufficient: bool  # True if the context is now sufficient for analysis
+    feedback: str | None = None  # If not sufficient, explain what's missing
 
 
 @router.post("/check-context", response_model=CheckContextOut)
@@ -916,13 +925,14 @@ Si pas besoin de contexte, question et choices doivent etre null."""
     return CheckContextOut(needs_context=False)
 
 
-@router.post("/save-context")
+@router.post("/save-context", response_model=SaveContextOut)
 async def save_context(
     data: SaveContextIn,
     db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
-    """Save context provided by the user before analysis."""
+    """Save context provided by the user, then validate if it is sufficient for analysis."""
+    # Save the context
     if user_id:
         try:
             db.conn.execute(
@@ -932,4 +942,70 @@ async def save_context(
             db.conn.commit()
         except Exception:
             pass
-    return {"ok": True}
+
+    # Now validate: is the context sufficient?
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return SaveContextOut(ok=True, sufficient=True)
+
+    # Load all collected info for this user
+    collected_info = ""
+    if user_id:
+        try:
+            rows = db.conn.execute(
+                "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 20",
+                (user_id,),
+            ).fetchall()
+            collected_info = "\n".join(f"{r[0]}: {r[1]}" for r in rows)
+        except Exception:
+            pass
+
+    options_text = ""
+    if data.options:
+        options_text = f"\nOptions: {' | '.join(data.options)}"
+
+    prompt = f"""L'utilisateur a fourni du contexte supplementaire pour une analyse.
+
+TYPE: {data.type}
+DEMANDE ORIGINALE: {data.question}{options_text}
+CONTEXTE FOURNI: {data.context_text}
+AUTRES INFOS CONNUES: {collected_info}
+
+Le contexte fourni est-il SUFFISANT pour faire une analyse pertinente et factuelle ?
+
+CRITERES DE SUFFISANCE :
+- Pour des personnes mentionnees : on doit savoir QUI elles sont et QUEL est leur lien avec l'utilisateur
+- Pour des lieux : on doit savoir POURQUOI ce lieu specifiquement
+- Pour des montants/finances : on doit savoir la SOURCE et les CONDITIONS
+- Pour des projets : on doit savoir le CONTEXTE et les ENJEUX
+
+Si le contexte est INSUFFISANT, explique en 1 phrase courte (tutoiement) ce qui manque.
+Si le contexte est SUFFISANT, reponds sufficient: true.
+
+Reponds UNIQUEMENT en JSON:
+{{"sufficient": true/false, "feedback": "Ce qui manque en 1 phrase" ou null}}"""
+
+    try:
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=key)
+        msg = await asyncio.to_thread(
+            lambda: client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=100,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        )
+        text = msg.content[0].text.strip()
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            result = json.loads(match.group())
+            return SaveContextOut(
+                ok=True,
+                sufficient=result.get("sufficient", True),
+                feedback=result.get("feedback"),
+            )
+    except Exception:
+        pass
+
+    return SaveContextOut(ok=True, sufficient=True)
