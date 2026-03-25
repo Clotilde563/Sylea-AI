@@ -196,16 +196,7 @@ REGLES ABSOLUES :
 11. Quand tu as deja recolte les infos principales (hobbies, motivations, routine, competences), tu ecoutes la conversation naturellement. Ne pose plus de questions forcees.
 12. Si l'utilisateur repond de maniere breve, tu peux aussi etre bref. Un simple "Cool, merci !" ou "Ah nice !" suffit parfois.
 13. Tes messages font 1-3 phrases MAXIMUM. Jamais plus.
-14. Quand la question s'y prete (oui/non, choix entre options, echelle),
-    tu peux proposer des choix rapides en ajoutant a la fin de ton message
-    un bloc JSON sur une nouvelle ligne :
-    [QCM]{{"choices":["Option A","Option B","Option C"]}}[/QCM]
-    Exemples de situations adaptees au QCM :
-    - "Tu preferes bosser le matin ou le soir ?" -> [QCM]{{"choices":["Plutot le matin","Plutot le soir","Ca depend des jours"]}}[/QCM]
-    - "T'es plutot stresse en ce moment ?" -> [QCM]{{"choices":["Pas du tout","Un peu","Assez stresse","Tres stresse"]}}[/QCM]
-    - "T'as deja commence a coder ?" -> [QCM]{{"choices":["Oui","Non, pas encore","Un petit peu"]}}[/QCM]
-    Ne propose PAS de QCM pour les questions ouvertes qui demandent une reponse detaillee.
-    Maximum 4 choix par QCM.
+14. Ne propose JAMAIS de choix multiples ou de QCM. Pose toujours des questions ouvertes pour avoir des reponses precises et detaillees.
 
 EXEMPLES DE TON :
 BON : "Hey ! Comment ca se passe avec le dev web ? T'as eu le temps de coder un peu cette semaine ?"
@@ -537,18 +528,6 @@ async def agent_chat(
 
     agent_response = msg.content[0].text.strip()
 
-    # Extract QCM choices if present
-    choices = None
-    qcm_match = re.search(r'\[QCM\](.*?)\[/QCM\]', agent_response, re.DOTALL)
-    if qcm_match:
-        try:
-            qcm_data = json.loads(qcm_match.group(1))
-            choices = qcm_data.get("choices", [])
-            # Remove the QCM block from the displayed message
-            agent_response = agent_response[:qcm_match.start()].strip()
-        except Exception:
-            pass
-
     # Persist messages if authenticated
     if user_id:
         # Save user message
@@ -570,7 +549,7 @@ async def agent_chat(
         recent_for_info = _load_agent_messages(db, user_id, limit=4)
         asyncio.create_task(_extract_and_save_info(recent_for_info, profil_data, db, user_id))
 
-    return AgentChatOut(message=agent_response, choices=choices)
+    return AgentChatOut(message=agent_response)
 
 
 @router.get("/messages", response_model=list[AgentMessageOut])

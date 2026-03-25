@@ -1,6 +1,6 @@
 user_id: 9e98c45d-040d-4fa2-b8e5-8c7659bb3514
-options_list: ["Aller à la soirée d'Arthur", 'Aller à la soirée de Rémi']
-collected_context length: 507
+options_list: ['partir en vacances avec Albert', 'Partir en vacances avec Louis']
+collected_context length: 1433
 collected_context:
 
 
@@ -11,6 +11,16 @@ Tu DOIS les utiliser dans ton analyse :
   Agent: Ouais, c'est clair — Arthur c'est une vraie ressource pour toi, garde-le proche. Rémi par contre, il t'énerve juste ta progression.
 
 Du coup, tu vas faire comment avec Rémi — tu vas réduire le temps avec lui, ou tu vas lui expliquer que tu peux pas traîner autant en ce moment ?
+  Agent: Je pense que tu devrais arrêter de coder après 22h max — ton cerveau a besoin de décompresser avant de dormir, sinon tu restes en mode "projet" toute la nuit.
+
+Et honnêtement, je te conseille de bosser le matin ou en début d'après-midi plutôt — tu seras plus frais et tu apprendras mieux. T'as la pos
+  Utilisateur: Je suis un peu stresse en ce moment avec le boulot et la formation en dev web
+  Agent: Honnêtement, tu es sur la bonne voie — tu as commencé à apprendre, tu pratiques déjà avec un projet concret sur la finance qui t'intéresse. C'est exactement ce qu'il faut faire.
+
+Mais je vais être straight avec toi : 12% de probabilité de réussite, c'est serré. Ça veut dire que tu dois vraiment rest
+  Agent: Ah sympas ! T'as déjà avancé pas mal alors, c'est cool de voir que ça bouge !
+
+Du coup, tu as créé quoi exactement — une page d'accueil, un tableau avec des données financières, ou un truc plus complet ?
 
 === FIN DES INFORMATIONS CRITIQUES ===
 
@@ -18,8 +28,8 @@ Du coup, tu vas faire comment avec Rémi — tu vas réduire le temps avec lui, 
 device_ctx complet:
 
 CONTEXTE ACTUEL DE L'UTILISATEUR :
-- Heure locale : 20:06 (soir), fuseau Europe/Paris
-- Localisation : Rennes (48.1058, -1.6885)
+- Heure locale : 20:17 (soir), fuseau Europe/Paris
+- Localisation : Rennes (48.1058, -1.6884)
 - Meteo : 8 degres C, Partiellement nuageux
 IMPORTANT : Utilise ces informations pour contextualiser ton analyse. Par exemple, recommande des activites exterieures si le temps est favorable, ou adapte tes conseils a l'heure de la journee.
 
@@ -31,6 +41,16 @@ Tu DOIS les utiliser dans ton analyse :
   Agent: Ouais, c'est clair — Arthur c'est une vraie ressource pour toi, garde-le proche. Rémi par contre, il t'énerve juste ta progression.
 
 Du coup, tu vas faire comment avec Rémi — tu vas réduire le temps avec lui, ou tu vas lui expliquer que tu peux pas traîner autant en ce moment ?
+  Agent: Je pense que tu devrais arrêter de coder après 22h max — ton cerveau a besoin de décompresser avant de dormir, sinon tu restes en mode "projet" toute la nuit.
+
+Et honnêtement, je te conseille de bosser le matin ou en début d'après-midi plutôt — tu seras plus frais et tu apprendras mieux. T'as la pos
+  Utilisateur: Je suis un peu stresse en ce moment avec le boulot et la formation en dev web
+  Agent: Honnêtement, tu es sur la bonne voie — tu as commencé à apprendre, tu pratiques déjà avec un projet concret sur la finance qui t'intéresse. C'est exactement ce qu'il faut faire.
+
+Mais je vais être straight avec toi : 12% de probabilité de réussite, c'est serré. Ça veut dire que tu dois vraiment rest
+  Agent: Ah sympas ! T'as déjà avancé pas mal alors, c'est cool de voir que ça bouge !
+
+Du coup, tu as créé quoi exactement — une page d'accueil, un tableau avec des données financières, ou un truc plus complet ?
 
 === FIN DES INFORMATIONS CRITIQUES ===
 
