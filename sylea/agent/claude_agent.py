@@ -225,12 +225,19 @@ METHODE DE CALCUL (OBLIGATOIRE) :
    REELLEMENT gagner ou perdre sur l'objectif, DANS LA LIMITE du cadre temporel ({cadre_str}) ?
 2. Le champ "impact_jours" doit contenir ce temps en {unite_impact}.
 3. L'impact ne peut JAMAIS depasser le cadre temporel ({cadre_jours} jours max en valeur absolue).
-4. Exemples concrets pour un cadre de 1 jour :
-   - Dormir 8h au lieu de coder = -0h productive mais +2h de productivite le lendemain = NET +2.0 (heures)
-   - Aller courir 1h = -1h de travail mais +1.5h de clarte mentale = NET +0.5 (heures)
-5. Exemples concrets pour un cadre de 1 mois :
+4. REGLE CRITIQUE : Chaque option DOIT avoir un impact DIFFERENT et NON NUL.
+   Meme si l'impact est minime, il existe toujours une difference entre deux choix.
+   Si les deux options sont mauvaises, les deux impacts peuvent etre NEGATIFS.
+   Si les deux options sont bonnes, les deux impacts peuvent etre POSITIFS mais differents.
+   JAMAIS 0 pour les deux options. JAMAIS le meme impact pour deux options differentes.
+5. Exemples concrets pour un cadre de 1 jour :
+   - Soiree avec un ami motivant = +0.5h (energie positive le lendemain)
+   - Soiree avec un ami demotivant = -1.5h (energie drainee, perte de focus le lendemain)
+   - Dormir 8h au lieu de coder = +2.0h (productivite le lendemain)
+   - Aller courir 1h = +0.5h (clarte mentale)
+6. Exemples concrets pour un cadre de 1 mois :
    - Apprendre l'anglais vs l'espagnol = l'anglais fait gagner ~5-10 jours, l'espagnol ~1-3 jours
-6. Sois REALISTE et FACTUEL. Pas d'impact par encouragement.
+7. Sois REALISTE et FACTUEL. Pas d'impact par encouragement.
 
 ETUDE SCIENTIFIQUE :
 - Cite UNE etude scientifique REELLE et verifiable en rapport avec le dilemme pose.
