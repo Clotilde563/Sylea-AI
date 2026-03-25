@@ -163,30 +163,13 @@ export function DilemmePage() {
   const handleSendContext = async (text: string) => {
     if (!text.trim()) return
     setContextLoading(true)
-    contextCascadeRef.current += 1
-    contextAnswersRef.current.push(text.trim())
     try {
       const questionAuto = `${options.map(o => o.trim()).join(' vs ')}`
       await api.agentSaveContext(text.trim(), `dilemme: ${questionAuto}`)
       setContextInput('')
-      // Max 2 cascade questions, then unlock
-      if (contextCascadeRef.current >= 2) {
-        setContextProvided(true)
-        setContextNeeded(false)
-        return
-      }
-      // Re-check with enriched question (include previous answers so Claude doesn't repeat)
-      const enrichedQuestion = `${questionAuto} [Contexte deja fourni: ${contextAnswersRef.current.join(', ')}]`
-      const recheck = await api.agentCheckContext(
-        'dilemme', enrichedQuestion, options.map(o => o.trim()), deviceCtx ?? undefined,
-      )
-      if (recheck.needs_context && recheck.agent_question) {
-        setContextQuestion(recheck.agent_question)
-        setContextChoices(recheck.choices || null)
-      } else {
-        setContextProvided(true)
-        setContextNeeded(false)
-      }
+      // Après 1 réponse → débloquer directement l'analyse
+      setContextProvided(true)
+      setContextNeeded(false)
     } catch {
       setContextProvided(true)
       setContextNeeded(false)
