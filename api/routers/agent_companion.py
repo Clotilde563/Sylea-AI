@@ -964,26 +964,27 @@ async def save_context(
     if data.options:
         options_text = f"\nOptions: {' | '.join(data.options)}"
 
-    prompt = f"""L'utilisateur a fourni du contexte supplementaire pour une analyse.
+    prompt = f"""L'utilisateur a repondu a une question de contexte pour une analyse.
 
-TYPE: {data.type}
 DEMANDE ORIGINALE: {data.question}{options_text}
-CONTEXTE FOURNI: {data.context_text}
-AUTRES INFOS CONNUES: {collected_info}
+REPONSE DE L'UTILISATEUR: {data.context_text}
 
-Le contexte fourni est-il SUFFISANT pour faire une analyse pertinente et factuelle ?
+QUESTION IMPORTANTE : Est-ce que la reponse de l'utilisateur repond a la question qui lui a ete posee ?
 
-CRITERES DE SUFFISANCE :
-- Pour des personnes mentionnees : on doit savoir QUI elles sont et QUEL est leur lien avec l'utilisateur
-- Pour des lieux : on doit savoir POURQUOI ce lieu specifiquement
-- Pour des montants/finances : on doit savoir la SOURCE et les CONDITIONS
-- Pour des projets : on doit savoir le CONTEXTE et les ENJEUX
+REGLES STRICTES :
+1. Si l'utilisateur a donne une reponse qui explique QUI sont les personnes ou QUEL est le contexte -> SUFFISANT
+2. Ne demande JAMAIS l'objectif de vie, la profession, la ville, l'age -> tu as DEJA ces infos
+3. Ne pose JAMAIS de question supplementaire au-dela de ce qui etait demande initialement
+4. Sois TOLERANT : une reponse courte mais claire = suffisant
+5. En cas de doute, reponds SUFFISANT (mieux vaut analyser avec peu de contexte que bloquer l'utilisateur)
 
-Si le contexte est INSUFFISANT, explique en 1 phrase courte (tutoiement) ce qui manque.
-Si le contexte est SUFFISANT, reponds sufficient: true.
+Exemples :
+- Question "Qui est Marc?" -> Reponse "C'est un ami investisseur" -> SUFFISANT
+- Question "Quel type de financement?" -> Reponse "Pret bancaire" -> SUFFISANT
+- Question "Qui sont Claire et Laura?" -> Reponse "Claire est mon amie, Laura ma collegue" -> SUFFISANT
 
 Reponds UNIQUEMENT en JSON:
-{{"sufficient": true/false, "feedback": "Ce qui manque en 1 phrase" ou null}}"""
+{{"sufficient": true/false, "feedback": "explication courte" ou null}}"""
 
     try:
         import anthropic
