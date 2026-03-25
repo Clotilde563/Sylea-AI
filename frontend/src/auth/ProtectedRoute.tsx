@@ -2,8 +2,8 @@
 // Charge le profil globalement dès que l'utilisateur est authentifié
 // Proactive agent polling + push notifications
 
-import { useEffect, useRef } from 'react'
-import { Outlet, Navigate } from 'react-router-dom'
+import { useEffect, useRef, useCallback } from 'react'
+import { Outlet, Navigate, useLocation } from 'react-router-dom'
 import { useAuthStore } from './authStore'
 import { useStore } from '../store/useStore'
 import { api } from '../api/client'
@@ -12,6 +12,8 @@ export function ProtectedRoute() {
   const { token, loading, loadToken } = useAuthStore()
   const prevTokenRef = useRef<string | null | undefined>(undefined)
   const profilLoadedRef = useRef(false)
+  const lastProactiveCheckRef = useRef(0)
+  const location = useLocation()
 
   useEffect(() => {
     loadToken()
@@ -45,37 +47,40 @@ export function ProtectedRoute() {
   }, [token])
 
   // Proactive agent polling + push notifications
+  // Debounced check: max once per 5 minutes
+  const checkProactive = useCallback(async () => {
+    if (localStorage.getItem('sylea_agent1_active') !== 'true') return
+    const now = Date.now()
+    if (now - lastProactiveCheckRef.current < 5 * 60 * 1000) return // 5 min debounce
+    lastProactiveCheckRef.current = now
+
+    try {
+      const res = await api.agentProactive()
+      if (res.message) {
+        useStore.getState().incrementUnreadAgentMessages()
+        if ('Notification' in window && Notification.permission === 'granted') {
+          new Notification('Agent Syléa 1', {
+            body: res.message,
+            icon: '/sylea-logo.png',
+            tag: 'agent-proactive',
+          })
+        }
+      }
+    } catch {
+      // Silently ignore polling errors
+    }
+  }, [])
+
+  // Initial load + 30-minute polling
   useEffect(() => {
     if (!token) return
 
-    // Check if agent is active
     const agentActive = localStorage.getItem('sylea_agent1_active') === 'true'
     if (!agentActive) return
 
     // Request notification permission
     if ('Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission()
-    }
-
-    // Check once on load, then poll every 30 minutes
-    // (the backend handles timing — returns null if too early)
-    const checkProactive = async () => {
-      if (localStorage.getItem('sylea_agent1_active') !== 'true') return
-      try {
-        const res = await api.agentProactive()
-        if (res.message) {
-          useStore.getState().incrementUnreadAgentMessages()
-          if ('Notification' in window && Notification.permission === 'granted') {
-            new Notification('Agent Syléa 1', {
-              body: res.message,
-              icon: '/sylea-logo.png',
-              tag: 'agent-proactive',
-            })
-          }
-        }
-      } catch {
-        // Silently ignore polling errors
-      }
     }
 
     // Check once after 10 seconds (let the app load first)
@@ -87,7 +92,32 @@ export function ProtectedRoute() {
       clearTimeout(initialTimeout)
       clearInterval(interval)
     }
-  }, [token])
+  }, [token, checkProactive])
+
+  // Check on page visibility change (user comes back to the tab)
+  useEffect(() => {
+    if (!token) return
+    const agentActive = localStorage.getItem('sylea_agent1_active') === 'true'
+    if (!agentActive) return
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        checkProactive()
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }, [token, checkProactive])
+
+  // Check on page navigation
+  useEffect(() => {
+    if (!token) return
+    const agentActive = localStorage.getItem('sylea_agent1_active') === 'true'
+    if (!agentActive) return
+
+    checkProactive()
+  }, [location.pathname, token, checkProactive])
 
   if (loading) {
     return (
