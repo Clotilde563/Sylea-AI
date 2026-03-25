@@ -71,10 +71,10 @@ export function DilemmePage() {
   // Context-gathering state
   const [contextNeeded, setContextNeeded] = useState(false)
   const [contextQuestion, setContextQuestion] = useState<string | null>(null)
-  const [contextChoices, setContextChoices] = useState<string[] | null>(null)
   const [contextInput, setContextInput] = useState('')
   const [contextProvided, setContextProvided] = useState(false)
   const [contextLoading, setContextLoading] = useState(false)
+  const [contextFeedback, setContextFeedback] = useState<string | null>(null)
   const [isListeningCtx, setIsListeningCtx] = useState(false)
   const recognitionCtxRef = useRef<any>(null)
 
@@ -157,19 +157,30 @@ export function DilemmePage() {
     setIsListeningCtx(true)
   }, [isListeningCtx])
 
-  const contextCascadeRef = useRef(0)
-  const contextAnswersRef = useRef<string[]>([])
-
   const handleSendContext = async (text: string) => {
     if (!text.trim()) return
     setContextLoading(true)
+    setContextFeedback(null)
     try {
       const questionAuto = `${options.map(o => o.trim()).join(' vs ')}`
-      await api.agentSaveContext(text.trim(), `dilemme: ${questionAuto}`)
+      const result = await api.agentSaveContext(
+        text.trim(),
+        `dilemme: ${questionAuto}`,
+        'dilemme',
+        questionAuto,
+        options.map(o => o.trim()),
+      )
       setContextInput('')
-      // Après 1 réponse → débloquer directement l'analyse
-      setContextProvided(true)
-      setContextNeeded(false)
+      if (result.sufficient) {
+        setContextProvided(true)
+        setContextNeeded(false)
+      } else {
+        // Context insufficient — show feedback as a new question
+        setContextFeedback(result.feedback)
+        if (result.feedback) {
+          setContextQuestion(result.feedback)
+        }
+      }
     } catch {
       setContextProvided(true)
       setContextNeeded(false)
@@ -206,7 +217,6 @@ export function DilemmePage() {
         if (ctxResult.needs_context) {
           setContextNeeded(true)
           setContextQuestion(ctxResult.agent_question)
-          setContextChoices(ctxResult.choices)
           setContextLoading(false)
           return
         }
@@ -274,9 +284,9 @@ export function DilemmePage() {
     setCustomDays(0)
     setContextNeeded(false)
     setContextQuestion(null)
-    setContextChoices(null)
     setContextInput('')
     setContextProvided(false)
+    setContextFeedback(null)
     setPhase('form')
   }
 
@@ -527,7 +537,7 @@ export function DilemmePage() {
                   </div>
 
                   {/* Text input + mic + send */}
-                  <div style={{ display: 'flex', gap: '0.5rem', marginBottom: contextChoices ? '0.75rem' : 0 }}>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
                     <input
                       type="text"
                       className="input"
@@ -581,35 +591,23 @@ export function DilemmePage() {
                     </button>
                   </div>
 
-                  {/* QCM choices */}
-                  {contextChoices && contextChoices.length > 0 && (
-                    <div>
-                      <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.4rem' }}>
-                        ou repondre rapidement :
-                      </p>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem' }}>
-                        {contextChoices.map((choice, i) => (
-                          <button
-                            key={i}
-                            type="button"
-                            onClick={() => handleSendContext(choice)}
-                            disabled={contextLoading}
-                            style={{
-                              background: 'rgba(212,160,23,0.12)',
-                              border: '1px solid rgba(212,160,23,0.35)',
-                              borderRadius: '999px',
-                              padding: '0.4rem 0.85rem',
-                              color: '#fbbf24',
-                              cursor: 'pointer',
-                              fontSize: '0.8rem',
-                              fontWeight: 500,
-                              transition: 'all 0.15s',
-                            }}
-                          >
-                            {choice}
-                          </button>
-                        ))}
-                      </div>
+                  {/* Insufficient context warning */}
+                  {contextFeedback && (
+                    <div
+                      className="animate-fade-in"
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: '0.5rem',
+                        padding: '0.55rem 0.85rem',
+                        background: 'rgba(245,158,11,0.08)',
+                        border: '1px solid rgba(245,158,11,0.3)',
+                        borderRadius: 'var(--radius-md)',
+                        color: '#f59e0b',
+                        fontSize: '0.82rem', fontWeight: 500,
+                        marginTop: '0.5rem',
+                      }}
+                    >
+                      <span style={{ fontSize: '1rem' }}>{'\u26A0'}</span>
+                      Contexte insuffisant : {contextFeedback}
                     </div>
                   )}
                 </div>
