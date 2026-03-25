@@ -298,16 +298,26 @@ async def analyser_evenement(
             )
     except Exception:
         pass
-    # Charger les messages récents de la conversation agent (mémoire longue)
+    # Chercher dans les messages agent les infos pertinentes à l'événement
     try:
         msg_rows = db.conn.execute(
-            "SELECT role, content FROM agent_messages WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT 15",
+            "SELECT role, content FROM agent_messages WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT 30",
             (user_id or "",),
         ).fetchall()
         if msg_rows:
-            collected_context += "\n\nCONVERSATION RECENTE AVEC L'AGENT (contexte personnel) :\n" + "\n".join(
-                f"  {'Utilisateur' if r[0] == 'user' else 'Agent'}: {r[1][:200]}" for r in reversed(msg_rows)
-            )
+            desc_lower = data.description.lower()
+            relevant_msgs = []
+            for r in msg_rows:
+                content_lower = r[1].lower()
+                for word in data.description.split():
+                    if len(word) > 3 and word.lower() in content_lower:
+                        relevant_msgs.append(f"{'Utilisateur' if r[0] == 'user' else 'Agent'}: {r[1][:250]}")
+                        break
+            if relevant_msgs:
+                collected_context += "\n\nINFORMATIONS PERTINENTES (conversations precedentes) :\n" + "\n".join(
+                    f"  - {m}" for m in relevant_msgs[:5]
+                )
+                collected_context += "\n\nIMPORTANT : Utilise ces informations pour personnaliser ton analyse."
     except Exception:
         pass
 

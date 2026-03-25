@@ -107,16 +107,33 @@ async def analyser_dilemme(
             )
     except Exception:
         pass
-    # Charger les messages récents de la conversation agent (mémoire longue)
+    # Chercher dans les messages agent les infos sur les personnes mentionnées dans les options
     try:
         msg_rows = db.conn.execute(
-            "SELECT role, content FROM agent_messages WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT 15",
+            "SELECT role, content FROM agent_messages WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT 30",
             (user_id or "",),
         ).fetchall()
         if msg_rows:
-            collected_context += "\n\nCONVERSATION RECENTE AVEC L'AGENT (contexte personnel) :\n" + "\n".join(
-                f"  {'Utilisateur' if r[0] == 'user' else 'Agent'}: {r[1][:200]}" for r in reversed(msg_rows)
-            )
+            # Extraire les noms des options
+            all_text = " ".join(options_list).lower()
+            # Filtrer uniquement les messages qui mentionnent des termes des options
+            relevant_msgs = []
+            for r in msg_rows:
+                content_lower = r[1].lower()
+                for opt in options_list:
+                    # Chercher chaque mot significatif de l'option (> 3 lettres)
+                    for word in opt.split():
+                        if len(word) > 3 and word.lower() in content_lower:
+                            relevant_msgs.append(f"{'Utilisateur' if r[0] == 'user' else 'Agent'}: {r[1][:250]}")
+                            break
+                    else:
+                        continue
+                    break
+            if relevant_msgs:
+                collected_context += "\n\nINFORMATIONS PERTINENTES SUR LES PERSONNES/SUJETS MENTIONNES (issues de conversations precedentes) :\n" + "\n".join(
+                    f"  - {m}" for m in relevant_msgs[:5]
+                )
+                collected_context += "\n\nIMPORTANT : Utilise ces informations pour personnaliser ton analyse. Par exemple, si un ami est decrit comme negatif/demotivant, cela DOIT impacter ton verdict."
     except Exception:
         pass
 
