@@ -256,3 +256,10 @@ class DatabaseManager:
                 )
             except Exception:
                 pass  # Colonne deja existante
+            # Migration : ajouter audio_data dans agent_messages
+            try:
+                self._conn.execute(
+                    "ALTER TABLE agent_messages ADD COLUMN audio_data TEXT DEFAULT ''"
+                )
+            except Exception:
+                pass  # Colonne deja existante
