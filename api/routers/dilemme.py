@@ -160,6 +160,7 @@ async def analyser_dilemme(
                     pros=opt.pros if opt else [],
                     cons=opt.cons if opt else [],
                     impact_probabilite=opt.impact_probabilite if opt else 0.0,
+                    impact_jours_brut=opt.impact_jours_brut if opt else 0.0,
                     resume=opt.resume if opt else "",
                 ))
             return AnalyseDilemmeOut(

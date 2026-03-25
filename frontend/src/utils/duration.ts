@@ -87,8 +87,21 @@ export function probFromJours(totalJ: number): number {
  * Retourne un label court : "+1a 6m", "-45j", "+12h", etc.
  * La durée inclut des heures si le delta est inférieur à 1 jour.
  */
-export function deltaFromImpact(probActuelle: number, impactPoints: number, maxJours?: number): string {
-  // Conversion via la formule globale probabilité → temps (toujours utilisée)
+export function deltaFromImpact(probActuelle: number, impactPoints: number, maxJours?: number, impactJoursBrut?: number): string {
+  // Pour les cadres courts (≤ 7 jours), utiliser l'impact_jours brut de l'IA
+  // au lieu de passer par la conversion % → jours qui perd la précision
+  if (maxJours !== undefined && maxJours <= 7 && impactJoursBrut !== undefined) {
+    const absHeures = Math.abs(impactJoursBrut) * 24  // jours → heures
+    const sign = impactJoursBrut >= 0 ? '+' : '-'
+    const totalMin = Math.round(absHeures * 60)
+    if (totalMin < 1) return `${sign}1min`  // minimum 1 minute, jamais 0
+    if (totalMin < 60) return `${sign}${totalMin}min`
+    const h = Math.floor(totalMin / 60)
+    const m = totalMin % 60
+    return m > 0 ? `${sign}${h}h${m}min` : `${sign}${h}h`
+  }
+
+  // Conversion via la formule globale probabilité → temps
   const pAvant = Math.max(0, Math.min(100, probActuelle))
   const pApres = Math.max(0, Math.min(100, probActuelle + impactPoints))
   const dAvant = dureeFromProb(pAvant)
@@ -102,10 +115,10 @@ export function deltaFromImpact(probActuelle: number, impactPoints: number, maxJ
     ? Math.min(abs, maxJours)
     : abs
 
-  // Pour les cadres courts (≤ 7 jours), afficher en heures/minutes
+  // Pour les cadres courts (≤ 7 jours) sans impact brut, heures/minutes
   if (maxJours !== undefined && maxJours <= 7) {
     const totalMin = Math.round(cappedAbs * 24 * 60)
-    if (totalMin < 1) return '0min'
+    if (totalMin < 1) return `${sign}1min`
     if (totalMin < 60) return `${sign}${totalMin}min`
     const h = Math.floor(totalMin / 60)
     const m = totalMin % 60
