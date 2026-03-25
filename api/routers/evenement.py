@@ -405,8 +405,13 @@ async def confirmer_evenement(
                 so_cible = all_so[0]  # fallback: premier par ordre
             total_te = sum(max(30, so["temps_estime"] or 180) for so in all_so)
             te = max(30, so_cible["temps_estime"] if so_cible["temps_estime"] else 180)
-            impact_so = abs(data.impact_probabilite) * (total_te / te)  # amplifie: plus le SO est court, plus l'impact est grand
+            # Impact signé : positif = progression, négatif = régression
+            impact_so = data.impact_probabilite * (total_te / te)  # amplifie proportionnellement
             new_prog = so_cible["progression"] + impact_so
+
+            # Plafonner entre 0 et 100
+            if new_prog < 0:
+                new_prog = 0
 
             # Si le SO dépasse 100%, redistribuer l'excédent sur les autres SO
             if new_prog >= 100:
