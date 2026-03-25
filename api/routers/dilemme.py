@@ -345,7 +345,7 @@ async def choisir_option(
                 so_cible = all_so[0]  # fallback: premier par ordre
             total_te = sum(max(30, so["temps_estime"] or 180) for so in all_so)
             te = max(30, so_cible["temps_estime"] if so_cible["temps_estime"] else 180)
-            impact_so = abs(analyse_choisie.impact_probabilite) * (total_te / te)  # amplifie: plus le SO est court, plus l'impact est grand
+            impact_so = analyse_choisie.impact_probabilite * (total_te / te)  # signé : positif = progression, négatif = régression
             new_prog = min(100, max(0, so_cible["progression"] + impact_so))
             db.conn.execute(
                 "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
