@@ -88,11 +88,12 @@ export interface AnalyseOption {
   cons: string[]
   impact_probabilite: number
   resume: string
+  impact_jours_brut?: number
 }
 
 export interface AnalyseDilemme {
   question: string
-  options: { lettre: string; description: string; pros: string[]; cons: string[]; impact_probabilite: number; resume: string }[]
+  options: { lettre: string; description: string; pros: string[]; cons: string[]; impact_probabilite: number; resume: string; impact_jours_brut?: number }[]
   verdict: string
   option_recommandee: string  // "A", "B", "C"...
   etude_scientifique?: string

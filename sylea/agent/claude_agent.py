@@ -47,6 +47,7 @@ class AnalyseOption:
     cons: List[str]
     impact_probabilite: float   # delta en points de %
     resume: str
+    impact_jours_brut: float = 0.0  # impact en jours brut (avant conversion en %)
 
 
 @dataclass
@@ -498,6 +499,7 @@ Reponds UNIQUEMENT avec ce JSON :
                 cons=[_truncate(c) for c in raw.get("cons", [])],
                 impact_probabilite=round(impact_pct, 4),
                 resume=_truncate(raw.get("resume", ""), 8),
+                impact_jours_brut=round(impact_jours_val, 6),
             )
 
         parsed_options = []

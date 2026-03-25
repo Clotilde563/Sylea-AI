@@ -138,6 +138,7 @@ class AnalyseOptionOut(BaseModel):
     cons: List[str]
     impact_probabilite: float
     resume: str
+    impact_jours_brut: float = 0.0
 
 
 class AnalyseDilemmeOut(BaseModel):

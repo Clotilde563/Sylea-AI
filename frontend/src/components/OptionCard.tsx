@@ -25,13 +25,13 @@ export function OptionCard({
   probActuelle,
   impactTemporelJours,
 }: OptionCardProps) {
-  const impactPos = option.impact_probabilite >= 0
+  const impactPos = (option.impact_jours_brut ?? option.impact_probabilite) >= 0
 
   // Affichage : durée si probActuelle fournie, sinon % en fallback
-  // Plafonné par impactTemporelJours si fourni
+  // Pour les cadres courts, utilise impact_jours_brut pour la précision
   const impactLabel =
     probActuelle !== undefined
-      ? deltaFromImpact(probActuelle, option.impact_probabilite, impactTemporelJours)
+      ? deltaFromImpact(probActuelle, option.impact_probabilite, impactTemporelJours, option.impact_jours_brut)
       : `${impactPos ? '+' : ''}${option.impact_probabilite.toFixed(3)}%`
 
   return (
