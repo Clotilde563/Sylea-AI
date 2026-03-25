@@ -94,6 +94,22 @@ async def analyser_dilemme(
 
     lettres = [chr(65 + i) for i in range(len(options_list))]
 
+    # Charger les infos collectées par l'agent pour enrichir le contexte
+    collected_context = ""
+    try:
+        rows = db.conn.execute(
+            "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 20",
+            (user_id or "",),
+        ).fetchall()
+        if rows:
+            collected_context = "\nCONTEXTE ADDITIONNEL COLLECTE PAR L'AGENT :\n" + "\n".join(
+                f"  - {r[0]}: {r[1]}" for r in rows
+            )
+    except Exception:
+        pass
+
+    device_ctx = format_device_context(data.contexte_appareil) + collected_context
+
     if agent is not None:
         try:
             analyse = await asyncio.to_thread(
@@ -102,7 +118,7 @@ async def analyser_dilemme(
                 data.question,
                 options_list,
                 impact_temporel_jours=data.impact_temporel_jours,
-                device_context=format_device_context(data.contexte_appareil),
+                device_context=device_ctx,
             )
             out_options = []
             for i, (l, desc) in enumerate(zip(lettres, options_list)):

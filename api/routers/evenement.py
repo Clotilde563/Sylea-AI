@@ -129,6 +129,7 @@ async def _analyser_evenement_claude(
     prob_calculee: float = 0.0,
     profession: str = "",
     device_context: str = "",
+    collected_context: str = "",
 ) -> dict:
     """Analyse via Claude Haiku."""
     import anthropic as _anthropic
@@ -161,7 +162,8 @@ async def _analyser_evenement_claude(
         f"- Profession : {profession}\n"
         f"- Temps estime restant : {temps_str} ({temps_j} jours)\n"
         f"- Progression actuelle (jauge) : {prob_actuelle:.1f}%\n"
-        f"{device_context}\n\n"
+        f"{device_context}\n"
+        f"{collected_context}\n\n"
         f"EVENEMENT RAPPORTE :\n\"{description}\"\n\n"
         "METHODE DE CALCUL (OBLIGATOIRE) :\n"
         "1. PENSE EN TEMPS D'ABORD : combien de JOURS cet evenement fait-il reellement "
@@ -283,6 +285,20 @@ async def analyser_evenement(
     if profil is None or not profil.objectif:
         raise HTTPException(status_code=400, detail="Profil ou objectif manquant.")
 
+    # Charger les infos collectées par l'agent pour enrichir le contexte
+    collected_context = ""
+    try:
+        rows = db.conn.execute(
+            "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 20",
+            (user_id or "",),
+        ).fetchall()
+        if rows:
+            collected_context = "CONTEXTE ADDITIONNEL COLLECTE PAR L'AGENT :\n" + "\n".join(
+                f"  - {r[0]}: {r[1]}" for r in rows
+            )
+    except Exception:
+        pass
+
     try:
         result = await _analyser_evenement_claude(
             description=data.description,
@@ -292,6 +308,7 @@ async def analyser_evenement(
             prob_calculee=profil.objectif.probabilite_calculee,
             profession=profil.profession or "",
             device_context=format_device_context(data.contexte_appareil),
+            collected_context=collected_context,
         )
         return AnalyseEvenementOut(**result)
     except Exception as e:
