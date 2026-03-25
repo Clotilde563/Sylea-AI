@@ -44,7 +44,7 @@ interface AgentMessage {
   timestamp: string
   type: 'text' | 'voice'
   audioUrl?: string  // blob URL for user recorded audio
-  choices?: string[]  // QCM choices for agent messages
+  choices?: string[]  // unused, kept for backward compat
 }
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -1001,42 +1001,7 @@ export default function AgentsPage() {
                         )}
                       </div>
                     </div>
-                    {/* QCM choices — only show on the last agent message that has choices, hide once user responds */}
-                    {msg.role === 'agent' && msg.choices && msg.choices.length > 0 && idx === messages.length - 1 && (
-                      <div style={{
-                        display: 'flex', flexWrap: 'wrap', gap: '0.4rem',
-                        marginTop: '0.5rem', paddingLeft: '0.5rem',
-                      }}>
-                        {msg.choices.map((choice, ci) => (
-                          <button
-                            key={ci}
-                            onClick={() => handleQCMClick(choice)}
-                            disabled={sending}
-                            style={{
-                              padding: '0.45rem 0.9rem',
-                              borderRadius: '999px',
-                              border: '1px solid rgba(245,158,11,0.3)',
-                              background: 'rgba(245,158,11,0.08)',
-                              color: '#fbbf24',
-                              fontSize: '0.8rem',
-                              fontWeight: 500,
-                              cursor: sending ? 'not-allowed' : 'pointer',
-                              transition: 'all 0.15s',
-                            }}
-                            onMouseEnter={e => {
-                              e.currentTarget.style.background = 'rgba(245,158,11,0.2)'
-                              e.currentTarget.style.borderColor = 'rgba(245,158,11,0.5)'
-                            }}
-                            onMouseLeave={e => {
-                              e.currentTarget.style.background = 'rgba(245,158,11,0.08)'
-                              e.currentTarget.style.borderColor = 'rgba(245,158,11,0.3)'
-                            }}
-                          >
-                            {choice}
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                    {/* QCM supprimé — réponses trop imprécises */}
                   </div>
                 )}
               </div>
