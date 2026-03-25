@@ -689,12 +689,21 @@ export default function AgentsPage() {
           const base64 = (reader.result as string).split(',')[1] || ''
           pendingAudioBase64Ref.current = base64
 
-          // Now send the message with the transcript + audio URL + base64
-          const transcript = pendingTranscriptRef.current.trim()
-          if (transcript) {
-            handleSend(transcript, 'voice', url, base64)
+          // Try to send — if transcript is ready, send now
+          // If not, a timeout will check again
+          const trySend = (attempts: number) => {
+            const transcript = pendingTranscriptRef.current.trim()
+            if (transcript) {
+              handleSend(transcript, 'voice', url, base64)
+            } else if (attempts < 20) {
+              // Wait 200ms and retry (max 4 seconds)
+              setTimeout(() => trySend(attempts + 1), 200)
+            } else {
+              // Fallback: send with generic message if no transcript after 4s
+              handleSend('[Message vocal]', 'voice', url, base64)
+            }
           }
-          // If no transcript yet, it will be sent when SpeechRecognition fires onresult
+          trySend(0)
         }
         reader.readAsDataURL(blob)
       }
