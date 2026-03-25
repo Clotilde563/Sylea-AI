@@ -243,13 +243,13 @@ export const api = {
 
   // ── Agent companion (Agent Sylea 1) ──────────────────────────────────
 
-  agentChat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext): Promise<{ message: string; choices?: string[] }> =>
-    request<{ message: string; choices?: string[] }>('/agent/chat', {
+  agentChat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; audioData?: string }> =>
+    request<{ message: string; choices?: string[]; audioData?: string }>('/agent/chat', {
       method: 'POST',
-      body: JSON.stringify({ messages, contexte_appareil }),
+      body: JSON.stringify({ messages, contexte_appareil, audio_data: audioData }),
     }),
 
-  getAgentMessages: (): Promise<Array<{ id: string; role: string; content: string; type: string; created_at: string }>> =>
+  getAgentMessages: (): Promise<Array<{ id: string; role: string; content: string; type: string; created_at: string; audioData?: string }>> =>
     request('/agent/messages'),
 
   clearAgentMessages: (): Promise<{ detail: string }> =>

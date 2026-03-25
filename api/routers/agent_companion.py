@@ -32,11 +32,13 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 class AgentChatIn(BaseModel):
     messages: list[dict]  # [{"role": "user"|"assistant", "content": "...", "type": "text"|"voice"}]
     contexte_appareil: dict | None = None
+    audio_data: str | None = None  # base64 encoded audio for the last user message
 
 
 class AgentChatOut(BaseModel):
     message: str
     choices: list[str] | None = None
+    audioData: str | None = None  # base64 mp3 for agent voice response
 
 
 class AgentMessageOut(BaseModel):
@@ -45,21 +47,22 @@ class AgentMessageOut(BaseModel):
     content: str
     type: str
     created_at: str
+    audioData: str = ""
 
 
 # ── DB helpers for agent_messages ────────────────────────────────────────────
 
 def _save_agent_message(
     db: DatabaseManager, auth_user_id: str, role: str, content: str,
-    msg_type: str = "text",
+    msg_type: str = "text", audio_data: str = "",
 ) -> None:
     """Save a single message to the agent_messages table."""
     msg_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     db.conn.execute(
-        "INSERT INTO agent_messages (id, auth_user_id, role, content, type, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (msg_id, auth_user_id, role, content, msg_type, now),
+        "INSERT INTO agent_messages (id, auth_user_id, role, content, type, created_at, audio_data) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (msg_id, auth_user_id, role, content, msg_type, now, audio_data or ""),
     )
     db.conn.commit()
 
@@ -69,7 +72,7 @@ def _load_agent_messages(
 ) -> list[dict]:
     """Load recent messages from agent_messages table."""
     cursor = db.conn.execute(
-        "SELECT id, role, content, type, created_at FROM agent_messages "
+        "SELECT id, role, content, type, created_at, audio_data FROM agent_messages "
         "WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT ?",
         (auth_user_id, limit),
     )
@@ -78,7 +81,7 @@ def _load_agent_messages(
     return [
         {
             "id": r[0], "role": r[1], "content": r[2],
-            "type": r[3], "created_at": r[4],
+            "type": r[3], "created_at": r[4], "audio_data": r[5] or "",
         }
         for r in reversed(rows)
     ]
@@ -427,6 +430,30 @@ JSON:"""
         pass  # Silent fail — don't break the chat
 
 
+# ── TTS audio generation helper ───────────────────────────────────────────
+
+async def _generate_tts_audio(text: str) -> str:
+    """Generate TTS audio using OpenAI and return base64 encoded mp3."""
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key:
+        return ""
+    try:
+        import base64
+        import httpx
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/audio/speech",
+                headers={"Authorization": f"Bearer {key}"},
+                json={"model": "tts-1", "voice": "nova", "input": text, "response_format": "mp3"},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                return base64.b64encode(resp.content).decode()
+    except Exception:
+        pass
+    return ""
+
+
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.post("/chat", response_model=AgentChatOut)
@@ -528,16 +555,27 @@ async def agent_chat(
 
     agent_response = msg.content[0].text.strip()
 
+    # Generate TTS audio for agent response if user sent a voice message
+    agent_audio_data = ""
+    if user_msg_type == "voice":
+        agent_audio_data = await _generate_tts_audio(agent_response)
+
     # Persist messages if authenticated
     if user_id:
-        # Save user message
+        # Save user message (with user's recorded audio if provided)
         if data.messages:
             last_user = data.messages[-1]
             if last_user.get("role") == "user":
-                _save_agent_message(db, user_id, "user", last_user["content"], user_msg_type)
-        # Save agent response — same type as user message (voice → voice, text → text)
+                _save_agent_message(
+                    db, user_id, "user", last_user["content"], user_msg_type,
+                    audio_data=data.audio_data or "",
+                )
+        # Save agent response — same type as user message (voice -> voice, text -> text)
         agent_msg_type = "voice" if user_msg_type == "voice" else "text"
-        _save_agent_message(db, user_id, "agent", agent_response, agent_msg_type)
+        _save_agent_message(
+            db, user_id, "agent", agent_response, agent_msg_type,
+            audio_data=agent_audio_data,
+        )
 
         # Auto-extract profile info every 5 messages
         total_msgs = _count_agent_messages(db, user_id)
@@ -549,7 +587,10 @@ async def agent_chat(
         recent_for_info = _load_agent_messages(db, user_id, limit=4)
         asyncio.create_task(_extract_and_save_info(recent_for_info, profil_data, db, user_id))
 
-    return AgentChatOut(message=agent_response)
+    return AgentChatOut(
+        message=agent_response,
+        audioData=agent_audio_data if agent_audio_data else None,
+    )
 
 
 @router.get("/messages", response_model=list[AgentMessageOut])
@@ -565,6 +606,7 @@ async def get_agent_messages(
         AgentMessageOut(
             id=m["id"], role=m["role"], content=m["content"],
             type=m["type"], created_at=m["created_at"],
+            audioData=m.get("audio_data", ""),
         )
         for m in messages
     ]

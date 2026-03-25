@@ -43,7 +43,8 @@ interface AgentMessage {
   content: string
   timestamp: string
   type: 'text' | 'voice'
-  audioUrl?: string  // blob URL for user recorded audio
+  audioUrl?: string  // blob URL for user recorded audio (legacy, ephemeral)
+  audioData?: string  // base64 encoded audio (persisted server-side)
   choices?: string[]  // unused, kept for backward compat
 }
 
@@ -150,16 +151,16 @@ function VoiceMessageBubble({ msg, isAgent, onSpeakToggle, isSpeaking }: {
 
   const duration = Math.max(2, Math.ceil(msg.content.length / 15)) // rough estimate
 
-  // Pre-cache TTS for agent voice messages
+  // Pre-cache TTS for agent voice messages (skip if audioData already available)
   useEffect(() => {
-    if (isAgent && msg.type === 'voice' && !audioBlobUrlRef.current) {
+    if (isAgent && msg.type === 'voice' && !audioBlobUrlRef.current && !msg.audioData) {
       api.agentTTS(msg.content).then(blob => {
         if (blob) {
           audioBlobUrlRef.current = URL.createObjectURL(blob)
         }
       }).catch(() => {})
     }
-  }, [msg.content, msg.type, isAgent])
+  }, [msg.content, msg.type, isAgent, msg.audioData])
 
   // Cleanup on unmount
   useEffect(() => {
@@ -196,10 +197,14 @@ function VoiceMessageBubble({ msg, isAgent, onSpeakToggle, isSpeaking }: {
 
     setPlaying(true)
 
-    // User message with recorded audio — play their own voice (Instagram-style)
-    if (!isAgent && msg.audioUrl) {
+    // Play from base64 audioData if available (persisted across sessions)
+    const audioSrc = msg.audioData
+      ? `data:audio/mp3;base64,${msg.audioData}`
+      : (!isAgent && msg.audioUrl) ? msg.audioUrl : null
+
+    if (audioSrc) {
       try {
-        const audio = new Audio(msg.audioUrl)
+        const audio = new Audio(audioSrc)
         audioRef.current = audio
 
         audio.onended = () => {
@@ -464,6 +469,7 @@ export default function AgentsPage() {
   // MediaRecorder refs for real audio capture
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const pendingAudioUrlRef = useRef<string | null>(null)
+  const pendingAudioBase64Ref = useRef<string>('')
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const maxRecordingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Store transcript from SpeechRecognition while recording
@@ -535,6 +541,7 @@ export default function AgentsPage() {
           content: m.content,
           timestamp: m.created_at,
           type: (m.type || 'text') as 'text' | 'voice',
+          audioData: (m as any).audioData || undefined,
         })))
       } else {
         // No server messages — show welcome
@@ -561,7 +568,7 @@ export default function AgentsPage() {
   }, [messages.length])
 
   // ── Send message (text or voice) ──────────────────────────────────────────
-  const handleSend = useCallback(async (overrideText?: string, msgType: 'text' | 'voice' = 'text', audioUrl?: string) => {
+  const handleSend = useCallback(async (overrideText?: string, msgType: 'text' | 'voice' = 'text', audioUrl?: string, audioBase64?: string) => {
     const text = (overrideText ?? inputText).trim()
     if (!text || sending) return
     const userMsg: AgentMessage = {
@@ -570,6 +577,7 @@ export default function AgentsPage() {
       timestamp: new Date().toISOString(),
       type: msgType,
       audioUrl: audioUrl || undefined,
+      audioData: audioBase64 || undefined,
     }
     const updated = [...messages, userMsg]
     setMessages(updated)
@@ -583,7 +591,7 @@ export default function AgentsPage() {
         content: m.content,
         type: m.type,
       }))
-      const res = await api.agentChat(chatHistory, deviceCtx ?? undefined)
+      const res = await api.agentChat(chatHistory, deviceCtx ?? undefined, msgType === 'voice' ? audioBase64 : undefined)
       // If user sent voice, agent responds as voice (waveform only, no text)
       const agentResponseType = msgType === 'voice' ? 'voice' : 'text'
       const agentMsg: AgentMessage = {
@@ -592,6 +600,7 @@ export default function AgentsPage() {
         timestamp: new Date().toISOString(),
         type: agentResponseType,
         choices: res.choices || undefined,
+        audioData: res.audioData || undefined,
       }
       setMessages(prev => [...prev, agentMsg])
     } catch {
@@ -647,6 +656,7 @@ export default function AgentsPage() {
 
     // Reset pending data
     pendingAudioUrlRef.current = null
+    pendingAudioBase64Ref.current = ''
     pendingTranscriptRef.current = ''
 
     // 1. Start MediaRecorder for actual audio capture
@@ -673,12 +683,20 @@ export default function AgentsPage() {
         const url = URL.createObjectURL(blob)
         pendingAudioUrlRef.current = url
 
-        // Now send the message with the transcript + audio URL
-        const transcript = pendingTranscriptRef.current.trim()
-        if (transcript) {
-          handleSend(transcript, 'voice', url)
+        // Convert blob to base64 for server-side persistence
+        const reader = new FileReader()
+        reader.onload = () => {
+          const base64 = (reader.result as string).split(',')[1] || ''
+          pendingAudioBase64Ref.current = base64
+
+          // Now send the message with the transcript + audio URL + base64
+          const transcript = pendingTranscriptRef.current.trim()
+          if (transcript) {
+            handleSend(transcript, 'voice', url, base64)
+          }
+          // If no transcript yet, it will be sent when SpeechRecognition fires onresult
         }
-        // If no transcript yet, it will be sent when SpeechRecognition fires onresult
+        reader.readAsDataURL(blob)
       }
 
       mediaRecorderRef.current = mediaRecorder
