@@ -842,6 +842,20 @@ async def check_context(
         except Exception:
             pass
 
+        # Load recent agent conversation (mémoire longue) for context
+        try:
+            msg_rows = db.conn.execute(
+                "SELECT role, content FROM agent_messages WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT 20",
+                (user_id,),
+            ).fetchall()
+            if msg_rows:
+                conversation_context = "\n".join(
+                    f"{'Utilisateur' if r[0] == 'user' else 'Agent'}: {r[1][:150]}" for r in reversed(msg_rows)
+                )
+                collected_info += "\n\nCONVERSATION RECENTE AVEC L'AGENT :\n" + conversation_context
+        except Exception:
+            pass
+
     # Ask Claude if it has enough context
     options_text = ""
     if data.options:
@@ -855,19 +869,22 @@ DEMANDE: {data.question}{options_text}
 PROFIL UTILISATEUR:
 {json.dumps(profil_data, ensure_ascii=False)}
 
-INFORMATIONS CONNUES SUR L'UTILISATEUR (contexte general, PAS lie a cette demande):
+INFORMATIONS ET CONVERSATIONS CONNUES SUR L'UTILISATEUR :
 {collected_info or "Aucune"}
 
-QUESTION: Analyse UNIQUEMENT le texte de la DEMANDE ci-dessus.
-As-tu assez d'informations DANS LA DEMANDE ELLE-MEME pour faire une analyse pertinente ?
-IGNORE les informations collectees ci-dessus sauf si elles sont DIRECTEMENT pertinentes.
+QUESTION: As-tu assez de contexte pour analyser cette demande ?
 
-Exemples qui NECESSITENT du contexte:
-- "Me mettre en couple avec Claire ou Laura" -> Tu ne connais ni Claire ni Laura
-- "Accepter l'offre de Jean" -> Tu ne sais pas qui est Jean ni quelle offre
+REGLE CRITIQUE : Si des personnes, lieux ou situations mentionnes dans la DEMANDE
+apparaissent DEJA dans les INFORMATIONS/CONVERSATIONS ci-dessus,
+tu as DEJA le contexte. Reponds needs_context: false.
+
+Exemples qui NECESSITENT du contexte (personnes/situations INCONNUES):
+- "Me mettre en couple avec Claire ou Laura" -> Claire et Laura n'apparaissent NULLE PART dans les infos -> needs_context: true
+- "Accepter l'offre de Jean" -> Jean n'apparait NULLE PART -> needs_context: true
 
 Exemples qui N'ONT PAS BESOIN de contexte:
-- "Apprendre l'anglais ou l'espagnol" -> Assez generique, analyse directe
+- "Aller a la soiree de Arthur" ET la conversation mentionne Arthur -> needs_context: false
+- "Apprendre l'anglais ou l'espagnol" -> Assez generique -> needs_context: false
 - "Manger ou aller courir" -> Activites courantes, analyse directe
 - "J'ai obtenu une promotion" -> Clair en soi, analyse directe
 - "J'ai recu un financement de 10000 euros" -> Le montant est clair MAIS le type de financement manque -> QCM

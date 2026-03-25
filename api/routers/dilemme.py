@@ -94,7 +94,7 @@ async def analyser_dilemme(
 
     lettres = [chr(65 + i) for i in range(len(options_list))]
 
-    # Charger les infos collectées par l'agent pour enrichir le contexte
+    # Charger les infos collectées + messages agent pour enrichir le contexte
     collected_context = ""
     try:
         rows = db.conn.execute(
@@ -104,6 +104,18 @@ async def analyser_dilemme(
         if rows:
             collected_context = "\nCONTEXTE ADDITIONNEL COLLECTE PAR L'AGENT :\n" + "\n".join(
                 f"  - {r[0]}: {r[1]}" for r in rows
+            )
+    except Exception:
+        pass
+    # Charger les messages récents de la conversation agent (mémoire longue)
+    try:
+        msg_rows = db.conn.execute(
+            "SELECT role, content FROM agent_messages WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT 15",
+            (user_id or "",),
+        ).fetchall()
+        if msg_rows:
+            collected_context += "\n\nCONVERSATION RECENTE AVEC L'AGENT (contexte personnel) :\n" + "\n".join(
+                f"  {'Utilisateur' if r[0] == 'user' else 'Agent'}: {r[1][:200]}" for r in reversed(msg_rows)
             )
     except Exception:
         pass
