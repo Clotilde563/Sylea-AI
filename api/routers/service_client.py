@@ -14,7 +14,47 @@ from api.context_helper import format_device_context
 
 router = APIRouter(prefix="/api/service-client", tags=["service-client"])
 
-_CHATBOT_SYSTEM_PROMPT = """Tu es l'assistant du Service Client de SYLEA.AI, une application web d'aide a la decision et de suivi d'objectifs de vie.
+_HELP_DOCS = """
+DOCUMENTATION DE L'APPLICATION :
+
+PREMIERS PAS :
+- Pour creer un profil : cliquez sur le bouton "Creer mon profil" depuis le tableau de bord, remplissez les 3 etapes (identite, questions, bien-etre).
+- Pour analyser un choix : allez sur "Analyser un choix", selectionnez l'impact temporel, entrez vos options, puis cliquez sur "Analyser".
+- Pour enregistrer un evenement : allez sur "Enregistrer un evenement", decrivez l'evenement, l'IA calculera l'impact.
+- Pour le bilan quotidien : cliquez sur "Bilan du jour" depuis le tableau de bord.
+
+FONCTIONNALITES :
+- La probabilite est calculee par un moteur deterministe + analyse IA. Elle evolue avec chaque decision.
+- Les sous-objectifs sont generes automatiquement et leur duree est proportionnelle a l'objectif total.
+- "Que faire" genere un plan d'action quotidien avec des ressources (videos, formations, articles).
+- Les graphiques montrent l'evolution de la probabilite et des sous-objectifs dans le temps.
+
+AGENT SYLEA 1 :
+- Activez l'agent depuis "Mes agents Sylea".
+- L'agent prend de vos nouvelles tous les 3 jours.
+- Envoyez des messages vocaux en maintenant le bouton micro.
+- L'agent sauvegarde automatiquement les infos pour enrichir vos analyses.
+
+PARAMETRES :
+- Langue : 13 langues disponibles dans Parametres > Langue.
+- Securite : ajoutez un mot de passe ou schema dans Parametres > Securite.
+- Profil : modifiez vos infos dans Parametres > Mon profil.
+
+FAQ :
+- L'application est gratuite dans sa version web avec l'Agent 1.
+- Vos donnees sont chiffrees et stockees de maniere securisee. Voir la politique de confidentialite.
+- Pour supprimer votre compte, contactez-nous par email ou via le formulaire de contact.
+- L'IA donne des estimations basees sur des donnees reelles mais ne garantit pas les resultats.
+- L'application est optimisee pour desktop. Le responsive mobile est en cours.
+
+RGPD :
+- Vous avez un droit d'acces, de rectification et de suppression de vos donnees.
+- Contact : l'equipe Sylea.AI est joignable via le formulaire de contact dans la page Aide, ou par email a contact@sylea.ai.
+- Politique de confidentialite accessible sur /privacy.
+- Conditions generales d'utilisation sur /terms.
+"""
+
+_CHATBOT_SYSTEM_PROMPT = f"""Tu es l'assistant du Service Client de SYLEA.AI, une application web d'aide a la decision et de suivi d'objectifs de vie.
 
 ## TON ROLE
 - Aider les utilisateurs a comprendre et utiliser toutes les fonctionnalites de l'application
@@ -85,7 +125,9 @@ _CHATBOT_SYSTEM_PROMPT = """Tu es l'assistant du Service Client de SYLEA.AI, une
 - Utilise des emojis au debut des points importants
 - Pour les guides, utilise des numeros (1., 2., 3.)
 - Reste concis et va droit au but
-- Parle toujours en francais"""
+- Parle toujours en francais
+
+{_HELP_DOCS}"""
 
 
 @router.post("/chat", response_model=ServiceClientChatOut)

@@ -274,18 +274,31 @@ export function EvenementPage() {
         {phase === 'form' && (
           <div className="card animate-fade-in-scale" style={{ maxWidth: '600px', margin: '0 auto' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-              {/* Info banner if agent is inactive */}
+              {/* Block if agent is inactive */}
               {localStorage.getItem('sylea_agent1_active') !== 'true' && (
                 <div style={{
-                  padding: '0.6rem 1rem', borderRadius: 'var(--radius-md)',
-                  background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)',
-                  color: '#fbbf24', fontSize: '0.78rem', marginBottom: '0rem',
-                  display: 'flex', alignItems: 'center', gap: '0.5rem',
+                  padding: '1.5rem', borderRadius: 'var(--radius-lg)',
+                  background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.2)',
+                  textAlign: 'center',
+                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.75rem',
                 }}>
-                  <span>{'\uD83D\uDCA1'}</span>
-                  <span>Activez votre Agent Sylea 1 pour des analyses plus precises et contextualisees.</span>
+                  <AgentSyleaLogo size={36} />
+                  <p style={{ color: 'var(--text-primary)', fontSize: '0.88rem', fontWeight: 600, margin: 0 }}>
+                    Activez l'Agent Sylea 1 pour enregistrer des evenements
+                  </p>
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', margin: 0, maxWidth: 400 }}>
+                    L'agent enrichit le contexte de vos analyses pour des recommandations plus precises et personnalisees.
+                  </p>
+                  <button
+                    className="btn btn-primary"
+                    style={{ marginTop: '0.25rem', padding: '0.55rem 1.5rem', fontSize: '0.82rem' }}
+                    onClick={() => navigate('/agents')}
+                  >
+                    Activer l'Agent 1
+                  </button>
                 </div>
               )}
+              {localStorage.getItem('sylea_agent1_active') === 'true' && (<>
               <div className="input-group">
                 <label className="input-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <span>
@@ -475,6 +488,7 @@ export function EvenementPage() {
               >
                 {contextLoading ? 'Verification du contexte...' : t('evenement.analyser')}
               </button>
+              </>)}
             </div>
           </div>
         )}

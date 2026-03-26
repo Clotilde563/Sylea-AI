@@ -21,6 +21,10 @@ import { LanguageProvider, useT } from './i18n/LanguageContext'
 import LockScreen           from './security/LockScreen'
 import { DeviceContextProvider } from './contexts/DeviceContext'
 import { GeoPermissionModal }    from './components/GeoPermissionModal'
+import { CookieBanner }     from './components/CookieBanner'
+import PrivacyPolicyPage    from './pages/PrivacyPolicyPage'
+import TermsPage            from './pages/TermsPage'
+import HelpPage             from './pages/HelpPage'
 
 // ── Application ───────────────────────────────────────────────────────────────
 
@@ -33,14 +37,19 @@ function AppContent() {
 
   return (
     <BrowserRouter>
+      {/* Bandeau cookies RGPD */}
+      <CookieBanner />
       {/* Verrouillage securite */}
       <LockScreen />
       {/* Animation d'intro Syléa — 8s, plein écran, au-dessus de tout */}
       {showSplash && <SyleaSplash onDone={() => setShowSplash(false)} />}
 
       <Routes>
-        {/* Route publique — connexion */}
+        {/* Routes publiques */}
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/privacy" element={<PrivacyPolicyPage />} />
+        <Route path="/terms" element={<TermsPage />} />
+        <Route path="/help" element={<HelpPage />} />
 
         {/* Route splash legacy (navigation directe à /splash) */}
         <Route path="/splash" element={<SplashPage />} />
@@ -85,6 +94,14 @@ function AppContent() {
                   <span style={{ color: 'var(--accent-violet-light)' }}>.AI</span>
                   <span style={{ marginLeft: '1rem', letterSpacing: '0.02em' }}>
                     {t('common.votre_assistant')}
+                  </span>
+                  <span style={{ marginLeft: '1.5rem' }}>
+                    <a href="/privacy" style={{ color: 'var(--text-muted)', textDecoration: 'none', marginRight: '0.75rem' }}>
+                      Confidentialite
+                    </a>
+                    <a href="/terms" style={{ color: 'var(--text-muted)', textDecoration: 'none' }}>
+                      CGU
+                    </a>
                   </span>
                 </footer>
               </div>
