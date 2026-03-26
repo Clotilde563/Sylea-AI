@@ -120,6 +120,132 @@ def _clear_agent2_messages(db: DatabaseManager, auth_user_id: str) -> None:
     db.conn.commit()
 
 
+# ── Profile extraction helper (copied from agent_companion.py) ─────────────
+
+async def _extract_and_update_profile(
+    db: DatabaseManager,
+    auth_user_id: str,
+    conversation_messages: list[dict],
+) -> None:
+    """Use a cheap Claude call to extract profile info from conversation and update DB."""
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key or not auth_user_id:
+        return
+
+    # Build conversation text
+    conversation_text = "\n".join(
+        f"{'Utilisateur' if m.get('role') == 'user' else 'Agent'}: {m.get('content', '')}"
+        for m in conversation_messages[-20:]  # Last 20 messages for context
+    )
+
+    extraction_prompt = f"""Analyse cette conversation et extrais UNIQUEMENT les informations personnelles
+que l'utilisateur a EXPLICITEMENT revelees. Ne deduis rien, ne suppose rien.
+
+Conversation:
+{conversation_text}
+
+Reponds UNIQUEMENT avec du JSON valide (ou {{}} si rien de nouveau):
+{{
+  "genre": null,
+  "ville": null,
+  "situation_familiale": null,
+  "competences": null,
+  "diplomes": null,
+  "langues": null,
+  "profession": null
+}}
+
+REGLES:
+- Ne remplis que les champs que l'utilisateur a EXPLICITEMENT mentionnes
+- competences, diplomes, langues sont des listes de strings
+- Laisse null si pas mentionne
+- genre: "homme" ou "femme" uniquement
+"""
+
+    try:
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=key)
+        result = await asyncio.to_thread(
+            lambda: client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=200,
+                messages=[{"role": "user", "content": extraction_prompt}],
+            )
+        )
+
+        raw = result.content[0].text.strip()
+        # Extract JSON from response (handle markdown code blocks)
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+        extracted = json.loads(raw)
+        if not extracted or not isinstance(extracted, dict):
+            return
+
+        # Load current profile
+        repo = ProfilRepository(db)
+        if not repo.existe(auth_user_id=auth_user_id):
+            return
+        profil = repo.charger(auth_user_id=auth_user_id)
+        if not profil:
+            return
+
+        # Update only non-null extracted fields that are currently empty
+        updated = False
+
+        if extracted.get("genre") and not getattr(profil, "genre", None):
+            db.conn.execute(
+                "UPDATE profil_utilisateur SET genre = ? WHERE auth_user_id = ?",
+                (extracted["genre"], auth_user_id),
+            )
+            updated = True
+
+        if extracted.get("ville") and (not profil.ville or profil.ville == "Non renseigne"):
+            db.conn.execute(
+                "UPDATE profil_utilisateur SET ville = ? WHERE auth_user_id = ?",
+                (extracted["ville"], auth_user_id),
+            )
+            updated = True
+
+        if extracted.get("situation_familiale") and (
+            not profil.situation_familiale or profil.situation_familiale == "Non renseigne"
+        ):
+            db.conn.execute(
+                "UPDATE profil_utilisateur SET situation_familiale = ? WHERE auth_user_id = ?",
+                (extracted["situation_familiale"], auth_user_id),
+            )
+            updated = True
+
+        if extracted.get("profession") and (not profil.profession or profil.profession == "Non renseigne"):
+            db.conn.execute(
+                "UPDATE profil_utilisateur SET profession = ? WHERE auth_user_id = ?",
+                (extracted["profession"], auth_user_id),
+            )
+            updated = True
+
+        # List fields — only update if currently empty
+        for field in ("competences", "diplomes", "langues"):
+            val = extracted.get(field)
+            if val and isinstance(val, list) and len(val) > 0:
+                current = getattr(profil, field, None)
+                if not current or (isinstance(current, list) and len(current) == 0) or current == "":
+                    db.conn.execute(
+                        f"UPDATE profil_utilisateur SET {field} = ? WHERE auth_user_id = ?",
+                        (",".join(val), auth_user_id),
+                    )
+                    updated = True
+
+        if updated:
+            db.conn.commit()
+
+    except Exception:
+        pass  # Silently fail — extraction is best-effort
+
+
 # ── System prompt builder ────────────────────────────────────────────────────
 
 def _build_agent2_prompt(
@@ -369,6 +495,13 @@ async def agent2_chat(
             audio_data=agent_audio_data,
         )
 
+    # Auto-extract profile info every 5 messages (same as Agent 1)
+    if user_id:
+        total_msgs = _count_agent2_messages(db, user_id)
+        if total_msgs > 0 and total_msgs % 5 == 0:
+            recent = _load_agent2_messages(db, user_id, limit=20)
+            await _extract_and_update_profile(db, user_id, recent)
+
     return Agent2ChatOut(
         message=agent_response,
         audioData=agent_audio_data if agent_audio_data else None,
@@ -492,6 +625,10 @@ async def generate_proactive_message(
     db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
+    """Generate a proactive message only when appropriate:
+    - Every 3 days minimum for routine check-ins
+    - Immediately if user hasn't connected for 3+ days
+    """
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key or not user_id:
         return {"message": None}
@@ -502,13 +639,27 @@ async def generate_proactive_message(
 
     profil = repo.charger(auth_user_id=user_id)
 
-    # Check last proactive message time
+    # Check last PROACTIVE message time (only agent-initiated, not responses)
     last_proactive = db.conn.execute(
         "SELECT created_at FROM agent2_messages WHERE auth_user_id = ? AND role = 'agent' ORDER BY created_at DESC LIMIT 1",
         (user_id,),
     ).fetchone()
 
+    # Check last USER interaction (any user message or app usage)
+    last_user_msg = db.conn.execute(
+        "SELECT created_at FROM agent2_messages WHERE auth_user_id = ? AND role = 'user' ORDER BY created_at DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+
+    # Check last decision (indicates app usage)
+    last_decision = db.conn.execute(
+        "SELECT cree_le FROM decisions WHERE profil_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1) ORDER BY cree_le DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+
     now = datetime.now(timezone.utc)
+
+    # Calculate hours since last proactive message
     hours_since_proactive = 999
     if last_proactive and last_proactive[0]:
         try:
@@ -517,20 +668,73 @@ async def generate_proactive_message(
         except Exception:
             pass
 
-    if hours_since_proactive < 72:
-        return {"message": None}
+    # Calculate hours since last user activity
+    hours_since_user = 999
+    for check in [last_user_msg, last_decision]:
+        if check and check[0]:
+            try:
+                dt = datetime.fromisoformat(check[0].replace('Z', '+00:00')) if 'T' in check[0] else datetime.strptime(check[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                h = (now - dt).total_seconds() / 3600
+                hours_since_user = min(hours_since_user, h)
+            except Exception:
+                pass
+
+    # RULES:
+    # 1. Minimum 72h (3 days) between proactive messages for routine check-ins
+    # 2. Exception: if user hasn't been active for 72h+, send a reminder immediately
+    is_urgent = hours_since_user >= 72  # User absent for 3+ days
+    is_routine_ok = hours_since_proactive >= 72  # 3 days since last proactive
+
+    if not is_urgent and not is_routine_ok:
+        return {"message": None}  # Too early, respect the user's peace
+
+    # Determine the reason for reaching out
+    reason = "routine"
+    if is_urgent:
+        reason = "absent"
+
+    last_msg = last_proactive  # For prompt context
+
+    # Load collected info for context
+    collected_info_str = ""
+    try:
+        rows = db.conn.execute(
+            "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 15",
+            (user_id,),
+        ).fetchall()
+        if rows:
+            collected_info_str = "\nInfos collectees: " + ", ".join(f"{r[0]}={r[1]}" for r in rows)
+    except Exception:
+        pass
+
+    # Build proactive prompt based on reason
+    reason_context = ""
+    if reason == "absent":
+        reason_context = f"""RAISON DU CONTACT : L'utilisateur ne s'est pas connecte depuis {int(hours_since_user)} heures (~{int(hours_since_user/24)} jours).
+Tu dois gentiment lui rappeler de revenir sur l'application et lui proposer une action concrete.
+Sois bienveillant mais montre que tu t'inquietes un peu."""
+    else:
+        reason_context = f"""RAISON DU CONTACT : Check-in de routine (tous les 3 jours).
+Propose une action concrete (envoyer un mail, creer un rappel, rediger un texte)."""
 
     prompt = f"""Tu es l'Agent Sylea 2 de {profil.nom}.
 Tu dois envoyer un message proactif naturel. C'est TOI qui initie la conversation.
 Tu es un assistant capable d'agir (emails, rappels, textes).
 
 Profil: {profil.nom}, {profil.age} ans, {profil.profession}, objectif: {profil.objectif.description if profil.objectif else 'non defini'}
+{collected_info_str}
+
+Derniere interaction: {last_msg[0] if last_msg else 'jamais'}
+Heures depuis derniere activite: {int(hours_since_user)}h
+
+{reason_context}
 
 REGLES:
 - Message COURT (1-2 phrases max)
 - Propose une action concrete (envoyer un mail, creer un rappel, rediger un texte)
 - Naturel, comme un ami qui envoie un texto
 - Tutoiement
+- Ne dis JAMAIS "je suis un agent IA" ou "en tant qu'IA"
 
 Ecris le message:"""
 

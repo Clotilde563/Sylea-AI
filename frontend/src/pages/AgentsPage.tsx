@@ -127,11 +127,12 @@ function speakMessage(text: string) {
 const MAX_RECORDING_SECONDS = 60
 
 // ── Voice Message Bubble (Instagram-style waveform) ─────────────────────────
-function VoiceMessageBubble({ msg, isAgent, onSpeakToggle, isSpeaking }: {
+function VoiceMessageBubble({ msg, isAgent, onSpeakToggle, isSpeaking, agentColor }: {
   msg: AgentMessage
   isAgent: boolean
   onSpeakToggle: () => void
   isSpeaking: boolean
+  agentColor?: string  // '#ef4444' for Agent 2, default gold for Agent 1
 }) {
   const [playing, setPlaying] = useState(false)
   const [progress, setProgress] = useState(0)
@@ -155,13 +156,14 @@ function VoiceMessageBubble({ msg, isAgent, onSpeakToggle, isSpeaking }: {
   // Pre-cache TTS for agent voice messages (skip if audioData already available)
   useEffect(() => {
     if (isAgent && msg.type === 'voice' && !audioBlobUrlRef.current && !msg.audioData) {
-      api.agentTTS(msg.content).then(blob => {
+      const ttsFn = isRed ? api.agent2TTS : api.agentTTS
+      ttsFn(msg.content).then(blob => {
         if (blob) {
           audioBlobUrlRef.current = URL.createObjectURL(blob)
         }
       }).catch(() => {})
     }
-  }, [msg.content, msg.type, isAgent, msg.audioData])
+  }, [msg.content, msg.type, isAgent, msg.audioData, isRed])
 
   // Cleanup on unmount
   useEffect(() => {
@@ -245,7 +247,8 @@ function VoiceMessageBubble({ msg, isAgent, onSpeakToggle, isSpeaking }: {
         // Check if we already have cached audio
         if (!audioBlobUrlRef.current) {
           setLoading(true)
-          const blob = await api.agentTTS(msg.content)
+          const ttsFn = isRed ? api.agent2TTS : api.agentTTS
+          const blob = await ttsFn(msg.content)
           setLoading(false)
           if (blob) {
             audioBlobUrlRef.current = URL.createObjectURL(blob)
@@ -322,8 +325,13 @@ function VoiceMessageBubble({ msg, isAgent, onSpeakToggle, isSpeaking }: {
     window.speechSynthesis.speak(utterance)
   }
 
-  const barColor = isAgent ? '#f59e0b' : '#fbbf24'
-  const barDimColor = isAgent ? 'rgba(245,158,11,0.25)' : 'rgba(251,191,36,0.25)'
+  const isRed = !!agentColor && agentColor.includes('ef4444')
+  const barColor = isRed
+    ? (isAgent ? '#ef4444' : '#f87171')
+    : (isAgent ? '#f59e0b' : '#fbbf24')
+  const barDimColor = isRed
+    ? (isAgent ? 'rgba(239,68,68,0.25)' : 'rgba(248,113,113,0.25)')
+    : (isAgent ? 'rgba(245,158,11,0.25)' : 'rgba(251,191,36,0.25)')
 
   const formatTime = (secs: number) => {
     const m = Math.floor(secs / 60)
@@ -337,11 +345,11 @@ function VoiceMessageBubble({ msg, isAgent, onSpeakToggle, isSpeaking }: {
       padding: '0.75rem 1rem',
       borderRadius: isAgent ? '16px 16px 16px 4px' : '16px 16px 4px 16px',
       background: !isAgent
-        ? 'linear-gradient(135deg, #d4a017, #f59e0b)'
+        ? (isRed ? 'linear-gradient(135deg, #b91c1c, #ef4444)' : 'linear-gradient(135deg, #d4a017, #f59e0b)')
         : 'rgba(255,255,255,0.06)',
-      borderLeft: isAgent ? '3px solid #f59e0b' : 'none',
+      borderLeft: isAgent ? `3px solid ${isRed ? '#ef4444' : '#f59e0b'}` : 'none',
       boxShadow: !isAgent
-        ? '0 2px 12px rgba(245,158,11,0.3)'
+        ? (isRed ? '0 2px 12px rgba(239,68,68,0.3)' : '0 2px 12px rgba(245,158,11,0.3)')
         : '0 1px 8px rgba(0,0,0,0.25)',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -915,6 +923,45 @@ export default function AgentsPage() {
   const inputRef2 = useRef<HTMLInputElement>(null)
   const [actionToast, setActionToast] = useState<string | null>(null)
 
+  // Agent 2 voice states
+  const [isRecording2, setIsRecording2] = useState(false)
+  const [recordingTime2, setRecordingTime2] = useState(0)
+  const [voiceEnabled2, setVoiceEnabled2] = useState(() => {
+    try { return localStorage.getItem('sylea_agent2_voice_enabled') === 'true' } catch { return false }
+  })
+  const [speakingMsgIdx2, setSpeakingMsgIdx2] = useState<number | null>(null)
+  const [lastUserMsgWasVoice2, setLastUserMsgWasVoice2] = useState(false)
+  const recognitionRef2 = useRef<any>(null)
+  const mediaRecorderRef2 = useRef<MediaRecorder | null>(null)
+  const pendingAudioUrlRef2 = useRef<string | null>(null)
+  const pendingAudioBase64Ref2 = useRef<string>('')
+  const mediaStreamRef2 = useRef<MediaStream | null>(null)
+  const maxRecordingTimerRef2 = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingTranscriptRef2 = useRef<string>('')
+  const recordingTimerRef2 = useRef<ReturnType<typeof setInterval> | null>(null)
+  const ttsAudioCacheRef2 = useRef<Map<number, string>>(new Map())
+  const ttsSpeakingAudioRef2 = useRef<HTMLAudioElement | null>(null)
+
+  // Persist voice setting for Agent 2
+  useEffect(() => {
+    try { localStorage.setItem('sylea_agent2_voice_enabled', String(voiceEnabled2)) } catch {}
+  }, [voiceEnabled2])
+
+  // Cleanup Agent 2 recording on unmount
+  useEffect(() => {
+    return () => {
+      recognitionRef2.current?.abort?.()
+      if (recordingTimerRef2.current) clearInterval(recordingTimerRef2.current)
+      if (maxRecordingTimerRef2.current) clearTimeout(maxRecordingTimerRef2.current)
+      if (mediaRecorderRef2.current && mediaRecorderRef2.current.state !== 'inactive') {
+        mediaRecorderRef2.current.stop()
+      }
+      if (mediaStreamRef2.current) {
+        mediaStreamRef2.current.getTracks().forEach(t => t.stop())
+      }
+    }
+  }, [])
+
   useEffect(() => { saveActive2(active2) }, [active2])
   useEffect(() => {
     messagesEndRef2.current?.scrollIntoView({ behavior: 'smooth' })
@@ -1058,26 +1105,30 @@ export default function AgentsPage() {
     }
   }
 
-  const handleSend2 = useCallback(async (overrideText?: string) => {
+  const handleSend2 = useCallback(async (overrideText?: string, msgType: 'text' | 'voice' = 'text', audioUrl?: string, audioBase64?: string) => {
     const text = (overrideText ?? inputText2).trim()
     if (!text || sending2) return
     const userMsg: AgentMessage = {
       role: 'user', content: text,
-      timestamp: new Date().toISOString(), type: 'text',
+      timestamp: new Date().toISOString(), type: msgType,
+      audioUrl: audioUrl || undefined,
+      audioData: audioBase64 || undefined,
     }
     const updated = [...messages2, userMsg]
     setMessages2(updated)
     setInputText2('')
     setSending2(true)
+    setLastUserMsgWasVoice2(msgType === 'voice')
     try {
       const chatHistory = updated.map(m => ({
         role: m.role === 'agent' ? 'assistant' : 'user',
         content: m.content, type: m.type,
       }))
-      const res = await api.agent2Chat(chatHistory, deviceCtx ?? undefined)
+      const res = await api.agent2Chat(chatHistory, deviceCtx ?? undefined, msgType === 'voice' ? audioBase64 : undefined)
+      const agentResponseType = msgType === 'voice' ? 'voice' : 'text'
       setMessages2(prev => [...prev, {
         role: 'agent', content: res.message,
-        timestamp: new Date().toISOString(), type: 'text',
+        timestamp: new Date().toISOString(), type: agentResponseType,
         audioData: res.audioData || undefined,
       }])
     } catch {
@@ -1087,6 +1138,192 @@ export default function AgentsPage() {
       }])
     } finally { setSending2(false) }
   }, [inputText2, sending2, messages2, deviceCtx])
+
+  // ── Voice recording for Agent 2 ──────────────────────────────────────────
+  const stopVoiceRecording2 = useCallback(() => {
+    if (recognitionRef2.current) {
+      try { recognitionRef2.current.stop() } catch {}
+      recognitionRef2.current = null
+    }
+    if (mediaRecorderRef2.current && mediaRecorderRef2.current.state !== 'inactive') {
+      mediaRecorderRef2.current.stop()
+    }
+    if (mediaStreamRef2.current) {
+      mediaStreamRef2.current.getTracks().forEach(t => t.stop())
+      mediaStreamRef2.current = null
+    }
+    setIsRecording2(false)
+    setRecordingTime2(0)
+    if (recordingTimerRef2.current) {
+      clearInterval(recordingTimerRef2.current)
+      recordingTimerRef2.current = null
+    }
+    if (maxRecordingTimerRef2.current) {
+      clearTimeout(maxRecordingTimerRef2.current)
+      maxRecordingTimerRef2.current = null
+    }
+  }, [])
+
+  const startVoiceRecording2 = useCallback(() => {
+    const SpeechRecognitionClass = getSpeechRecognitionClass()
+    if (!SpeechRecognitionClass) {
+      alert("Votre navigateur ne supporte pas la reconnaissance vocale")
+      return
+    }
+    pendingAudioUrlRef2.current = null
+    pendingAudioBase64Ref2.current = ''
+    pendingTranscriptRef2.current = ''
+
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+      mediaStreamRef2.current = stream
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : undefined
+      const mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+      const chunks: Blob[] = []
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data)
+      }
+      mediaRecorder.onstop = () => {
+        const blobType = mimeType || 'audio/webm'
+        const blob = new Blob(chunks, { type: blobType })
+        const url = URL.createObjectURL(blob)
+        pendingAudioUrlRef2.current = url
+        const reader = new FileReader()
+        reader.onload = () => {
+          const base64 = (reader.result as string).split(',')[1] || ''
+          pendingAudioBase64Ref2.current = base64
+          const trySend = (attempts: number) => {
+            const transcript = pendingTranscriptRef2.current.trim()
+            if (transcript) {
+              handleSend2(transcript, 'voice', url, base64)
+            } else if (attempts < 20) {
+              setTimeout(() => trySend(attempts + 1), 200)
+            } else {
+              handleSend2('[Message vocal]', 'voice', url, base64)
+            }
+          }
+          trySend(0)
+        }
+        reader.readAsDataURL(blob)
+      }
+      mediaRecorderRef2.current = mediaRecorder
+      mediaRecorder.start()
+
+      const recognition = new SpeechRecognitionClass()
+      recognition.lang = 'fr-FR'
+      recognition.continuous = true
+      recognition.interimResults = false
+      recognition.onresult = (event: SpeechRecognitionEvent) => {
+        let fullTranscript = ''
+        for (let i = 0; i < event.results.length; i++) {
+          if (event.results[i].isFinal) {
+            fullTranscript += event.results[i][0].transcript + ' '
+          }
+        }
+        pendingTranscriptRef2.current = fullTranscript.trim()
+      }
+      recognition.onerror = () => {}
+      recognition.onend = () => {
+        if (isRecording2 && recognitionRef2.current) {
+          try { recognitionRef2.current.start() } catch {}
+        }
+      }
+      recognitionRef2.current = recognition
+      recognition.start()
+      setIsRecording2(true)
+      setRecordingTime2(0)
+      recordingTimerRef2.current = setInterval(() => {
+        setRecordingTime2(prev => {
+          const next = prev + 1
+          if (next >= MAX_RECORDING_SECONDS) {
+            stopVoiceRecording2()
+          }
+          return next
+        })
+      }, 1000)
+      maxRecordingTimerRef2.current = setTimeout(() => {
+        stopVoiceRecording2()
+      }, MAX_RECORDING_SECONDS * 1000)
+    }).catch(() => {
+      alert("Impossible d'acceder au microphone. Verifiez les permissions de votre navigateur.")
+    })
+  }, [handleSend2, stopVoiceRecording2, isRecording2])
+
+  const toggleRecording2 = useCallback(() => {
+    if (isRecording2) {
+      stopVoiceRecording2()
+    } else {
+      startVoiceRecording2()
+    }
+  }, [isRecording2, startVoiceRecording2, stopVoiceRecording2])
+
+  // ── Speak a specific Agent 2 message (TTS playback) ──────────────────────
+  const handleSpeakMessage2 = useCallback(async (text: string, idx: number) => {
+    if (speakingMsgIdx2 === idx) {
+      if (ttsSpeakingAudioRef2.current) {
+        ttsSpeakingAudioRef2.current.pause()
+        ttsSpeakingAudioRef2.current.currentTime = 0
+        ttsSpeakingAudioRef2.current = null
+      }
+      window.speechSynthesis.cancel()
+      setSpeakingMsgIdx2(null)
+      return
+    }
+    if (ttsSpeakingAudioRef2.current) {
+      ttsSpeakingAudioRef2.current.pause()
+      ttsSpeakingAudioRef2.current.currentTime = 0
+      ttsSpeakingAudioRef2.current = null
+    }
+    window.speechSynthesis.cancel()
+
+    const isAgentMsg = messages2[idx]?.role === 'agent'
+    if (isAgentMsg) {
+      try {
+        let blobUrl = ttsAudioCacheRef2.current.get(idx)
+        if (!blobUrl) {
+          const blob = await api.agent2TTS(text)
+          if (blob) {
+            blobUrl = URL.createObjectURL(blob)
+            ttsAudioCacheRef2.current.set(idx, blobUrl)
+          }
+        }
+        if (blobUrl) {
+          const audio = new Audio(blobUrl)
+          ttsSpeakingAudioRef2.current = audio
+          audio.onended = () => { setSpeakingMsgIdx2(null); ttsSpeakingAudioRef2.current = null }
+          audio.onerror = () => { setSpeakingMsgIdx2(null); ttsSpeakingAudioRef2.current = null }
+          setSpeakingMsgIdx2(idx)
+          await audio.play()
+          return
+        }
+      } catch {
+        // Fall through to browser TTS
+      }
+    }
+    if (!isTTSSupported()) return
+    const synth = window.speechSynthesis
+    const utterance = new SpeechSynthesisUtterance(text)
+    utterance.lang = 'fr-FR'
+    const voices = synth.getVoices()
+    const frenchVoice =
+      voices.find(v => v.lang.startsWith('fr') && v.name.includes('Denise') && v.name.includes('Online'))
+      || voices.find(v => v.lang.startsWith('fr') && v.name.includes('Online') && v.name.includes('Natural'))
+      || voices.find(v => v.lang.startsWith('fr') && v.name.includes('Denise'))
+      || voices.find(v => v.lang.startsWith('fr') && v.name.includes('Google'))
+      || voices.find(v => v.lang.startsWith('fr') && v.name.includes('Julie'))
+      || voices.find(v => v.lang.startsWith('fr') && v.name.includes('Hortense'))
+      || voices.find(v => v.lang.startsWith('fr'))
+    if (frenchVoice) utterance.voice = frenchVoice
+    utterance.rate = 0.95
+    utterance.pitch = 1.05
+    utterance.onend = () => setSpeakingMsgIdx2(null)
+    utterance.onerror = () => setSpeakingMsgIdx2(null)
+    setSpeakingMsgIdx2(idx)
+    synth.speak(utterance)
+  }, [speakingMsgIdx2, messages2])
 
   const lastInteraction2 = messages2.length > 0
     ? `Derniere interaction : ${relativeTime(messages2[messages2.length - 1].timestamp)}`
@@ -1106,6 +1343,14 @@ export default function AgentsPage() {
           @keyframes agent-msg-in {
             from { opacity: 0; transform: translateY(12px); }
             to { opacity: 1; transform: translateY(0); }
+          }
+          @keyframes recording-pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+            50% { box-shadow: 0 0 0 12px rgba(239, 68, 68, 0); }
+          }
+          @keyframes recording-dot-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
           }
           @keyframes spin {
             from { transform: rotate(0deg); }
@@ -1153,6 +1398,58 @@ export default function AgentsPage() {
                 {t('agents.status_active')}
               </p>
             </div>
+
+            {/* Voice auto-play toggle */}
+            {isTTSSupported() && (
+              <button
+                onClick={() => setVoiceEnabled2(v => !v)}
+                title={voiceEnabled2 ? 'Desactiver la voix automatique' : 'Activer la voix automatique'}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '0.35rem',
+                  padding: '0.3rem 0.65rem', borderRadius: '999px',
+                  border: voiceEnabled2 ? '1px solid rgba(239,68,68,0.4)' : '1px solid var(--border)',
+                  background: voiceEnabled2 ? 'rgba(239,68,68,0.12)' : 'rgba(255,255,255,0.04)',
+                  color: voiceEnabled2 ? '#f87171' : 'var(--text-muted)',
+                  cursor: 'pointer', fontSize: '0.72rem', fontWeight: 600,
+                  transition: 'all 0.2s',
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                  {voiceEnabled2 ? (
+                    <>
+                      <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                      <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                    </>
+                  ) : (
+                    <line x1="23" y1="9" x2="17" y2="15" />
+                  )}
+                </svg>
+                Voix
+              </button>
+            )}
+
+            {/* Voice call button */}
+            <button
+              onClick={() => { setChat2Open(false); setInCall(true) }}
+              title="Appeler l'Agent Sylea 2"
+              style={{
+                display: 'flex', alignItems: 'center', gap: '0.35rem',
+                padding: '0.3rem 0.65rem', borderRadius: '999px',
+                border: '1px solid rgba(239,68,68,0.3)',
+                background: 'rgba(239,68,68,0.08)',
+                color: '#f87171',
+                cursor: 'pointer', fontSize: '0.72rem', fontWeight: 600,
+                transition: 'all 0.2s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.15)' }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.08)' }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2z" />
+              </svg>
+              Appeler
+            </button>
           </div>
 
           {/* Messages area */}
@@ -1174,7 +1471,16 @@ export default function AgentsPage() {
                   animation: 'agent-msg-in 0.3s ease forwards',
                 }}>
                   <div style={{ maxWidth: '80%' }}>
-                    {msgText && (
+                    {/* Use VoiceMessageBubble for voice messages */}
+                    {msg.type === 'voice' ? (
+                      <VoiceMessageBubble
+                        msg={msg}
+                        isAgent={msg.role === 'agent'}
+                        onSpeakToggle={() => handleSpeakMessage2(msg.content, idx)}
+                        isSpeaking={speakingMsgIdx2 === idx}
+                        agentColor="#ef4444"
+                      />
+                    ) : msgText ? (
                       <div style={{
                         padding: '0.75rem 1rem',
                         borderRadius: msg.role === 'user' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
@@ -1192,12 +1498,34 @@ export default function AgentsPage() {
                         <div style={{
                           margin: '0.35rem 0 0', fontSize: '0.65rem',
                           color: msg.role === 'user' ? 'rgba(255,255,255,0.5)' : 'var(--text-muted)',
-                          textAlign: msg.role === 'user' ? 'right' : 'left',
+                          display: 'flex', alignItems: 'center', gap: '0.4rem',
+                          justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
                         }}>
-                          {new Date(msg.timestamp).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+                          <span>{new Date(msg.timestamp).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}</span>
+                          {/* Speaker button for agent messages */}
+                          {msg.role === 'agent' && isTTSSupported() && (
+                            <button
+                              onClick={() => handleSpeakMessage2(msg.content, idx)}
+                              title="Ecouter ce message"
+                              style={{
+                                background: 'none', border: 'none', cursor: 'pointer',
+                                padding: '2px', display: 'flex', alignItems: 'center',
+                                color: speakingMsgIdx2 === idx ? '#f87171' : 'inherit',
+                                opacity: speakingMsgIdx2 === idx ? 1 : 0.6,
+                                transition: 'all 0.15s',
+                              }}
+                              onMouseEnter={e => e.currentTarget.style.opacity = '1'}
+                              onMouseLeave={e => { if (speakingMsgIdx2 !== idx) e.currentTarget.style.opacity = '0.6' }}
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                              </svg>
+                            </button>
+                          )}
                         </div>
                       </div>
-                    )}
+                    ) : null}
                     {/* Action cards */}
                     {actions.map((action, ai) => (
                       <div key={ai} style={{
@@ -1338,23 +1666,87 @@ export default function AgentsPage() {
             padding: '0.75rem 1.25rem', borderTop: '1px solid var(--border)',
             background: 'rgba(3,7,15,0.6)', backdropFilter: 'blur(12px)',
             display: 'flex', alignItems: 'center', gap: '0.5rem',
+            position: 'relative',
           }}>
+            {/* Recording indicator with countdown */}
+            {isRecording2 && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: '0.4rem',
+                padding: '0.3rem 0.6rem', borderRadius: '999px',
+                background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.3)',
+                position: 'absolute', top: '-2.5rem', left: '50%', transform: 'translateX(-50%)',
+                zIndex: 10,
+              }}>
+                <span style={{
+                  width: 8, height: 8, borderRadius: '50%', background: '#ef4444',
+                  animation: 'recording-dot-pulse 1s ease-in-out infinite',
+                }} />
+                <span style={{ fontSize: '0.72rem', color: '#ef4444', fontWeight: 600 }}>
+                  Enregistrement... {formatRecordingTime(recordingTime2)}
+                </span>
+              </div>
+            )}
+
             <input
               ref={inputRef2}
               type="text"
               value={inputText2}
               onChange={e => setInputText2(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend2() } }}
-              placeholder="Demande-moi quelque chose..."
+              placeholder={isRecording2 ? 'Parlez maintenant...' : 'Demande-moi quelque chose...'}
+              disabled={isRecording2}
               style={{
-                flex: 1, background: 'rgba(255,255,255,0.06)',
-                border: '1px solid var(--border)',
+                flex: 1, background: isRecording2 ? 'rgba(239,68,68,0.06)' : 'rgba(255,255,255,0.06)',
+                border: isRecording2 ? '1px solid rgba(239,68,68,0.3)' : '1px solid var(--border)',
                 borderRadius: '24px', padding: '0.65rem 1rem', color: 'var(--text-primary)',
                 fontSize: '0.88rem', outline: 'none', transition: 'all 0.2s',
               }}
-              onFocus={e => e.currentTarget.style.borderColor = 'rgba(239,68,68,0.5)'}
-              onBlur={e => e.currentTarget.style.borderColor = 'var(--border)'}
+              onFocus={e => { if (!isRecording2) e.currentTarget.style.borderColor = 'rgba(239,68,68,0.5)' }}
+              onBlur={e => { if (!isRecording2) e.currentTarget.style.borderColor = 'var(--border)' }}
             />
+
+            {/* Microphone button (RED for Agent 2) */}
+            <button
+              onClick={toggleRecording2}
+              disabled={sending2}
+              title={isRecording2 ? "Arreter l'enregistrement" : "Enregistrement vocal"}
+              style={{
+                width: 40, height: 40, borderRadius: '50%', border: 'none',
+                background: isRecording2 ? 'rgba(239,68,68,0.2)' : 'rgba(255,255,255,0.06)',
+                color: isRecording2 ? '#ef4444' : 'var(--text-muted)',
+                cursor: sending2 ? 'not-allowed' : 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                transition: 'all 0.15s', flexShrink: 0,
+                animation: isRecording2 ? 'recording-pulse 1.5s ease-in-out infinite' : 'none',
+              }}
+              onMouseEnter={e => {
+                if (!isRecording2) {
+                  e.currentTarget.style.background = 'rgba(239,68,68,0.15)'
+                  e.currentTarget.style.color = '#f87171'
+                }
+              }}
+              onMouseLeave={e => {
+                if (!isRecording2) {
+                  e.currentTarget.style.background = 'rgba(255,255,255,0.06)'
+                  e.currentTarget.style.color = 'var(--text-muted)'
+                }
+              }}
+            >
+              {isRecording2 ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="4" y="4" width="16" height="16" rx="2" />
+                </svg>
+              ) : (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="9" y="1" width="6" height="11" rx="3" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="23" />
+                  <line x1="8" y1="23" x2="16" y2="23" />
+                </svg>
+              )}
+            </button>
+
+            {/* Send button */}
             <button
               onClick={() => handleSend2()}
               disabled={!inputText2.trim() || sending2}
