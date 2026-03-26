@@ -312,4 +312,60 @@ export const api = {
 
   authMe: (): Promise<{ id: string; email: string; provider: string }> =>
     request('/auth/me'),
+
+  // ── Agent assistant (Agent Sylea 2) ──────────────────────────────────
+
+  agent2Chat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; audioData?: string }> =>
+    request<{ message: string; choices?: string[]; audioData?: string }>('/agent2/chat', {
+      method: 'POST',
+      body: JSON.stringify({ messages, contexte_appareil, audio_data: audioData }),
+    }),
+
+  getAgent2Messages: (): Promise<Array<{ id: string; role: string; content: string; type: string; created_at: string; audioData?: string }>> =>
+    request('/agent2/messages'),
+
+  clearAgent2Messages: (): Promise<{ detail: string }> =>
+    request('/agent2/messages', { method: 'DELETE' }),
+
+  agent2SendEmail: (to: string, subject: string, body: string): Promise<{ ok: boolean; error?: string }> =>
+    request('/agent2/send-email', {
+      method: 'POST',
+      body: JSON.stringify({ to, subject, body }),
+    }),
+
+  agent2CreateReminder: (time: string, date: string, message: string): Promise<{ ok: boolean; error?: string }> =>
+    request('/agent2/create-reminder', {
+      method: 'POST',
+      body: JSON.stringify({ time, date, message }),
+    }),
+
+  agent2GetReminders: (): Promise<Array<{ id: number; time: string; date: string; message: string; completed: boolean; created_at: string }>> =>
+    request('/agent2/reminders'),
+
+  agent2CompleteReminder: (id: number): Promise<{ ok: boolean }> =>
+    request(`/agent2/reminders/${id}/complete`, { method: 'POST' }),
+
+  agent2Proactive: (): Promise<{ message: string | null }> =>
+    request('/agent2/proactive', { method: 'POST' }),
+
+  agent2TTS: async (text: string): Promise<Blob | null> => {
+    try {
+      const token = localStorage.getItem('sylea_auth_token')
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (token) headers['Authorization'] = `Bearer ${token}`
+
+      const res = await fetch(`${BASE}/agent2/tts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ text }),
+      })
+      if (res.ok) {
+        const blob = await res.blob()
+        if (blob.size > 0) return blob
+      }
+      return null
+    } catch {
+      return null
+    }
+  },
 }
