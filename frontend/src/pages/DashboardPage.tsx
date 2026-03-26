@@ -25,6 +25,7 @@ export function DashboardPage() {
   const [tachesExist, setTachesExist] = useState(false)
   const [loadingTaches, setLoadingTaches] = useState(false)
   const [loadingSO, setLoadingSO] = useState(false)
+  const [showTasksModal, setShowTasksModal] = useState(false)
 
   useEffect(() => {
     api.getProfil()
@@ -81,12 +82,14 @@ export function DashboardPage() {
       const res = await api.genererTaches(deviceCtx ?? undefined)
       setTachesData(res)
       setTachesExist(true)
+      setShowTasksModal(true)
     } catch (e: unknown) {
       if (e instanceof Error && e.message.includes('409')) {
         const check = await api.checkTachesAujourdhui()
         if (check.taches) {
           setTachesData(check.taches)
           setTachesExist(true)
+          setShowTasksModal(true)
         }
       }
     } finally {
@@ -369,25 +372,85 @@ export function DashboardPage() {
           <ActionCard emoji={'\u27e1'} title={t('dashboard.analyser_choix')} desc="Soumettez un dilemme et recevez une analyse IA pros/cons" onClick={() => navigate('/dilemme')} highlight />
           <ActionCard emoji={'\u25eb'} title={t('dashboard.statistiques')} desc="Visualisez vos décisions passées et votre courbe de progression" onClick={() => navigate('/statistiques')} />
           <ActionCard emoji={'\u25c9'} title={t('dashboard.enregistrer_evenement')} desc="Notifiez un événement et découvrez son impact sur votre objectif" onClick={() => navigate('/evenement')} />
-          {tachesEnCours ? (
-            <TaskCard taches={tachesData!.taches} deadline={deadlineStr || '23:59'} onComplete={handleCompleterTache} onAbandon={handleAbandonner} />
-          ) : (
-            <ActionCard emoji={'\u2726'} title={t('dashboard.que_faire')} desc={tachesData && tachesData.statut !== 'en_cours' ? (tachesData.statut === 'terminee' ? "Tâches terminées pour aujourd'hui" : "Tâches abandonnées pour aujourd'hui") : "Générez votre plan d'action quotidien par l'IA"} onClick={handleGenererTaches} orange={!tachesData || tachesData.statut === 'en_cours'} disabled={loadingTaches || (tachesExist && !tachesEnCours)} loading={loadingTaches} />
-          )}
+          <ActionCard
+            emoji={'\u2726'}
+            title={t('dashboard.que_faire')}
+            desc={tachesEnCours
+              ? `${tachesData!.taches.filter(t => t.completee).length}/${tachesData!.taches.length} taches completees — Cliquez pour voir`
+              : tachesData && tachesData.statut !== 'en_cours'
+                ? (tachesData.statut === 'terminee' ? "Taches terminees pour aujourd'hui" : "Taches abandonnees pour aujourd'hui")
+                : "Generez votre plan d'action quotidien par l'IA"
+            }
+            onClick={() => {
+              if (tachesEnCours) {
+                setShowTasksModal(true)
+              } else {
+                handleGenererTaches()
+              }
+            }}
+            orange={!tachesData || tachesData.statut === 'en_cours'}
+            disabled={loadingTaches || (tachesExist && !tachesEnCours)}
+            loading={loadingTaches}
+          />
         </div>
       </div>
+
+      {/* Modal tâches "Que faire" */}
+      {showTasksModal && tachesData && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 5000,
+          background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '1rem',
+        }}
+        onClick={(e) => { if (e.target === e.currentTarget) setShowTasksModal(false) }}
+        >
+          <div style={{
+            background: 'var(--bg-surface)', borderRadius: 'var(--radius-lg)',
+            border: '1px solid rgba(251,146,60,0.3)',
+            maxWidth: 600, width: '100%', maxHeight: '85vh', overflow: 'auto',
+            padding: '1.5rem',
+            boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+              <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#fb923c', margin: 0 }}>
+                ✦ {t('dashboard.que_faire_aujourdhui')}
+              </h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', background: 'rgba(251,146,60,0.15)', padding: '0.2rem 0.6rem', borderRadius: '12px' }}>
+                  ⏰ {deadlineStr || '23:59'}
+                </span>
+                <button onClick={() => setShowTasksModal(false)} style={{
+                  background: 'none', border: 'none', color: 'var(--text-muted)',
+                  fontSize: '1.3rem', cursor: 'pointer', padding: '0.2rem',
+                }}>✕</button>
+              </div>
+            </div>
+
+            <TaskCard
+              taches={tachesData.taches}
+              deadline={deadlineStr || '23:59'}
+              onComplete={handleCompleterTache}
+              onAbandon={() => { handleAbandonner(); setShowTasksModal(false) }}
+              embedded
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
-function TaskCard({ taches, deadline, onComplete, onAbandon }: { taches: TacheItem[]; deadline: string; onComplete: (id: string) => void; onAbandon: () => void }) {
+function TaskCard({ taches, deadline, onComplete, onAbandon, embedded }: { taches: TacheItem[]; deadline: string; onComplete: (id: string) => void; onAbandon: () => void; embedded?: boolean }) {
   const t = useT()
   return (
-    <div style={{ background: 'linear-gradient(135deg, rgba(251,146,60,0.15), rgba(251,146,60,0.04))', border: '1px solid rgba(251,146,60,0.4)', borderRadius: 'var(--radius-lg)', padding: '1.25rem', gridColumn: '1 / -1' }}>
+    <div style={embedded ? {} : { background: 'linear-gradient(135deg, rgba(251,146,60,0.15), rgba(251,146,60,0.04))', border: '1px solid rgba(251,146,60,0.4)', borderRadius: 'var(--radius-lg)', padding: '1.25rem', gridColumn: '1 / -1' }}>
+      {!embedded && (
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <h3 style={{ fontSize: '0.95rem', fontWeight: 600, color: '#fb923c' }}>{'\u2726'} {t('dashboard.que_faire_aujourdhui')}</h3>
         <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', background: 'rgba(251,146,60,0.15)', padding: '0.2rem 0.6rem', borderRadius: '12px' }}>{'\u23f0'} {deadline}</span>
       </div>
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1rem' }}>
         {taches.map(tache => (
           <div key={tache.id}
