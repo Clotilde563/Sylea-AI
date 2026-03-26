@@ -26,7 +26,8 @@ from api.schemas import (
     DecisionOut,
     OptionDilemmeOut,
 )
-from api.dependencies import get_profil_repo, get_decision_repo, get_optional_user
+from api.dependencies import get_profil_repo, get_decision_repo, get_optional_user, get_db
+from sylea.core.storage.database import DatabaseManager
 from api.context_helper import format_device_context
 
 router = APIRouter(prefix="/api/evenement", tags=["evenement"])
@@ -276,6 +277,7 @@ async def _identifier_so_pertinent(description: str, sous_objectifs: list) -> di
 async def analyser_evenement(
     data: EvenementIn,
     profil_repo: ProfilRepository = Depends(get_profil_repo),
+    db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
     """Analyse l'impact d'un evenement sur l'objectif de vie."""

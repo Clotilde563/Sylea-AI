@@ -159,7 +159,7 @@ async def analyser_dilemme(
     except Exception:
         pass
 
-    device_ctx = format_device_context(data.contexte_appareil) + collected_context
+    device_ctx = format_device_context(data.contexte_appareil)
 
     if agent is not None:
         try:
@@ -170,6 +170,7 @@ async def analyser_dilemme(
                 options_list,
                 impact_temporel_jours=data.impact_temporel_jours,
                 device_context=device_ctx,
+                collected_context=collected_context,
             )
             out_options = []
             for i, (l, desc) in enumerate(zip(lettres, options_list)):

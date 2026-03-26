@@ -128,6 +128,31 @@ describe('deltaFromImpact', () => {
   })
 })
 
+describe('deltaFromImpact regression - never 0min for non-zero impact', () => {
+    it('should show at least 1min for small positive impact on 1-day frame', () => {
+        const result = deltaFromImpact(10, 0.001, 1)
+        expect(result).not.toBe('0min')
+        expect(result).toContain('min')
+    })
+
+    it('should show at least 1min for small negative impact on 1-day frame', () => {
+        const result = deltaFromImpact(10, -0.001, 1)
+        expect(result).not.toBe('0min')
+        expect(result).toContain('min')
+    })
+
+    it('should show 0min only when impact is exactly 0', () => {
+        const result = deltaFromImpact(10, 0, 1)
+        expect(result).toBe('0min')
+    })
+
+    it('should show different values for different impacts', () => {
+        const result1 = deltaFromImpact(10, 0.05, 1)
+        const result2 = deltaFromImpact(10, -0.02, 1)
+        expect(result1).not.toBe(result2)
+    })
+})
+
 describe('buildTimeTicks', () => {
   it('returns hour-based ticks for less than 1 day', () => {
     const ticks = buildTimeTicks(0.5) // 12 hours
