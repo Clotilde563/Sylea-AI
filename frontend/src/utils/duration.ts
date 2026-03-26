@@ -159,9 +159,22 @@ export function deltaFromImpact(probActuelle: number, impactPoints: number, maxJ
  * @param elapsedDays  durée totale en jours (fractionnaire autorisé)
  * @returns tableau { valueDays, label }
  */
-export function buildTimeTicks(elapsedDays: number): { valueDays: number; label: string }[] {
+export function buildTimeTicks(elapsedDays: number, offsetDays: number = 0): { valueDays: number; label: string }[] {
   const ticks: { valueDays: number; label: string }[] = []
   const add = (d: number, l: string) => ticks.push({ valueDays: d, label: l })
+
+  // Helper: generate label for an absolute day count
+  const dayLabel = (absDays: number) => {
+    if (absDays < 0.05) return '0'
+    const rounded = Math.round(absDays)
+    if (rounded < 30) return `J+${rounded}`
+    const m = Math.round(rounded / 30.44)
+    const a = Math.floor(m / 12)
+    const r = m % 12
+    if (a === 0) return `${m}m`
+    if (r === 0) return `${a}a`
+    return `${a}a${r}m`
+  }
 
   if (elapsedDays < 1) {
     // Moins d'un jour → heures
@@ -169,15 +182,15 @@ export function buildTimeTicks(elapsedDays: number): { valueDays: number; label:
     const step   = totalH <= 2 ? 0.5 : totalH <= 6 ? 1 : totalH <= 12 ? 2 : 4
     for (let h = 0; h <= totalH + 0.01; h += step) {
       const rounded = Math.round(h * 10) / 10
-      add(h / 24, rounded === 0 ? '0' : `${rounded}h`)
+      const absH = rounded + offsetDays * 24
+      add(h / 24, absH < 0.05 ? '0' : `${Math.round(absH)}h`)
     }
   } else if (elapsedDays < 30) {
-    // Jours — ticks entiers uniquement pour éviter les doublons
-    const n    = Math.min(6, Math.floor(elapsedDays))
+    // Jours — ticks entiers
     const step = Math.max(1, Math.ceil(elapsedDays / 6))
-    add(0, '0')
+    add(0, dayLabel(offsetDays))
     for (let d = step; d <= elapsedDays; d += step) {
-      add(d, `J+${Math.round(d)}`)
+      add(d, dayLabel(d + offsetDays))
     }
   } else if (elapsedDays < 365) {
     // Mois
@@ -186,7 +199,7 @@ export function buildTimeTicks(elapsedDays: number): { valueDays: number; label:
     const step   = months / n
     for (let i = 0; i <= n; i++) {
       const m = i * step
-      add(m * 30.44, m < 0.5 ? '0' : `${Math.round(m)}m`)
+      add(m * 30.44, dayLabel(m * 30.44 + offsetDays))
     }
   } else {
     // Années + mois
@@ -195,14 +208,7 @@ export function buildTimeTicks(elapsedDays: number): { valueDays: number; label:
     const stepMonths  = totalMonths / n
     for (let i = 0; i <= n; i++) {
       const m = i * stepMonths
-      const a = Math.floor(m / 12)
-      const r = Math.round(m % 12)
-      const label =
-        m < 0.5 ? '0'
-        : a === 0 ? `${r}m`
-        : r === 0 ? `${a}a`
-        : `${a}a${r}m`
-      add(m * 30.44, label)
+      add(m * 30.44, dayLabel(m * 30.44 + offsetDays))
     }
   }
   return ticks
