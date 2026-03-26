@@ -273,6 +273,19 @@ async def generer_taches(
     ) if so_rows else "Aucun sous-objectif"
     ctx = _build_profil_context(profil)
     active_label = active_so['titre'] if active_so else "objectif principal"
+    so_prioritaire = active_so['titre'] if active_so else "objectif principal"
+    # Recuperer les infos collectees par l'agent compagnon
+    collected_context = ""
+    if profil.id:
+        try:
+            rows = db.conn.execute(
+                "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 20",
+                (profil.id,),
+            ).fetchall()
+            if rows:
+                collected_context = "\nINFOS COLLECTEES:\n" + "\n".join(f"  {r['field']}: {r['value']}" for r in rows)
+        except Exception:
+            pass
     # Recuperer l'historique des taches passees pour eviter les doublons
     past_tasks = _get_past_task_descriptions(db, profil.id, days=60)
     past_ctx = ""
@@ -294,55 +307,84 @@ async def generer_taches(
             for t in uncompleted_yesterday:
                 lines.append(f"  {t['description']}")
         past_ctx = "\n" + "\n".join(lines) + "\n"
+    device_context = format_device_context(data.contexte_appareil)
     prompt = (
-        "Tu es un coach de vie pragmatique et personnalise. "
-        "Genere exactement 4 taches concretes et realisables que l'utilisateur "
-        "devrait accomplir AUJOURD'HUI pour progresser vers son objectif.\n\n"
+        "Tu es un coach de vie expert. Genere un plan d'action CONCRET pour aujourd'hui "
+        "pour aider l'utilisateur a avancer vers son objectif.\n\n"
+        f"PROFIL: {profil.nom}, {profil.age} ans, {profil.profession}\n"
+        f"OBJECTIF: {profil.objectif.description if profil.objectif else 'Non defini'}\n"
+        f"SOUS-OBJECTIF ACTUEL (a prioriser): {so_prioritaire}\n"
+        f"PROGRESSION: {profil.probabilite_actuelle:.1f}%\n"
+        f"{collected_context}\n"
+        f"{device_context}\n\n"
+        f"PROFIL COMPLET:\n{ctx}\n\n"
+        f"SOUS-OBJECTIFS:\n{so_ctx}\n\n"
+        "REGLES STRICTES:\n"
+        "1. Genere 3 a 5 taches VARIEES — PAS juste du code. Mix entre:\n"
+        "   - APPRENTISSAGE: Liens vers des formations/videos/articles REELS et POPULAIRES\n"
+        "     Utilise des plateformes connues: YouTube, Udemy, OpenClassrooms, freeCodeCamp, Coursera, Khan Academy\n"
+        "     Donne le VRAI titre de la video/cours et le VRAI lien\n"
+        "   - LECTURE: Articles, blogs, livres recommandes avec liens\n"
+        "   - ACTION CONCRETE: Une tache specifique, mesurable, realisable aujourd'hui\n"
+        "   - REFLEXION: Question de reflexion ou exercice mental sur l'objectif\n"
+        "   - RESEAU: Contacter quelqu'un, poster sur LinkedIn, rejoindre une communaute\n\n"
+        "2. Chaque tache doit avoir:\n"
+        '   - Un titre court et motivant (pas "Exercice 1")\n'
+        "   - Une description de 1-2 phrases\n"
+        '   - Une duree estimee (ex: "30 min", "1h")\n'
+        "   - Un lien URL si applicable (formation, video, article)\n"
+        '   - Un type: "apprentissage", "action", "lecture", "reflexion", "reseau"\n'
+        '   - Une icone selon le type: apprentissage="\U0001F393", lecture="\U0001F4D6", '
+        'action="\U0001F3AF", reflexion="\U0001F4A1", reseau="\U0001F91D"\n\n'
+        "3. Les taches doivent etre CONCRETES et REALISABLES aujourd'hui\n"
+        "4. Adapte au niveau et a la situation de l'utilisateur\n"
+        "5. Si l'utilisateur est debutant, propose des ressources pour debutants\n"
+        "6. Varie les types — jamais 5 taches du meme type\n\n"
         "PERSONNALISATION IMPORTANTE:\n"
-        "1. Le profil contient les reponses de l'utilisateur a des questions personnalisees "
-        "(section apres '--- Contexte personnalise ---'). Lis-les attentivement.\n"
-        "2. Regarde le REVENU ANNUEL : si l'utilisateur a des moyens financiers, "
-        "recommande d'ACHETER des outils, formations, abonnements, logiciels ou services "
-        "plutot que de tout faire soi-meme gratuitement. "
-        "Exemple : recommander un abonnement a un outil pro au lieu de coder a la main.\n"
-        "3. Regarde les COMPETENCES et DIPLOMES : adapte le niveau de difficulte.\n"
-        "4. Regarde le TEMPS DISPONIBLE (heures/jour) : si peu de temps, propose des micro-taches.\n"
-        "5. Si l'utilisateur a deja des connaissances, propose des taches "
-        "d'ACTION CONCRETE (creer, contacter, produire, lancer) plutot que d'apprentissage basique.\n\n"
+        "- Regarde le REVENU ANNUEL : si l'utilisateur a des moyens financiers, "
+        "recommande d'ACHETER des outils, formations, abonnements, logiciels ou services.\n"
+        "- Regarde les COMPETENCES et DIPLOMES : adapte le niveau de difficulte.\n"
+        "- Regarde le TEMPS DISPONIBLE (heures/jour) : si peu de temps, propose des micro-taches.\n"
+        "- Si l'utilisateur a deja des connaissances, propose des taches d'ACTION CONCRETE.\n\n"
+        "IMPORTANT: Pour les liens YouTube/formations, donne des VRAIS liens vers des ressources "
+        "populaires et reconnues.\n"
+        'Par exemple pour le dev web:\n'
+        '- "https://www.youtube.com/watch?v=..." (vraies videos populaires)\n'
+        '- "https://openclassrooms.com/fr/courses/..."\n'
+        '- "https://www.freecodecamp.org/learn/..."\n'
+        '- "https://www.udemy.com/course/..."\n\n'
         "CONTINUITE DES TACHES:\n"
         "1. Si des TACHES NON COMPLETEES HIER sont listees, REPROPOSE-LES A L'IDENTIQUE "
         "(copie exacte de la description). Ce sont les priorites du jour.\n"
         "2. Complete avec de nouvelles taches pour arriver a 4 au total.\n"
-        "3. Pour les nouvelles taches, regarde les taches COMPLETEES et propose la SUITE LOGIQUE. "
-        "Par exemple, si l'utilisateur a cree une page d'accueil, propose d'ajouter "
-        "une page contact. Construis sur ce qui a deja ete fait.\n\n"
-        f"PROFIL:\n{ctx}\n\n"
-        f"SOUS-OBJECTIFS:\n{so_ctx}\n\n"
-        f"SOUS-OBJECTIF ACTIF: {active_label}\n"
-        "Les taches doivent etre focalisees sur le sous-objectif ACTIF.\n\n"
-        "Chaque tache doit etre specifique et actionnable en quelques heures.\n"
+        "3. Pour les nouvelles taches, regarde les taches COMPLETEES et propose la SUITE LOGIQUE.\n\n"
         f"{past_ctx}\n"
-        "Reponds UNIQUEMENT avec du JSON valide:\n"
-        '[{"description": "..."}, {"description": "..."}, {"description": "..."}, {"description": "..."}]'
-        + format_device_context(data.contexte_appareil)
+        "Reponds UNIQUEMENT en JSON valide:\n"
+        '[{"titre": "...", "description": "...", "duree": "30 min", "type": "apprentissage", '
+        '"lien": "https://...", "icone": "\U0001F393"}, ...]'
     )
     try:
-        raw = await _call_claude_json(prompt)
+        raw = await _call_claude_json(prompt, max_tokens=2500)
     except Exception:
         raw = [
-            {"description": "Definir 3 actions prioritaires pour votre objectif"},
-            {"description": "Consacrer 30 min a la formation ou recherche"},
-            {"description": "Contacter une personne cle de votre reseau"},
-            {"description": "Planifier les prochaines etapes de la semaine"},
+            {"titre": "Definir vos priorites", "description": "Definir 3 actions prioritaires pour votre objectif", "duree": "15 min", "type": "reflexion", "lien": "", "icone": "\U0001F4A1"},
+            {"titre": "Se former 30 min", "description": "Consacrer 30 min a la formation ou recherche", "duree": "30 min", "type": "apprentissage", "lien": "", "icone": "\U0001F393"},
+            {"titre": "Developper son reseau", "description": "Contacter une personne cle de votre reseau", "duree": "20 min", "type": "reseau", "lien": "", "icone": "\U0001F91D"},
+            {"titre": "Planifier la semaine", "description": "Planifier les prochaines etapes de la semaine", "duree": "15 min", "type": "action", "lien": "", "icone": "\U0001F3AF"},
         ]
     now = datetime.now()
     deadline = datetime(now.year, now.month, now.day, 23, 59, 59).isoformat()
     taches = []
-    for item in raw[:4]:
+    for item in raw[:5]:
         taches.append({
             "id": str(uuid.uuid4()),
             "description": str(item.get("description", "Tache")),
             "completee": False,
+            "titre": str(item.get("titre", "")),
+            "duree": str(item.get("duree", "")),
+            "type": str(item.get("type", "action")),
+            "lien": str(item.get("lien", "")),
+            "icone": str(item.get("icone", "")),
         })
     taches_id = str(uuid.uuid4())
     db.conn.execute(

@@ -321,6 +321,11 @@ class TacheItem(BaseModel):
     id: str
     description: str
     completee: bool = False
+    titre: str = ""
+    duree: str = ""
+    type: str = "action"
+    lien: str = ""
+    icone: str = ""
 
 class TachesOut(BaseModel):
     id: str

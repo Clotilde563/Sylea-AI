@@ -197,6 +197,11 @@ export interface TacheItem {
   id: string
   description: string
   completee: boolean
+  titre?: string
+  duree?: string
+  type?: string
+  lien?: string
+  icone?: string
 }
 
 export interface TachesQuotidiennes {

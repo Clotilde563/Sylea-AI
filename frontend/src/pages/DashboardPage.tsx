@@ -388,12 +388,77 @@ function TaskCard({ taches, deadline, onComplete, onAbandon }: { taches: TacheIt
         <h3 style={{ fontSize: '0.95rem', fontWeight: 600, color: '#fb923c' }}>{'\u2726'} {t('dashboard.que_faire_aujourdhui')}</h3>
         <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', background: 'rgba(251,146,60,0.15)', padding: '0.2rem 0.6rem', borderRadius: '12px' }}>{'\u23f0'} {deadline}</span>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', marginBottom: '1rem' }}>
-        {taches.map(t => (
-          <div key={t.id} onClick={() => !t.completee && onComplete(t.id)}
-            style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem', cursor: t.completee ? 'default' : 'pointer', opacity: t.completee ? 0.5 : 1, transition: 'opacity 0.3s', userSelect: 'none' }}>
-            <span style={{ marginTop: '0.1rem', fontSize: '1rem', lineHeight: '1', flexShrink: 0 }}>{t.completee ? '\u2611\uFE0F' : '\u2B1C'}</span>
-            <span style={{ fontSize: '0.85rem', color: t.completee ? 'var(--text-muted)' : 'var(--text-secondary)', textDecoration: t.completee ? 'line-through' : 'none', lineHeight: '1.4' }}>{t.description}</span>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1rem' }}>
+        {taches.map(tache => (
+          <div key={tache.id}
+            style={{
+              display: 'flex', alignItems: 'flex-start', gap: '0.75rem',
+              cursor: tache.completee ? 'default' : 'pointer',
+              opacity: tache.completee ? 0.5 : 1, transition: 'opacity 0.3s', userSelect: 'none',
+              background: 'rgba(255,255,255,0.03)', borderRadius: 'var(--radius-md)',
+              padding: '0.75rem', border: '1px solid rgba(255,255,255,0.05)',
+            }}>
+            {/* Checkbox */}
+            <span
+              onClick={() => !tache.completee && onComplete(tache.id)}
+              style={{ marginTop: '0.15rem', fontSize: '1.1rem', lineHeight: '1', flexShrink: 0, cursor: tache.completee ? 'default' : 'pointer' }}
+            >
+              {tache.completee ? '\u2611\uFE0F' : '\u2B1C'}
+            </span>
+
+            {/* Content */}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {/* Title row with icon and duration */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.2rem', flexWrap: 'wrap' }}>
+                {tache.icone && <span style={{ fontSize: '0.9rem' }}>{tache.icone}</span>}
+                <span style={{
+                  fontSize: '0.88rem', fontWeight: 600,
+                  color: tache.completee ? 'var(--text-muted)' : 'var(--text-primary)',
+                  textDecoration: tache.completee ? 'line-through' : 'none',
+                }}>
+                  {tache.titre || tache.description}
+                </span>
+                {tache.duree && (
+                  <span style={{
+                    fontSize: '0.65rem', fontWeight: 600, padding: '0.1rem 0.45rem',
+                    borderRadius: '8px', background: 'rgba(251,146,60,0.15)',
+                    color: '#fb923c', whiteSpace: 'nowrap', marginLeft: 'auto',
+                  }}>
+                    {tache.duree}
+                  </span>
+                )}
+              </div>
+              {/* Description (show if titre exists, otherwise already shown as title) */}
+              {tache.titre && (
+                <p style={{
+                  fontSize: '0.78rem', color: 'var(--text-muted)', lineHeight: '1.4',
+                  margin: '0.15rem 0 0', textDecoration: tache.completee ? 'line-through' : 'none',
+                }}>
+                  {tache.description}
+                </p>
+              )}
+              {/* Link button */}
+              {tache.lien && tache.lien.startsWith('http') && (
+                <a
+                  href={tache.lien}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={e => e.stopPropagation()}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+                    marginTop: '0.4rem', fontSize: '0.75rem', fontWeight: 600,
+                    color: '#a78bfa', textDecoration: 'none',
+                    padding: '0.25rem 0.7rem', borderRadius: '8px',
+                    background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.25)',
+                    transition: 'all 0.2s', cursor: 'pointer',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(167,139,250,0.2)'; e.currentTarget.style.borderColor = 'rgba(167,139,250,0.4)' }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'rgba(167,139,250,0.1)'; e.currentTarget.style.borderColor = 'rgba(167,139,250,0.25)' }}
+                >
+                  Ouvrir la ressource {'\u2192'}
+                </a>
+              )}
+            </div>
           </div>
         ))}
       </div>

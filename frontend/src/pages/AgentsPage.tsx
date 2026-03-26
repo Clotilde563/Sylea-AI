@@ -4,6 +4,11 @@ import { useT } from '../i18n/LanguageContext'
 import { api } from '../api/client'
 import { useDeviceContext } from '../contexts/DeviceContext'
 import { useStore } from '../store/useStore'
+
+// Agent 2 feature flag — set to true when desktop version is ready
+const AGENT2_ENABLED = false
+
+// VoiceCall is only used by Agent 2 — import kept but component only rendered when AGENT2_ENABLED is true
 import VoiceCall from '../components/VoiceCall'
 
 // ── Gold variant of the Sylea logo SVG ──────────────────────────────────────
@@ -527,8 +532,8 @@ export default function AgentsPage() {
   const [conflictModal, setConflictModal] = useState<string | null>(null)
 
   const handleActivate = () => {
-    // Vérifier si un autre agent est déjà actif
-    if (active2) {
+    // Vérifier si un autre agent est déjà actif (Agent 2 excluded when hidden)
+    if (AGENT2_ENABLED && active2) {
       setConflictModal('Agent Syléa 2')
       setShowActivateModal(false)
       return
@@ -1336,7 +1341,7 @@ export default function AgentsPage() {
   ]
 
   // ── Agent 2 Chat view ────────────────────────────────────────────────────
-  if (chat2Open) {
+  if (AGENT2_ENABLED && chat2Open) {
     return (
       <div className="page animate-fade-in">
         <style>{`
@@ -2226,8 +2231,8 @@ export default function AgentsPage() {
           </div>
         </div>
 
-        {/* Agent 2 — horizontal card */}
-        <div style={{
+        {/* Agent 2 — horizontal card (hidden when AGENT2_ENABLED is false) */}
+        {AGENT2_ENABLED && <div style={{
           display: 'flex', alignItems: 'center', gap: '1rem',
           background: active2
             ? 'linear-gradient(135deg, rgba(239,68,68,0.08), rgba(248,113,113,0.03), var(--bg-surface))'
@@ -2379,7 +2384,7 @@ export default function AgentsPage() {
               </button>
             )}
           </div>
-        </div>
+        </div>}
 
         {/* Future agent placeholder cards */}
         {futureAgents.map((agent, i) => (
@@ -2425,7 +2430,7 @@ export default function AgentsPage() {
       </div>
 
       {/* ── Voice Call overlay (Agent 2) ── */}
-      {inCall && (
+      {AGENT2_ENABLED && inCall && (
         <VoiceCall
           onEndCall={() => setInCall(false)}
           onMessage={handleVoiceCallMessage}
@@ -2560,7 +2565,7 @@ export default function AgentsPage() {
       )}
 
       {/* ── Agent 2 Activation modal ── */}
-      {showActivateModal2 && (
+      {AGENT2_ENABLED && showActivateModal2 && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 1000,
           background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)',
@@ -2606,7 +2611,7 @@ export default function AgentsPage() {
       )}
 
       {/* ── Agent 2 Deactivation modal ── */}
-      {showDeactivateModal2 && (
+      {AGENT2_ENABLED && showDeactivateModal2 && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 1000,
           background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)',
@@ -2652,7 +2657,7 @@ export default function AgentsPage() {
       )}
 
       {/* Action toast for Agent 2 */}
-      {actionToast && (
+      {AGENT2_ENABLED && actionToast && (
         <div style={{
           position: 'fixed', bottom: '5rem', left: '50%', transform: 'translateX(-50%)',
           padding: '0.6rem 1.5rem', borderRadius: '999px', zIndex: 2000,
