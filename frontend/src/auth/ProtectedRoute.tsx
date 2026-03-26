@@ -54,7 +54,7 @@ export function ProtectedRoute() {
     }
   }, [token])
 
-  // Daily check-in reminder — notify user in the evening if no bilan done today
+  // Daily check-in reminder — notify at 8am when check-in resets
   useEffect(() => {
     if (!token) return
 
@@ -65,13 +65,19 @@ export function ProtectedRoute() {
 
         if (lastCheckin !== today) {
           const hour = new Date().getHours()
-          if (hour >= 19 && hour <= 22) {
+          if (hour >= 8) {
+            // Check-in pas fait aujourd'hui et il est 8h ou plus → rappel
             if ('Notification' in window && Notification.permission === 'granted') {
-              new Notification('Sylea.AI -- Bilan du jour', {
-                body: "N'oubliez pas de faire votre bilan quotidien !",
-                icon: '/sylea-logo.png',
-                tag: 'daily-checkin',
-              })
+              // Ne notifier qu'une fois par jour
+              const lastNotif = localStorage.getItem('sylea_last_checkin_notif')
+              if (lastNotif !== today) {
+                localStorage.setItem('sylea_last_checkin_notif', today)
+                new Notification('Sylea.AI — Bilan du jour', {
+                  body: 'Bonjour ! Pensez a faire votre bilan quotidien pour suivre votre progression.',
+                  icon: '/sylea-logo.png',
+                  tag: 'daily-checkin',
+                })
+              }
             }
           }
         }
