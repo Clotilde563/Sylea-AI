@@ -217,6 +217,10 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
     }
   }, [isMuted, sendToAgent])
 
+  // Use a ref for startRecognition to avoid stale closures
+  const startRecognitionRef = useRef(startRecognition)
+  startRecognitionRef.current = startRecognition
+
   // Handle "Commencer l'appel" click
   const handleStartCall = useCallback(() => {
     setCallStarted(true)
@@ -232,15 +236,15 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
       .then((stream) => {
         stream.getTracks().forEach(t => t.stop())
         console.log('[VoiceCall] Mic permission granted')
-        startRecognition()
+        // Use ref to get the latest version of startRecognition
+        startRecognitionRef.current()
       })
       .catch((err) => {
         console.log('[VoiceCall] Mic error:', err)
         setStatus('Permission micro requise')
-        // Try anyway
-        startRecognition()
+        startRecognitionRef.current()
       })
-  }, [startRecognition])
+  }, [])
 
   // Handle end call
   const handleEndCall = useCallback(() => {
