@@ -264,67 +264,35 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
             console.log('[VoiceCall] Greeting received:', res.message?.substring(0, 50))
             console.log('[VoiceCall] Has audioData:', !!res.audioData)
             if (!activeRef.current) return
-            onMessageRef.current('', res.message)
 
-            // Play the greeting — try audioData first, then browser TTS
-            console.log('[VoiceCall] About to call playAndContinue')
-            const playAndContinue = () => {
-              console.log('[VoiceCall] playAndContinue CALLED')
-              if (res.audioData) {
-                console.log('[VoiceCall] Playing audioData...')
-                const audio = new Audio(`data:audio/mp3;base64,${res.audioData}`)
-                audio.volume = 1.0
-                audioRef.current = audio
-                audio.onended = () => {
-                  console.log('[VoiceCall] Audio ended, starting recognition')
-                  audioRef.current = null
-                  if (activeRef.current) {
-                    setIsSpeaking('idle')
-                    setStatus('A ton tour...')
-                    startRecognitionRef.current()
-                  }
-                }
-                audio.play()
-                  .then(() => console.log('[VoiceCall] audio.play() SUCCESS'))
-                  .catch((e) => {
-                    console.log('[VoiceCall] audio.play() BLOCKED:', e.message, '— falling back to TTS')
-                    // Fallback to browser TTS if audio.play() is blocked
-                    fallbackTTS(res.message)
-                  })
-              } else {
-                console.log('[VoiceCall] No audioData, using browser TTS')
-                fallbackTTS(res.message)
+            try { onMessageRef.current('', res.message) } catch(e) { console.log('[VoiceCall] onMessage error (ignored):', e) }
+
+            // Play greeting — use browser TTS directly (most reliable)
+            console.log('[VoiceCall] Starting TTS playback...')
+            const synth = window.speechSynthesis
+            synth.cancel()
+            const utt = new SpeechSynthesisUtterance(res.message)
+            utt.lang = 'fr-FR'
+            utt.rate = 0.95
+            const voices = synth.getVoices()
+            const frVoice = voices.find((v: SpeechSynthesisVoice) => v.lang.startsWith('fr') && v.name.includes('Google'))
+              || voices.find((v: SpeechSynthesisVoice) => v.lang.startsWith('fr'))
+            if (frVoice) utt.voice = frVoice
+            utt.onstart = () => console.log('[VoiceCall] TTS speaking...')
+            utt.onend = () => {
+              console.log('[VoiceCall] TTS ended, starting recognition')
+              if (activeRef.current) {
+                setIsSpeaking('idle')
+                setStatus('A ton tour...')
+                startRecognitionRef.current()
               }
             }
-
-            const fallbackTTS = (text: string) => {
-              const synth = window.speechSynthesis
-              synth.cancel()
-              const utt = new SpeechSynthesisUtterance(text)
-              utt.lang = 'fr-FR'
-              utt.rate = 0.95
-              const voices = synth.getVoices()
-              const frVoice = voices.find(v => v.lang.startsWith('fr') && v.name.includes('Google'))
-                || voices.find(v => v.lang.startsWith('fr'))
-              if (frVoice) utt.voice = frVoice
-              utt.onend = () => {
-                console.log('[VoiceCall] TTS ended, starting recognition')
-                if (activeRef.current) {
-                  setIsSpeaking('idle')
-                  setStatus('A ton tour...')
-                  startRecognitionRef.current()
-                }
-              }
-              synth.speak(utt)
-              console.log('[VoiceCall] Browser TTS started')
+            utt.onerror = (e) => {
+              console.log('[VoiceCall] TTS error:', e)
+              if (activeRef.current) startRecognitionRef.current()
             }
-
-            try {
-              playAndContinue()
-            } catch(err) {
-              console.log('[VoiceCall] playAndContinue ERROR:', err)
-              startRecognitionRef.current()
-            }
+            synth.speak(utt)
+            console.log('[VoiceCall] TTS queued')
           })
           .catch((e) => {
             console.log('[VoiceCall] Greeting error:', e)
