@@ -1019,7 +1019,9 @@ function Chart2({
       {hover && (() => {
         const tipX = hover.x > W - PAD.right - 130 ? hover.x - 130 : hover.x + 10
         const tipY = hover.y < PAD.top + 55 ? hover.y + 10 : hover.y - 55
-        const elapsedDaysH = hover.elapsedMs / MS_DAY
+        // En mode zoomé, afficher le temps relatif à la fenêtre (pas absolu)
+        const relativeMs = isZoomed ? hover.elapsedMs - windowStartMs : hover.elapsedMs
+        const elapsedDaysH = relativeMs / MS_DAY
         const ticks = buildTimeTicks(elapsedDaysH)
         const timeLabel = ticks.length > 0 ? ticks[ticks.length - 1].label : '—'
         return (
