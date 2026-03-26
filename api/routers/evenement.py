@@ -28,7 +28,7 @@ from api.schemas import (
 )
 from api.dependencies import get_profil_repo, get_decision_repo, get_optional_user, get_db
 from sylea.core.storage.database import DatabaseManager
-from api.context_helper import format_device_context
+from api.context_helper import format_device_context, build_full_user_context
 
 router = APIRouter(prefix="/api/evenement", tags=["evenement"])
 
@@ -131,6 +131,7 @@ async def _analyser_evenement_claude(
     profession: str = "",
     device_context: str = "",
     collected_context: str = "",
+    full_context: str = "",
 ) -> dict:
     """Analyse via Claude Haiku."""
     import anthropic as _anthropic
@@ -157,6 +158,7 @@ async def _analyser_evenement_claude(
         "Tu es un robot probabiliste froid et factuel. Tu calcules l'impact reel "
         "d'un evenement sur un objectif de vie. ZERO emotion, ZERO encouragement. "
         "Tu raisonnes en TEMPS D'ABORD, puis tu convertis en jours.\n\n"
+        f"{full_context}\n\n"
         "CONTEXTE :\n"
         f"- Objectif de vie : \"{objectif_desc}\"\n"
         f"- Categorie : {objectif_cat}\n"
@@ -323,6 +325,7 @@ async def analyser_evenement(
     except Exception:
         pass
 
+    full_ctx = build_full_user_context(db, user_id, profil)
     try:
         result = await _analyser_evenement_claude(
             description=data.description,
@@ -333,6 +336,7 @@ async def analyser_evenement(
             profession=profil.profession or "",
             device_context=format_device_context(data.contexte_appareil),
             collected_context=collected_context,
+            full_context=full_ctx,
         )
         return AnalyseEvenementOut(**result)
     except Exception as e:

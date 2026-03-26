@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from api.context_helper import format_device_context
+from api.context_helper import format_device_context, build_full_user_context
 from api.dependencies import get_db, get_optional_user
 from sylea.core.storage.database import DatabaseManager
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
@@ -114,6 +114,7 @@ def _build_agent_prompt(
     device_context: str = "",
     db: DatabaseManager | None = None,
     user_id: str | None = None,
+    full_context: str = "",
 ) -> str:
     # Build profile summary
     if profil_data:
@@ -210,6 +211,8 @@ MAUVAIS : "Information manquante detectee : diplomes. Pourriez-vous renseigner v
 
 {profil_info}
 {collected_info}
+
+{full_context}
 
 INFORMATIONS MANQUANTES A RECOLTER NATURELLEMENT :
 {missing_str}
@@ -517,7 +520,8 @@ async def agent_chat(
 
     # Build prompt
     device_ctx = format_device_context(data.contexte_appareil) if data.contexte_appareil else ""
-    system_prompt = _build_agent_prompt(profil_data, decisions, sous_objectifs, device_ctx, db=db, user_id=user_id)
+    full_ctx = build_full_user_context(db, user_id)
+    system_prompt = _build_agent_prompt(profil_data, decisions, sous_objectifs, device_ctx, db=db, user_id=user_id, full_context=full_ctx)
 
     # Build chat context: load from DB if authenticated, else use what frontend sent
     if user_id:

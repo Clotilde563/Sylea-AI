@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from api.context_helper import format_device_context
+from api.context_helper import format_device_context, build_full_user_context
 from api.dependencies import get_db, get_optional_user
 from sylea.core.storage.database import DatabaseManager
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
@@ -255,6 +255,7 @@ def _build_agent2_prompt(
     collected_info: str = "",
     device_context: str = "",
     reminders: list[dict] | None = None,
+    full_context: str = "",
 ) -> str:
     if profil_data:
         profil_info = f"""
@@ -325,6 +326,7 @@ REGLES :
 
 {profil_info}
 {collected_info}
+{full_context}
 {decisions_str}
 {so_str}
 {reminders_str}
@@ -440,8 +442,10 @@ async def agent2_chat(
 
     # Build prompt
     device_ctx = format_device_context(data.contexte_appareil) if data.contexte_appareil else ""
+    full_ctx = build_full_user_context(db, user_id)
     system_prompt = _build_agent2_prompt(
         profil_data, decisions, sous_objectifs, collected_info, device_ctx, reminders,
+        full_context=full_ctx,
     )
 
     # Build chat context
