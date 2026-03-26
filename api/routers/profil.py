@@ -20,8 +20,9 @@ from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
 from sylea.core.engine.probability import MoteurProbabilite
 
 from api.schemas import ProfilIn, ProfilOut, ObjectifOut, ProbabiliteOut, ProbabiliteIn, JourneeIn, BienEtreScoresOut, QuestionsObjectifIn
-from api.dependencies import get_profil_repo, get_decision_repo, get_moteur, get_agent, get_optional_user
-from api.context_helper import format_device_context
+from api.dependencies import get_profil_repo, get_decision_repo, get_moteur, get_agent, get_optional_user, get_db
+from api.context_helper import format_device_context, build_full_user_context
+from sylea.core.storage.database import DatabaseManager
 
 router = APIRouter(prefix="/api/profil", tags=["profil"])
 
@@ -189,6 +190,7 @@ async def recalculer_probabilite(
     repo: ProfilRepository = Depends(get_profil_repo),
     moteur: MoteurProbabilite = Depends(get_moteur),
     agent=Depends(get_agent),
+    db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
     """
@@ -205,6 +207,7 @@ async def recalculer_probabilite(
 
     # Calcul local (synchrone mais rapide)
     prob_locale = moteur.calculer_probabilite_initiale(profil)
+    full_ctx = build_full_user_context(db, user_id, profil)
 
     if agent is not None:
         try:
@@ -213,6 +216,7 @@ async def recalculer_probabilite(
             analyse = await asyncio.to_thread(
                 agent.analyser_probabilite, profil, prob_locale,
                 device_context=device_context,
+                full_context=full_ctx,
             )
             # Stocker dans probabilite_calculee (interne pour calcul temps)
             profil.objectif.probabilite_calculee = analyse.probabilite
@@ -265,7 +269,7 @@ _QUESTIONS_FALLBACK = [
 ]
 
 
-async def _generer_questions_claude(description: str, device_context: str = "") -> list:
+async def _generer_questions_claude(description: str, device_context: str = "", full_context: str = "") -> list:
     """G\u00e9n\u00e8re 12 questions personnalis\u00e9es via Claude Haiku."""
     import os, json, re as _re
     import anthropic as _anthropic
@@ -283,6 +287,7 @@ async def _generer_questions_claude(description: str, device_context: str = "") 
         "les risques potentiels et les prochaines \u00e9tapes concrètes.\n\n"
         "R\u00e9ponds UNIQUEMENT avec un tableau JSON de 12 cha\u00eenes en fran\u00e7ais, sans aucun markdown.\n"
         'Format exact : ["question 1", "question 2", ..., "question 12"]'
+        f'\n{full_context}'
         f'{device_context}'
     )
     msg = await asyncio.to_thread(
@@ -303,10 +308,19 @@ async def _generer_questions_claude(description: str, device_context: str = "") 
 
 
 @router.post("/generer-questions", response_model=List[str])
-async def generer_questions(data: QuestionsObjectifIn):
+async def generer_questions(
+    data: QuestionsObjectifIn,
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
     """G\u00e9n\u00e8re 12 questions personnalis\u00e9es bas\u00e9es sur l'objectif de l'utilisateur."""
+    full_ctx = build_full_user_context(db, user_id)
     try:
-        return await _generer_questions_claude(data.description, device_context=format_device_context(data.contexte_appareil))
+        return await _generer_questions_claude(
+            data.description,
+            device_context=format_device_context(data.contexte_appareil),
+            full_context=full_ctx,
+        )
     except Exception:
         return _QUESTIONS_FALLBACK
 
@@ -352,7 +366,7 @@ def _analyser_journee_heuristique(description: str) -> dict:
     }
 
 
-async def _analyser_journee_claude(description: str, device_context: str = "") -> dict:
+async def _analyser_journee_claude(description: str, device_context: str = "", full_context: str = "") -> dict:
     """Analyse par Claude Haiku (nécessite ANTHROPIC_API_KEY)."""
     import os, json, re
     import anthropic as _anthropic
@@ -368,6 +382,7 @@ async def _analyser_journee_claude(description: str, device_context: str = "") -
         f'Journée : "{description}"\n\n'
         'Format exact : {"niveau_sante": X, "niveau_stress": X, "niveau_energie": X, "niveau_bonheur": X}\n'
         "(1=très mauvais, 10=excellent ; stress élevé = score élevé)"
+        f'\n{full_context}'
         f'{device_context}'
     )
     msg = await asyncio.to_thread(
@@ -391,10 +406,19 @@ async def _analyser_journee_claude(description: str, device_context: str = "") -
 
 
 @router.post("/analyser-journee", response_model=BienEtreScoresOut)
-async def analyser_journee(data: JourneeIn):
+async def analyser_journee(
+    data: JourneeIn,
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
     """Analyse la description d'une journée et retourne des scores bien-être (1-10)."""
+    full_ctx = build_full_user_context(db, user_id)
     try:
-        scores = await _analyser_journee_claude(data.description, device_context=format_device_context(data.contexte_appareil))
+        scores = await _analyser_journee_claude(
+            data.description,
+            device_context=format_device_context(data.contexte_appareil),
+            full_context=full_ctx,
+        )
         return BienEtreScoresOut(**scores)
     except Exception:
         return BienEtreScoresOut(**_analyser_journee_heuristique(data.description))

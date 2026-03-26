@@ -28,7 +28,7 @@ from api.schemas import (
 )
 from api.dependencies import get_profil_repo, get_decision_repo, get_agent, get_optional_user, get_db
 from sylea.core.storage.database import DatabaseManager
-from api.context_helper import format_device_context
+from api.context_helper import format_device_context, build_full_user_context
 
 router = APIRouter(prefix="/api/dilemme", tags=["dilemme"])
 
@@ -160,6 +160,7 @@ async def analyser_dilemme(
         pass
 
     device_ctx = format_device_context(data.contexte_appareil)
+    full_ctx = build_full_user_context(db, user_id, profil)
 
     if agent is not None:
         try:
@@ -171,6 +172,7 @@ async def analyser_dilemme(
                 impact_temporel_jours=data.impact_temporel_jours,
                 device_context=device_ctx,
                 collected_context=collected_context,
+                full_context=full_ctx,
             )
             out_options = []
             for i, (l, desc) in enumerate(zip(lettres, options_list)):

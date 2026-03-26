@@ -23,7 +23,7 @@ from api.schemas import (
     GenererSousObjectifsIn, GenererTachesIn,
 )
 from api.dependencies import get_profil_repo, get_db, get_optional_user
-from api.context_helper import format_device_context
+from api.context_helper import format_device_context, build_full_user_context
 
 router = APIRouter(tags=["objectifs"])
 
@@ -154,7 +154,7 @@ async def generer_sous_objectifs(
             )
             for r in existing
         ]
-    ctx = _build_profil_context(profil)
+    ctx = build_full_user_context(db, user_id, profil)
     prompt = (
         "Tu es un coach de vie strategique. Analyse ce profil et son objectif de vie, "
         "puis genere exactement 4 sous-objectifs LARGES et strategiques pour atteindre "
@@ -271,7 +271,7 @@ async def generer_taches(
     so_ctx = "\n".join(
         f"- {r['titre']} ({r['progression']:.0f}%)" + (" [ACTIF]" if active_so and r['titre'] == active_so['titre'] else "") for r in so_rows
     ) if so_rows else "Aucun sous-objectif"
-    ctx = _build_profil_context(profil)
+    ctx = build_full_user_context(db, user_id, profil)
     active_label = active_so['titre'] if active_so else "objectif principal"
     so_prioritaire = active_so['titre'] if active_so else "objectif principal"
     # Recuperer les infos collectees par l'agent compagnon
@@ -535,7 +535,7 @@ async def get_personnalite(
     if row and row["phrase_personnalite"]:
         return PersonnaliteOut(phrase=row["phrase_personnalite"])
     # Generer une seule fois via Claude
-    ctx = _build_profil_context(profil)
+    ctx = build_full_user_context(db, user_id, profil)
     prompt = (
         "Tu es SYLEA, une IA bienveillante et perspicace. "
         "En UNE SEULE phrase poetique et inspirante (max 15 mots), "
