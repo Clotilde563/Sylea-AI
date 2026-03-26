@@ -39,7 +39,7 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
   const [transcript, setTranscript] = useState('')
   const [isMuted, setIsMuted] = useState(false)
   const [speakerOn, setSpeakerOn] = useState(true)
-  const [fadeIn, setFadeIn] = useState(false)
+  const [fadeIn, setFadeIn] = useState(true)  // Show immediately
   const [callStarted, setCallStarted] = useState(false)
   const [status, setStatus] = useState('Appuyez pour commencer')
 
