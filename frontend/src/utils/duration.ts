@@ -94,7 +94,8 @@ export function deltaFromImpact(probActuelle: number, impactPoints: number, maxJ
     const absHeures = Math.abs(impactJoursBrut) * 24  // jours → heures
     const sign = impactJoursBrut >= 0 ? '+' : '-'
     const totalMin = Math.round(absHeures * 60)
-    if (totalMin < 1) return `${sign}1min`  // minimum 1 minute, jamais 0
+    if (totalMin < 1 && Math.abs(impactJoursBrut) > 0) return `${sign}1min`  // non-zero impact rounds to 0 → show minimum
+    if (totalMin < 1) return '0min'  // truly zero impact
     if (totalMin < 60) return `${sign}${totalMin}min`
     const h = Math.floor(totalMin / 60)
     const m = totalMin % 60
@@ -107,7 +108,8 @@ export function deltaFromImpact(probActuelle: number, impactPoints: number, maxJ
   const dAvant = dureeFromProb(pAvant)
   const dApres = dureeFromProb(pApres)
   const deltaFloat = dAvant.totalJours - dApres.totalJours
-  const sign = deltaFloat >= 0 ? '+' : '-'
+  // Use impactPoints sign when deltaFloat rounds to 0 but impact is non-zero
+  const sign = deltaFloat !== 0 ? (deltaFloat >= 0 ? '+' : '-') : (impactPoints >= 0 ? '+' : '-')
   const abs  = Math.abs(deltaFloat)
 
   // Plafonner le delta par le cadre temporel si fourni
@@ -118,7 +120,8 @@ export function deltaFromImpact(probActuelle: number, impactPoints: number, maxJ
   // Pour les cadres courts (≤ 7 jours) sans impact brut, heures/minutes
   if (maxJours !== undefined && maxJours <= 7) {
     const totalMin = Math.round(cappedAbs * 24 * 60)
-    if (totalMin < 1) return `${sign}1min`
+    if (totalMin < 1 && impactPoints !== 0) return `${sign}1min`  // non-zero but rounds to 0
+    if (totalMin < 1) return '0min'
     if (totalMin < 60) return `${sign}${totalMin}min`
     const h = Math.floor(totalMin / 60)
     const m = totalMin % 60
@@ -128,7 +131,8 @@ export function deltaFromImpact(probActuelle: number, impactPoints: number, maxJ
   if (cappedAbs < 1) {
     const totalMin = Math.round(cappedAbs * 24 * 60)
     if (totalMin < 60) {
-      return totalMin === 0 ? '0min' : `${sign}${totalMin}min`
+      if (totalMin === 0) return impactPoints !== 0 ? `${sign}1min` : '0min'
+      return `${sign}${totalMin}min`
     }
     const h = Math.floor(totalMin / 60)
     const m = totalMin % 60

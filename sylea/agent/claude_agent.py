@@ -145,6 +145,7 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
         options: list,
         impact_temporel_jours: int | None = None,
         device_context: str = "",
+        collected_context: str = "",
     ) -> AnalyseDilemme:
         """
         Analyse un dilemme entre N options et calcule l'impact sur la probabilité.
@@ -153,6 +154,7 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
             profil    : Profil complet de l'utilisateur
             question  : La question posée par l'utilisateur
             options   : Liste des descriptions d'options (2 à 5)
+            collected_context : Infos collectées par l'agent sur l'utilisateur
 
         Returns:
             AnalyseDilemme avec pros/cons et impact pour chaque option
@@ -208,14 +210,14 @@ ZERO emotion, ZERO encouragement. Tu raisonnes en TEMPS, pas en pourcentage.
 
 PROFIL R\u00c9SUM\u00c9 :
 {profil_resume}
+{device_context}
+{collected_context}
 
 OBJECTIF ULTIME : {objectif_desc}
 PROBABILIT\u00c9 ACTUELLE : {prob_totale:.2f}%
 TEMPS ESTIME RESTANT : {temps_estime_str} ({_tj} jours)
 
 CADRE TEMPOREL DE CE CHOIX : {cadre_str}
-
-{device_context}
 
 QUESTION : {question}
 
@@ -239,6 +241,14 @@ METHODE DE CALCUL (OBLIGATOIRE) :
 6. Exemples concrets pour un cadre de 1 mois :
    - Apprendre l'anglais vs l'espagnol = l'anglais fait gagner ~5-10 jours, l'espagnol ~1-3 jours
 7. Sois REALISTE et FACTUEL. Pas d'impact par encouragement.
+
+REGLE CRITIQUE POUR LES IMPACTS COURTS (1 jour, 1 semaine) :
+- Il DOIT y avoir une DIFFERENCE d'impact entre les options. Jamais 0 pour les deux.
+- Pour un cadre de 1 jour (24h), exprime l'impact en HEURES et FRACTIONS D'HEURES.
+  Exemple : si une option fait gagner 2h de productivite, impact_jours = 0.083 (2h/24h)
+- Pour un cadre de 1 semaine, exprime en jours et fractions.
+- L'option recommandee DOIT avoir un meilleur impact que les autres.
+- Si les deux options sont mauvaises, les deux impacts sont negatifs mais differents.
 
 ETUDE SCIENTIFIQUE :
 - Cite UNE etude scientifique REELLE et verifiable en rapport avec le dilemme pose.
@@ -344,6 +354,7 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
         options: list,
         impact_temporel_jours: int | None = None,
         device_context: str = "",
+        collected_context: str = "",
     ) -> AnalyseDilemme:
         """
         Analyse un dilemme entre N options et calcule l'impact sur la probabilité.
@@ -352,6 +363,7 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
             profil    : Profil complet de l'utilisateur
             question  : La question posée par l'utilisateur
             options   : Liste des descriptions d'options (2 à 5)
+            collected_context : Infos collectées par l'agent sur l'utilisateur
 
         Returns:
             AnalyseDilemme avec pros/cons et impact pour chaque option
@@ -408,6 +420,7 @@ ZERO emotion, ZERO encouragement. Tu raisonnes en TEMPS, pas en pourcentage.
 PROFIL RESUME :
 {profil_resume}
 {device_context}
+{collected_context}
 
 OBJECTIF ULTIME : {objectif_desc}
 PROBABILITE ACTUELLE : {prob_totale:.2f}%
@@ -424,12 +437,27 @@ METHODE DE CALCUL (OBLIGATOIRE) :
    REELLEMENT gagner ou perdre sur l'objectif, DANS LA LIMITE du cadre temporel ({cadre_str}) ?
 2. Le champ "impact_jours" doit contenir ce temps en {unite_impact}.
 3. L'impact ne peut JAMAIS depasser le cadre temporel ({cadre_jours} jours max en valeur absolue).
-4. Exemples concrets pour un cadre de 1 jour :
+4. REGLE CRITIQUE : Chaque option DOIT avoir un impact DIFFERENT et NON NUL.
+   Meme si l'impact est minime, il existe toujours une difference entre deux choix.
+   Si les deux options sont mauvaises, les deux impacts peuvent etre NEGATIFS.
+   Si les deux options sont bonnes, les deux impacts peuvent etre POSITIFS mais differents.
+   JAMAIS 0 pour les deux options. JAMAIS le meme impact pour deux options differentes.
+5. Exemples concrets pour un cadre de 1 jour :
+   - Soiree avec un ami motivant = +0.5h (energie positive le lendemain)
+   - Soiree avec un ami demotivant = -1.5h (energie drainee, perte de focus le lendemain)
    - Dormir 8h au lieu de coder = +2.0 (heures de productivite gagnees)
    - Aller courir 1h = +0.5 (heures de clarte mentale gagnees)
-5. Exemples concrets pour un cadre de 1 mois :
+6. Exemples concrets pour un cadre de 1 mois :
    - Apprendre l'anglais vs l'espagnol = l'anglais fait gagner ~5-10 jours, l'espagnol ~1-3 jours
-6. Sois REALISTE et FACTUEL. Pas d'impact par encouragement.
+7. Sois REALISTE et FACTUEL. Pas d'impact par encouragement.
+
+REGLE CRITIQUE POUR LES IMPACTS COURTS (1 jour, 1 semaine) :
+- Il DOIT y avoir une DIFFERENCE d'impact entre les options. Jamais 0 pour les deux.
+- Pour un cadre de 1 jour (24h), exprime l'impact en HEURES et FRACTIONS D'HEURES.
+  Exemple : si une option fait gagner 2h de productivite, impact_jours = 0.083 (2h/24h)
+- Pour un cadre de 1 semaine, exprime en jours et fractions.
+- L'option recommandee DOIT avoir un meilleur impact que les autres.
+- Si les deux options sont mauvaises, les deux impacts sont negatifs mais differents.
 
 ETUDE SCIENTIFIQUE :
 - Cite UNE etude scientifique REELLE et verifiable en rapport avec le dilemme pose.
