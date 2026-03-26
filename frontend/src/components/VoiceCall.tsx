@@ -259,12 +259,28 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
   }, [chatEndpoint, onMessage, speakerOn, stopRecognition, startListening])
 
   // ── Start listening on mount ──────────────────────────────────────────
+  // Start listening ONLY after user interaction (Chrome requires it)
+  const [callStarted, setCallStarted] = useState(false)
+  const handleStartCall = useCallback(() => {
+    setCallStarted(true)
+    // Request mic permission explicitly
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then((stream) => {
+        // Stop the stream immediately — we just needed the permission
+        stream.getTracks().forEach(t => t.stop())
+        // Now start speech recognition
+        startListening()
+      })
+      .catch(() => {
+        // Try speech recognition anyway
+        startListening()
+      })
+  }, [startListening])
+
   useEffect(() => {
-    // Small delay to allow mic permissions
-    const timer = setTimeout(() => {
-      if (activeRef.current) startListening()
-    }, 500)
-    return () => clearTimeout(timer)
+    // Auto-start is disabled — user must click "Commencer"
+    // This is required by Chrome's autoplay policy
+    void 0
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -375,8 +391,25 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
         margin: '0 0 2rem', fontVariantNumeric: 'tabular-nums',
         letterSpacing: '0.1em',
       }}>
-        {formatDuration(callDuration)}
+        {callStarted ? formatDuration(callDuration) : '00:00'}
       </p>
+
+      {/* Start call button — required for Chrome audio permission */}
+      {!callStarted && (
+        <button
+          onClick={handleStartCall}
+          style={{
+            padding: '1rem 2.5rem', borderRadius: '999px',
+            background: `linear-gradient(135deg, ${agentColor}, ${agentColor}cc)`,
+            border: 'none', color: 'white', fontSize: '1.1rem', fontWeight: 700,
+            cursor: 'pointer', marginBottom: '2rem',
+            boxShadow: `0 0 30px ${agentColor}66`,
+            animation: 'vc-pulse 2s ease-in-out infinite',
+          }}
+        >
+          🎙️ Commencer l'appel
+        </button>
+      )}
 
       {/* Speaking indicator */}
       <div style={{
