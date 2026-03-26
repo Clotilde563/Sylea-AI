@@ -516,10 +516,17 @@ export default function AgentsPage() {
     }
   }, [])
 
+  const [conflictModal, setConflictModal] = useState<string | null>(null)
+
   const handleActivate = () => {
+    // Vérifier si un autre agent est déjà actif
+    if (active2) {
+      setConflictModal('Agent Syléa 2')
+      setShowActivateModal(false)
+      return
+    }
     setActive(true)
     setShowActivateModal(false)
-    // Demander la permission de notifications des l'activation
     if ('Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission()
     }
@@ -938,6 +945,12 @@ export default function AgentsPage() {
   }, [active2])
 
   const handleActivate2 = () => {
+    // Vérifier si un autre agent est déjà actif
+    if (active) {
+      setConflictModal('Agent Syléa 1')
+      setShowActivateModal2(false)
+      return
+    }
     setActive2(true)
     setShowActivateModal2(false)
     if ('Notification' in window && Notification.permission === 'default') {
@@ -2031,6 +2044,40 @@ export default function AgentsPage() {
       )}
 
       {/* ── Activation modal ── */}
+      {/* Modale conflit : un seul agent actif à la fois */}
+      {conflictModal && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 1100,
+          background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{
+            background: 'var(--bg-surface)', borderRadius: 'var(--radius-lg)',
+            border: '1px solid rgba(239,68,68,0.3)', padding: '2rem',
+            maxWidth: 420, width: '90%', textAlign: 'center',
+          }}>
+            <div style={{ fontSize: '2rem', marginBottom: '1rem' }}>⚠️</div>
+            <h3 style={{ color: 'var(--text-primary)', marginBottom: '0.75rem', fontSize: '1.1rem' }}>
+              Un agent est deja actif
+            </h3>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.88rem', lineHeight: 1.5, marginBottom: '1.5rem' }}>
+              {conflictModal} est actuellement actif. Vous ne pouvez activer qu'un seul agent a la fois.
+              Desactivez-le d'abord avant d'en activer un autre.
+            </p>
+            <button
+              onClick={() => setConflictModal(null)}
+              style={{
+                padding: '0.6rem 1.5rem', borderRadius: 'var(--radius-md)',
+                background: 'linear-gradient(135deg, #ef4444, #dc2626)', border: 'none',
+                color: 'white', cursor: 'pointer', fontSize: '0.88rem', fontWeight: 600,
+              }}
+            >
+              Compris
+            </button>
+          </div>
+        </div>
+      )}
+
       {showActivateModal && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 1000,
