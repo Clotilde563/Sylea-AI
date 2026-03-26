@@ -105,7 +105,16 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
             startRecognition()
           }
         }
-        await audio.play()
+        await audio.play().catch(() => {
+          // Blocked by Chrome — fallback to browser TTS
+          console.log('[VoiceCall] audio.play blocked in sendToAgent, using TTS')
+          const synth = window.speechSynthesis
+          synth.cancel()
+          const u = new SpeechSynthesisUtterance(res.message)
+          u.lang = 'fr-FR'; u.rate = 0.95
+          u.onend = () => { if (activeRef.current) { setIsSpeaking('idle'); setStatus('A ton tour...'); startRecognition() } }
+          synth.speak(u)
+        })
       } else if (speakerOn) {
         // Fallback browser TTS
         setStatus('Agent parle...')
@@ -232,45 +241,88 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
       setCallDuration(prev => prev + 1)
     }, 1000)
 
+    // Unlock AudioContext with user gesture (critical for Chrome autoplay policy)
+    const audioCtx = new AudioContext()
+    audioCtx.resume().then(() => console.log('[VoiceCall] AudioContext unlocked'))
+
+    // Also play a tiny silent sound to unlock audio playback
+    const silentAudio = new Audio('data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7v/////////////////////////////////')
+    silentAudio.volume = 0.01
+    silentAudio.play().catch(() => {})
+
     // Request mic permission
     navigator.mediaDevices.getUserMedia({ audio: true })
       .then((stream) => {
         stream.getTracks().forEach(t => t.stop())
         console.log('[VoiceCall] Mic permission granted')
-        // Agent speaks first (like answering a phone call)
         setStatus('Agent decroche...')
         setIsSpeaking('agent')
         console.log('[VoiceCall] Calling chatEndpoint for greeting...')
-        // Send a greeting request to get the agent to speak first
         const greetMsgs = [{ role: 'user', content: '[APPEL VOCAL] L utilisateur vient de lancer un appel vocal avec toi. Decroche et dis-lui bonjour naturellement en 1 phrase.' }]
         chatEndpointRef.current(greetMsgs)
           .then((res) => {
-            console.log('[VoiceCall] Greeting response received:', res.message?.substring(0, 50))
+            console.log('[VoiceCall] Greeting received:', res.message?.substring(0, 50))
+            console.log('[VoiceCall] Has audioData:', !!res.audioData)
             if (!activeRef.current) return
             onMessageRef.current('', res.message)
-            // Play the greeting
-            if (res.audioData) {
-              const audio = new Audio(`data:audio/mp3;base64,${res.audioData}`)
-              audioRef.current = audio
-              audio.onended = () => {
-                audioRef.current = null
+
+            // Play the greeting — try audioData first, then browser TTS
+            const playAndContinue = () => {
+              if (res.audioData) {
+                console.log('[VoiceCall] Playing audioData...')
+                const audio = new Audio(`data:audio/mp3;base64,${res.audioData}`)
+                audio.volume = 1.0
+                audioRef.current = audio
+                audio.onended = () => {
+                  console.log('[VoiceCall] Audio ended, starting recognition')
+                  audioRef.current = null
+                  if (activeRef.current) {
+                    setIsSpeaking('idle')
+                    setStatus('A ton tour...')
+                    startRecognitionRef.current()
+                  }
+                }
+                audio.play()
+                  .then(() => console.log('[VoiceCall] audio.play() SUCCESS'))
+                  .catch((e) => {
+                    console.log('[VoiceCall] audio.play() BLOCKED:', e.message, '— falling back to TTS')
+                    // Fallback to browser TTS if audio.play() is blocked
+                    fallbackTTS(res.message)
+                  })
+              } else {
+                console.log('[VoiceCall] No audioData, using browser TTS')
+                fallbackTTS(res.message)
+              }
+            }
+
+            const fallbackTTS = (text: string) => {
+              const synth = window.speechSynthesis
+              synth.cancel()
+              const utt = new SpeechSynthesisUtterance(text)
+              utt.lang = 'fr-FR'
+              utt.rate = 0.95
+              const voices = synth.getVoices()
+              const frVoice = voices.find(v => v.lang.startsWith('fr') && v.name.includes('Google'))
+                || voices.find(v => v.lang.startsWith('fr'))
+              if (frVoice) utt.voice = frVoice
+              utt.onend = () => {
+                console.log('[VoiceCall] TTS ended, starting recognition')
                 if (activeRef.current) {
                   setIsSpeaking('idle')
                   setStatus('A ton tour...')
                   startRecognitionRef.current()
                 }
               }
-              audio.play().catch(() => { startRecognitionRef.current() })
-            } else {
-              // Fallback TTS
-              const synth = window.speechSynthesis
-              const utt = new SpeechSynthesisUtterance(res.message)
-              utt.lang = 'fr-FR'
-              utt.onend = () => { startRecognitionRef.current() }
               synth.speak(utt)
+              console.log('[VoiceCall] Browser TTS started')
             }
+
+            playAndContinue()
           })
-          .catch(() => { startRecognitionRef.current() })
+          .catch((e) => {
+            console.log('[VoiceCall] Greeting error:', e)
+            startRecognitionRef.current()
+          })
       })
       .catch((err) => {
         console.log('[VoiceCall] Mic error:', err)
