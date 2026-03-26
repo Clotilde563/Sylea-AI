@@ -46,12 +46,54 @@ export function ProtectedRoute() {
     }
   }, [token])
 
+  // Request notification permission as soon as user is authenticated (not just when agent is active)
+  useEffect(() => {
+    if (!token) return
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission()
+    }
+  }, [token])
+
+  // Daily check-in reminder — notify user in the evening if no bilan done today
+  useEffect(() => {
+    if (!token) return
+
+    const checkReminder = async () => {
+      try {
+        const lastCheckin = localStorage.getItem('sylea_last_checkin_date')
+        const today = new Date().toISOString().split('T')[0]
+
+        if (lastCheckin !== today) {
+          const hour = new Date().getHours()
+          if (hour >= 19 && hour <= 22) {
+            if ('Notification' in window && Notification.permission === 'granted') {
+              new Notification('Sylea.AI -- Bilan du jour', {
+                body: "N'oubliez pas de faire votre bilan quotidien !",
+                icon: '/sylea-logo.png',
+                tag: 'daily-checkin',
+              })
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // Check after 30 seconds, then every hour
+    const timeout = setTimeout(checkReminder, 30000)
+    const interval = setInterval(checkReminder, 60 * 60 * 1000)
+
+    return () => { clearTimeout(timeout); clearInterval(interval) }
+  }, [token])
+
   // Proactive agent polling + push notifications
   // Debounced check: max once per 5 minutes
   const checkProactive = useCallback(async () => {
-    if (localStorage.getItem('sylea_agent1_active') !== 'true') return
+    const agentActive = localStorage.getItem('sylea_agent1_active') === 'true'
     const now = Date.now()
-    if (now - lastProactiveCheckRef.current < 5 * 60 * 1000) return // 5 min debounce
+    const timeSinceLastCheck = now - lastProactiveCheckRef.current
+    console.log('[Proactive] Checking...', { agentActive, timeSinceLastCheck: Math.round(timeSinceLastCheck / 1000) + 's' })
+    if (!agentActive) return
+    if (timeSinceLastCheck < 5 * 60 * 1000) return // 5 min debounce
     lastProactiveCheckRef.current = now
 
     try {
@@ -77,11 +119,6 @@ export function ProtectedRoute() {
 
     const agentActive = localStorage.getItem('sylea_agent1_active') === 'true'
     if (!agentActive) return
-
-    // Request notification permission
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission()
-    }
 
     // Check once after 10 seconds (let the app load first)
     const initialTimeout = setTimeout(checkProactive, 10_000)

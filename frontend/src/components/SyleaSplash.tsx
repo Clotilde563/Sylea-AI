@@ -95,7 +95,7 @@ export function SyleaSplash({ onDone }: { onDone: () => void }) {
             </linearGradient>
 
             {/* ── Filtre halo flou ── */}
-            <filter id="sp-blur-halo">
+            <filter id="sp-blur-halo" x="-50%" y="-50%" width="200%" height="200%">
               <feGaussianBlur stdDeviation="24"/>
             </filter>
           </defs>
