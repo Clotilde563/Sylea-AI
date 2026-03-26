@@ -1336,6 +1336,7 @@ export default function AgentsPage() {
 
   // ── Future agents placeholder data ─────────────────────────────────────────
   const futureAgents = [
+    { name: 'Agent Sylea 2', subtitle: 'Votre assistant personnel', desc: 'Envoi de mails, redaction de textes, rappels et notifications, appel vocal' },
     { name: 'Agent Sylea 3', subtitle: 'Executant de taches', desc: 'Toutes taches sur instruction' },
     { name: 'Super Agent Sylea', subtitle: 'Cerveau autonome 24/7', desc: 'Agit pour vous pendant que vous dormez' },
   ]
