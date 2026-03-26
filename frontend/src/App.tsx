@@ -25,8 +25,9 @@ import { GeoPermissionModal }    from './components/GeoPermissionModal'
 // ── Application ───────────────────────────────────────────────────────────────
 
 function AppContent() {
-  // true = affiche l'animation au lancement | false = désactivé
-  const [showSplash, setShowSplash] = useState(true)
+  // Skip splash if user is already authenticated (has valid JWT token)
+  const hasToken = !!localStorage.getItem('sylea_auth_token')
+  const [showSplash, setShowSplash] = useState(!hasToken)
   const [chatbotOpen, setChatbotOpen] = useState(false)
   const t = useT()
 

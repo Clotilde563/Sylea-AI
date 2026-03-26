@@ -24,7 +24,7 @@ function AgentSyleaLogo({ size = 24 }: { size?: number }) {
           <stop offset="40%" stopColor="#f59e0b" />
           <stop offset="100%" stopColor="#fbbf24" />
         </linearGradient>
-        <filter id="evt-agent-gold-blur">
+        <filter id="evt-agent-gold-blur" x="-50%" y="-50%" width="200%" height="200%">
           <feGaussianBlur stdDeviation="20" />
         </filter>
       </defs>
@@ -274,6 +274,18 @@ export function EvenementPage() {
         {phase === 'form' && (
           <div className="card animate-fade-in-scale" style={{ maxWidth: '600px', margin: '0 auto' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+              {/* Info banner if agent is inactive */}
+              {localStorage.getItem('sylea_agent1_active') !== 'true' && (
+                <div style={{
+                  padding: '0.6rem 1rem', borderRadius: 'var(--radius-md)',
+                  background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)',
+                  color: '#fbbf24', fontSize: '0.78rem', marginBottom: '0rem',
+                  display: 'flex', alignItems: 'center', gap: '0.5rem',
+                }}>
+                  <span>{'\uD83D\uDCA1'}</span>
+                  <span>Activez votre Agent Sylea 1 pour des analyses plus precises et contextualisees.</span>
+                </div>
+              )}
               <div className="input-group">
                 <label className="input-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <span>

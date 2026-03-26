@@ -132,6 +132,8 @@ export function BilanPage() {
         heures_objectif: hObjectif,
         description: descJournee,
       })
+      // Save today's date so the daily check-in reminder won't fire again
+      localStorage.setItem('sylea_last_checkin_date', new Date().toISOString().split('T')[0])
       // Recharger le profil (scores mis à jour)
       const updated = await api.getProfil()
       setProfil(updated)

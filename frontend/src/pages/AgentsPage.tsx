@@ -24,7 +24,7 @@ function AgentSyleaLogo({ size = 120 }: { size?: number }) {
           <stop offset="40%" stopColor="#f59e0b" />
           <stop offset="100%" stopColor="#fbbf24" />
         </linearGradient>
-        <filter id="agent-gold-blur">
+        <filter id="agent-gold-blur" x="-50%" y="-50%" width="200%" height="200%">
           <feGaussianBlur stdDeviation="20" />
         </filter>
       </defs>
@@ -2254,7 +2254,7 @@ export default function AgentsPage() {
                   <stop offset="40%" stopColor="#ef4444" />
                   <stop offset="100%" stopColor="#f87171" />
                 </linearGradient>
-                <filter id="agent2-red-blur">
+                <filter id="agent2-red-blur" x="-50%" y="-50%" width="200%" height="200%">
                   <feGaussianBlur stdDeviation="20" />
                 </filter>
               </defs>
