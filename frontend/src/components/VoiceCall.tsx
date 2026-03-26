@@ -1,8 +1,7 @@
-// VoiceCall.tsx — Full-screen voice call overlay for Agent Sylea 2
+// VoiceCall.tsx — Full-screen voice call overlay
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { api } from '../api/client'
 
-// ── Red variant of the Sylea logo SVG ──────────────────────────────────────
 const CX = 190, CY = 170
 const S_PATH = `M ${CX} ${CY - 105} C ${CX + 90} ${CY - 105}, ${CX + 90} ${CY - 28}, ${CX} ${CY} C ${CX - 90} ${CY + 28}, ${CX - 90} ${CY + 105}, ${CX} ${CY + 105}`
 
@@ -15,26 +14,17 @@ function AgentRedLogo({ size = 120 }: { size?: number }) {
           <stop offset="40%" stopColor="#ef4444" />
           <stop offset="100%" stopColor="#f87171" />
         </linearGradient>
-        <filter id="call-red-blur">
-          <feGaussianBlur stdDeviation="20" />
-        </filter>
+        <filter id="call-red-blur"><feGaussianBlur stdDeviation="20" /></filter>
       </defs>
-      {/* Halo */}
-      <path d={S_PATH} stroke="url(#call-red-g)" strokeWidth="90" fill="none" strokeLinecap="round"
-        style={{ filter: 'url(#call-red-blur)', opacity: 0.18 }} />
-      {/* Outer border */}
+      <path d={S_PATH} stroke="url(#call-red-g)" strokeWidth="90" fill="none" strokeLinecap="round" style={{ filter: 'url(#call-red-blur)', opacity: 0.18 }} />
       <path d={S_PATH} stroke="rgba(2,4,16,0.98)" strokeWidth="58" fill="none" strokeLinecap="round" />
-      {/* Red body */}
       <path d={S_PATH} stroke="url(#call-red-g)" strokeWidth="46" fill="none" strokeLinecap="round" />
-      {/* Inner hollow */}
       <path d={S_PATH} stroke="#050810" strokeWidth="18" fill="none" strokeLinecap="butt" />
-      {/* Specular highlight */}
       <path d={S_PATH} stroke="rgba(255,150,150,0.5)" strokeWidth="2.5" fill="none" strokeLinecap="round" />
     </svg>
   )
 }
 
-// ── Types ──────────────────────────────────────────────────────────────────
 interface VoiceCallProps {
   onEndCall: () => void
   onMessage: (userText: string, agentText: string) => void
@@ -43,79 +33,137 @@ interface VoiceCallProps {
   chatEndpoint: (messages: Array<{ role: string; content: string }>, deviceCtx?: any) => Promise<{ message: string; audioData?: string }>
 }
 
-type SpeakingState = 'user' | 'agent' | 'idle'
-
-// ── Component ─────────────────────────────────────────────────────────────
 const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor, agentName, chatEndpoint }) => {
   const [callDuration, setCallDuration] = useState(0)
-  const [isSpeaking, setIsSpeaking] = useState<SpeakingState>('idle')
+  const [isSpeaking, setIsSpeaking] = useState<'user' | 'agent' | 'idle'>('idle')
   const [transcript, setTranscript] = useState('')
   const [isMuted, setIsMuted] = useState(false)
   const [speakerOn, setSpeakerOn] = useState(true)
   const [fadeIn, setFadeIn] = useState(false)
+  const [callStarted, setCallStarted] = useState(false)
+  const [status, setStatus] = useState('Appuyez pour commencer')
 
-  const recognitionRef = useRef<SpeechRecognition | null>(null)
+  const activeRef = useRef(true)
   const conversationRef = useRef<Array<{ role: string; content: string }>>([])
   const callTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const activeRef = useRef(true)
+  const recognitionRef = useRef<any>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const finalTranscriptRef = useRef('')
 
-  // Fade in on mount
   useEffect(() => {
     requestAnimationFrame(() => setFadeIn(true))
-  }, [])
-
-  // Call duration timer
-  useEffect(() => {
-    callTimerRef.current = setInterval(() => {
-      setCallDuration(prev => prev + 1)
-    }, 1000)
     return () => {
+      activeRef.current = false
       if (callTimerRef.current) clearInterval(callTimerRef.current)
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current)
+      if (recognitionRef.current) try { recognitionRef.current.abort() } catch { /* */ }
+      if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
+      window.speechSynthesis.cancel()
     }
   }, [])
 
-  // Format duration as MM:SS
   const formatDuration = (secs: number) => {
     const m = Math.floor(secs / 60)
     const s = secs % 60
     return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
   }
 
-  // ── Stop recognition ──────────────────────────────────────────────────
-  const stopRecognition = useCallback(() => {
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current)
-      silenceTimerRef.current = null
-    }
-    if (recognitionRef.current) {
-      try { recognitionRef.current.abort() } catch { /* ignore */ }
-      recognitionRef.current = null
-    }
-  }, [])
+  // Send user text to agent and play response
+  const sendToAgent = useCallback(async (text: string) => {
+    if (!activeRef.current) return
+    setIsSpeaking('agent')
+    setStatus('Agent reflechit...')
 
-  // ── Start listening ───────────────────────────────────────────────────
-  const startListening = useCallback(() => {
+    conversationRef.current.push({ role: 'user', content: text })
+
+    try {
+      const res = await chatEndpoint(conversationRef.current)
+      if (!activeRef.current) return
+
+      conversationRef.current.push({ role: 'assistant', content: res.message })
+      onMessage(text, res.message)
+
+      // Play TTS
+      if (speakerOn && res.audioData) {
+        setStatus('Agent parle...')
+        const audio = new Audio(`data:audio/mp3;base64,${res.audioData}`)
+        audioRef.current = audio
+        audio.onended = () => {
+          audioRef.current = null
+          if (activeRef.current) {
+            setIsSpeaking('idle')
+            setStatus('A ton tour...')
+            startRecognition()
+          }
+        }
+        audio.onerror = () => {
+          audioRef.current = null
+          if (activeRef.current) {
+            setIsSpeaking('idle')
+            setStatus('A ton tour...')
+            startRecognition()
+          }
+        }
+        await audio.play()
+      } else if (speakerOn) {
+        // Fallback browser TTS
+        setStatus('Agent parle...')
+        const synth = window.speechSynthesis
+        const utterance = new SpeechSynthesisUtterance(res.message)
+        utterance.lang = 'fr-FR'
+        utterance.rate = 0.95
+        const voices = synth.getVoices()
+        const frVoice = voices.find(v => v.lang.startsWith('fr') && v.name.includes('Google'))
+          || voices.find(v => v.lang.startsWith('fr'))
+        if (frVoice) utterance.voice = frVoice
+        utterance.onend = () => {
+          if (activeRef.current) {
+            setIsSpeaking('idle')
+            setStatus('A ton tour...')
+            startRecognition()
+          }
+        }
+        synth.speak(utterance)
+      } else {
+        setIsSpeaking('idle')
+        setStatus('A ton tour...')
+        startRecognition()
+      }
+    } catch {
+      if (activeRef.current) {
+        setIsSpeaking('idle')
+        setStatus('Erreur — reessaye')
+        startRecognition()
+      }
+    }
+  }, [chatEndpoint, onMessage, speakerOn])
+
+  // Start speech recognition
+  const startRecognition = useCallback(() => {
     if (!activeRef.current || isMuted) return
 
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
-    if (!SR) return
+    if (!SR) { setStatus('Reconnaissance vocale non supportee'); return }
 
-    // Clean up any existing instance
-    stopRecognition()
+    // Clean up existing
+    if (recognitionRef.current) {
+      try { recognitionRef.current.abort() } catch { /* */ }
+    }
 
-    const recognition = new SR() as SpeechRecognition
+    const recognition = new SR()
     recognition.lang = 'fr-FR'
     recognition.continuous = true
     recognition.interimResults = true
-
     finalTranscriptRef.current = ''
 
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      if (!activeRef.current) return
+    recognition.onstart = () => {
+      console.log('[VoiceCall] Recognition started')
+      setStatus('Parle maintenant...')
+    }
 
+    recognition.onresult = (event: any) => {
+      if (!activeRef.current) return
       let interim = ''
       for (let i = event.resultIndex; i < event.results.length; i++) {
         if (event.results[i].isFinal) {
@@ -126,415 +174,204 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
       }
       setTranscript(finalTranscriptRef.current + interim)
       setIsSpeaking('user')
+      setStatus('Ecoute...')
 
       // Reset silence timer
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current)
       silenceTimerRef.current = setTimeout(() => {
-        // 2 seconds of silence -- send to agent
         const text = finalTranscriptRef.current.trim()
         if (text && activeRef.current) {
-          handleUserFinishedSpeaking(text)
+          // Stop recognition before sending
+          if (recognitionRef.current) {
+            try { recognitionRef.current.abort() } catch { /* */ }
+            recognitionRef.current = null
+          }
           finalTranscriptRef.current = ''
           setTranscript('')
+          sendToAgent(text)
         }
-      }, 2000)
+      }, 2500) // 2.5 seconds of silence
     }
 
-    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      // Restart on transient errors if still active
+    recognition.onerror = (event: any) => {
+      console.log('[VoiceCall] Recognition error:', event.error)
       if (activeRef.current && event.error !== 'aborted' && event.error !== 'not-allowed') {
-        setTimeout(() => {
-          if (activeRef.current) startListening()
-        }, 500)
+        setTimeout(() => { if (activeRef.current) startRecognition() }, 1000)
       }
     }
 
     recognition.onend = () => {
-      // Auto-restart if still active (browser may stop recognition)
+      console.log('[VoiceCall] Recognition ended')
+      // Auto-restart if still active and not during agent response
       if (activeRef.current && recognitionRef.current === recognition) {
-        setTimeout(() => {
-          if (activeRef.current) startListening()
-        }, 300)
+        setTimeout(() => { if (activeRef.current) startRecognition() }, 500)
       }
     }
 
     recognitionRef.current = recognition
     try {
       recognition.start()
-      setIsSpeaking('idle')
-    } catch {
-      // Already started or error — retry
-      setTimeout(() => {
-        if (activeRef.current) startListening()
-      }, 500)
+    } catch (e) {
+      console.log('[VoiceCall] Start error:', e)
+      setTimeout(() => { if (activeRef.current) startRecognition() }, 1000)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMuted, stopRecognition])
+  }, [isMuted, sendToAgent])
 
-  // ── Handle user finished speaking ─────────────────────────────────────
-  const handleUserFinishedSpeaking = useCallback(async (text: string) => {
-    if (!activeRef.current) return
-
-    // Stop recognition while agent is responding
-    stopRecognition()
-    setIsSpeaking('agent')
-
-    // Add to conversation history
-    conversationRef.current.push({ role: 'user', content: text })
-
-    try {
-      // Call agent endpoint
-      const res = await chatEndpoint(conversationRef.current)
-      if (!activeRef.current) return
-
-      conversationRef.current.push({ role: 'assistant', content: res.message })
-
-      // Save to chat history
-      onMessage(text, res.message)
-
-      // Play TTS
-      if (speakerOn) {
-        if (res.audioData) {
-          const audio = new Audio(`data:audio/mp3;base64,${res.audioData}`)
-          audioRef.current = audio
-          audio.onended = () => {
-            audioRef.current = null
-            if (activeRef.current) {
-              setIsSpeaking('idle')
-              startListening()
-            }
-          }
-          audio.onerror = () => {
-            audioRef.current = null
-            if (activeRef.current) {
-              setIsSpeaking('idle')
-              startListening()
-            }
-          }
-          await audio.play()
-        } else {
-          // Fallback to browser TTS
-          const synth = window.speechSynthesis
-          synth.cancel()
-          const utterance = new SpeechSynthesisUtterance(res.message)
-          utterance.lang = 'fr-FR'
-          utterance.rate = 0.95
-          utterance.pitch = 1.05
-
-          const voices = synth.getVoices()
-          const frenchVoice =
-            voices.find(v => v.lang.startsWith('fr') && v.name.includes('Denise') && v.name.includes('Online'))
-            || voices.find(v => v.lang.startsWith('fr') && v.name.includes('Online') && v.name.includes('Natural'))
-            || voices.find(v => v.lang.startsWith('fr') && v.name.includes('Denise'))
-            || voices.find(v => v.lang.startsWith('fr') && v.name.includes('Google'))
-            || voices.find(v => v.lang.startsWith('fr'))
-          if (frenchVoice) utterance.voice = frenchVoice
-
-          utterance.onend = () => {
-            if (activeRef.current) {
-              setIsSpeaking('idle')
-              startListening()
-            }
-          }
-          utterance.onerror = () => {
-            if (activeRef.current) {
-              setIsSpeaking('idle')
-              startListening()
-            }
-          }
-          synth.speak(utterance)
-        }
-      } else {
-        // Speaker off — just resume listening
-        setIsSpeaking('idle')
-        startListening()
-      }
-    } catch {
-      if (activeRef.current) {
-        setIsSpeaking('idle')
-        startListening()
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatEndpoint, onMessage, speakerOn, stopRecognition, startListening])
-
-  // ── Start listening on mount ──────────────────────────────────────────
-  // Start listening ONLY after user interaction (Chrome requires it)
-  const [callStarted, setCallStarted] = useState(false)
+  // Handle "Commencer l'appel" click
   const handleStartCall = useCallback(() => {
     setCallStarted(true)
-    // Request mic permission explicitly
+    setStatus('Demarrage...')
+
+    // Start call timer
+    callTimerRef.current = setInterval(() => {
+      setCallDuration(prev => prev + 1)
+    }, 1000)
+
+    // Request mic permission then start recognition
     navigator.mediaDevices.getUserMedia({ audio: true })
       .then((stream) => {
-        // Stop the stream immediately — we just needed the permission
         stream.getTracks().forEach(t => t.stop())
-        // Now start speech recognition
-        startListening()
+        console.log('[VoiceCall] Mic permission granted')
+        startRecognition()
       })
-      .catch(() => {
-        // Try speech recognition anyway
-        startListening()
+      .catch((err) => {
+        console.log('[VoiceCall] Mic error:', err)
+        setStatus('Permission micro requise')
+        // Try anyway
+        startRecognition()
       })
-  }, [startListening])
+  }, [startRecognition])
 
-  useEffect(() => {
-    // Auto-start is disabled — user must click "Commencer"
-    // This is required by Chrome's autoplay policy
-    void 0
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // ── Handle mute toggle ────────────────────────────────────────────────
-  useEffect(() => {
-    if (isMuted) {
-      stopRecognition()
-      setIsSpeaking('idle')
-      setTranscript('')
-      finalTranscriptRef.current = ''
-    } else if (isSpeaking !== 'agent') {
-      startListening()
-    }
-  }, [isMuted, stopRecognition, startListening, isSpeaking])
-
-  // ── End call ──────────────────────────────────────────────────────────
+  // Handle end call
   const handleEndCall = useCallback(() => {
     activeRef.current = false
-    stopRecognition()
+    if (recognitionRef.current) try { recognitionRef.current.abort() } catch { /* */ }
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
+    if (callTimerRef.current) clearInterval(callTimerRef.current)
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current)
     window.speechSynthesis.cancel()
-    if (audioRef.current) {
-      audioRef.current.pause()
-      audioRef.current = null
-    }
-    if (callTimerRef.current) {
-      clearInterval(callTimerRef.current)
-      callTimerRef.current = null
-    }
     onEndCall()
-  }, [stopRecognition, onEndCall])
+  }, [onEndCall])
 
-  // ── Cleanup on unmount ────────────────────────────────────────────────
+  // Mute toggle
   useEffect(() => {
-    return () => {
-      activeRef.current = false
-      if (recognitionRef.current) {
-        try { recognitionRef.current.abort() } catch { /* ignore */ }
-      }
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current)
-      if (callTimerRef.current) clearInterval(callTimerRef.current)
-      if (audioRef.current) audioRef.current.pause()
-      window.speechSynthesis.cancel()
+    if (isMuted && recognitionRef.current) {
+      try { recognitionRef.current.abort() } catch { /* */ }
+      recognitionRef.current = null
+      setTranscript('')
+      finalTranscriptRef.current = ''
+      setStatus('Micro coupe')
+    } else if (!isMuted && callStarted && isSpeaking !== 'agent') {
+      startRecognition()
     }
-  }, [])
+  }, [isMuted, callStarted, isSpeaking, startRecognition])
 
-  // ── Speaking indicator dots ───────────────────────────────────────────
-  const speakingColor = isSpeaking === 'user' ? '#3b82f6' : isSpeaking === 'agent' ? agentColor : 'rgba(255,255,255,0.2)'
-  const speakingLabel = isSpeaking === 'user' ? 'Vous parlez...' : isSpeaking === 'agent' ? 'Agent repond...' : 'En attente...'
+  const speakingColor = isSpeaking === 'user' ? '#60a5fa' : isSpeaking === 'agent' ? agentColor : 'rgba(255,255,255,0.3)'
 
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 2000,
-      background: 'radial-gradient(ellipse at center, rgba(30,5,5,0.95) 0%, rgba(5,8,16,0.98) 70%)',
+      background: 'radial-gradient(ellipse at center, rgba(20,0,0,0.95), #050510)',
       display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-      opacity: fadeIn ? 1 : 0,
-      transition: 'opacity 0.4s ease',
+      opacity: fadeIn ? 1 : 0, transition: 'opacity 0.5s ease',
     }}>
       <style>{`
-        @keyframes vc-pulse {
-          0%, 100% { transform: scale(1); opacity: 1; }
-          50% { transform: scale(1.3); opacity: 0.5; }
-        }
-        @keyframes vc-glow {
-          0%, 100% { box-shadow: 0 0 40px rgba(239,68,68,0.15); }
-          50% { box-shadow: 0 0 80px rgba(239,68,68,0.3); }
-        }
-        @keyframes vc-ring {
-          0% { transform: scale(0.8); opacity: 0.6; }
-          50% { transform: scale(1.2); opacity: 0; }
-          100% { transform: scale(0.8); opacity: 0; }
-        }
+        @keyframes vc-pulse { 0%,100% { transform: scale(1); opacity: 0.7; } 50% { transform: scale(1.15); opacity: 1; } }
       `}</style>
 
-      {/* Background glow ring when agent is speaking */}
-      {isSpeaking === 'agent' && (
-        <div style={{
-          position: 'absolute',
-          width: 220, height: 220, borderRadius: '50%',
-          border: `2px solid ${agentColor}`,
-          animation: 'vc-ring 2s ease-in-out infinite',
-          top: '50%', left: '50%',
-          marginTop: -200, marginLeft: -110,
-        }} />
-      )}
-
-      {/* Agent logo */}
+      {/* Glow */}
       <div style={{
-        marginBottom: '1.5rem',
-        animation: isSpeaking === 'agent' ? 'vc-glow 2s ease-in-out infinite' : 'none',
-        borderRadius: '50%',
-        padding: '1rem',
-      }}>
-        <AgentRedLogo size={120} />
-      </div>
+        position: 'absolute', top: '20%', width: 300, height: 300, borderRadius: '50%',
+        background: `radial-gradient(circle, ${agentColor}22, transparent 70%)`,
+        filter: 'blur(60px)', pointerEvents: 'none',
+      }} />
 
-      {/* Agent name */}
-      <h2 style={{
-        fontSize: '1.4rem', fontWeight: 700, margin: '0 0 0.5rem',
-        background: `linear-gradient(135deg, ${agentColor}, #f87171)`,
-        WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
-      }}>
-        {agentName}
-      </h2>
-
-      {/* Call duration */}
-      <p style={{
-        fontSize: '2rem', fontWeight: 300, color: 'rgba(255,255,255,0.7)',
-        margin: '0 0 2rem', fontVariantNumeric: 'tabular-nums',
-        letterSpacing: '0.1em',
-      }}>
+      <AgentRedLogo size={140} />
+      <h2 style={{ color: agentColor, fontSize: '1.4rem', fontWeight: 700, margin: '1.5rem 0 0.5rem' }}>{agentName}</h2>
+      <p style={{ fontSize: '2rem', fontWeight: 300, color: 'rgba(255,255,255,0.7)', margin: '0 0 1rem', letterSpacing: '0.1em' }}>
         {callStarted ? formatDuration(callDuration) : '00:00'}
       </p>
 
-      {/* Start call button — required for Chrome audio permission */}
+      {/* Status */}
+      <p style={{ fontSize: '0.9rem', color: 'rgba(255,255,255,0.5)', margin: '0 0 1rem' }}>{status}</p>
+
+      {/* Start button */}
       {!callStarted && (
-        <button
-          onClick={handleStartCall}
-          style={{
-            padding: '1rem 2.5rem', borderRadius: '999px',
-            background: `linear-gradient(135deg, ${agentColor}, ${agentColor}cc)`,
-            border: 'none', color: 'white', fontSize: '1.1rem', fontWeight: 700,
-            cursor: 'pointer', marginBottom: '2rem',
-            boxShadow: `0 0 30px ${agentColor}66`,
-            animation: 'vc-pulse 2s ease-in-out infinite',
-          }}
-        >
+        <button onClick={handleStartCall} style={{
+          padding: '1rem 2.5rem', borderRadius: '999px',
+          background: `linear-gradient(135deg, ${agentColor}, ${agentColor}cc)`,
+          border: 'none', color: 'white', fontSize: '1.1rem', fontWeight: 700,
+          cursor: 'pointer', marginBottom: '2rem',
+          boxShadow: `0 0 30px ${agentColor}66`,
+          animation: 'vc-pulse 2s ease-in-out infinite',
+        }}>
           🎙️ Commencer l'appel
         </button>
       )}
 
       {/* Speaking indicator */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: '0.75rem',
-        marginBottom: '3rem',
-      }}>
-        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-          {[0, 1, 2].map(i => (
-            <div key={i} style={{
-              width: 10, height: 10, borderRadius: '50%',
-              background: speakingColor,
-              animation: isSpeaking !== 'idle' ? `vc-pulse 1.2s ease-in-out ${i * 0.2}s infinite` : 'none',
-              opacity: isSpeaking === 'idle' ? 0.3 : 1,
-              transition: 'background 0.3s, opacity 0.3s',
-            }} />
-          ))}
+      {callStarted && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.5rem' }}>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {[0, 1, 2].map(i => (
+              <div key={i} style={{
+                width: 10, height: 10, borderRadius: '50%', background: speakingColor,
+                animation: isSpeaking !== 'idle' ? `vc-pulse 1.2s ease-in-out ${i * 0.2}s infinite` : 'none',
+                opacity: isSpeaking === 'idle' ? 0.3 : 1,
+              }} />
+            ))}
+          </div>
         </div>
-        <span style={{
-          fontSize: '0.85rem', color: 'rgba(255,255,255,0.5)',
-          fontWeight: 500,
-        }}>
-          {speakingLabel}
-        </span>
-      </div>
+      )}
 
-      {/* Live transcript (subtle, small) */}
+      {/* Transcript */}
       {transcript && isSpeaking === 'user' && (
         <div style={{
-          position: 'absolute', bottom: 160, left: '50%', transform: 'translateX(-50%)',
-          maxWidth: '80%', textAlign: 'center',
-          padding: '0.5rem 1rem', borderRadius: '12px',
-          background: 'rgba(255,255,255,0.06)',
-          border: '1px solid rgba(255,255,255,0.1)',
+          maxWidth: 400, padding: '0.75rem 1.25rem', borderRadius: 12,
+          background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
+          marginBottom: '2rem',
         }}>
-          <p style={{
-            fontSize: '0.8rem', color: 'rgba(255,255,255,0.5)',
-            margin: 0, fontStyle: 'italic',
-          }}>
+          <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.85rem', margin: 0, fontStyle: 'italic' }}>
             {transcript}
           </p>
         </div>
       )}
 
       {/* Bottom controls */}
-      <div style={{
-        position: 'absolute', bottom: 60,
-        display: 'flex', alignItems: 'center', gap: '2rem',
-      }}>
-        {/* Mute button */}
-        <button
-          onClick={() => setIsMuted(m => !m)}
-          style={{
-            width: 56, height: 56, borderRadius: '50%',
-            background: isMuted ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.08)',
-            border: isMuted ? '2px solid rgba(255,255,255,0.3)' : '1px solid rgba(255,255,255,0.12)',
-            color: isMuted ? '#fff' : 'rgba(255,255,255,0.7)',
-            cursor: 'pointer',
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            gap: '2px', transition: 'all 0.2s',
-          }}
-        >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="9" y="1" width="6" height="11" rx="3" />
-            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-            <line x1="12" y1="19" x2="12" y2="23" />
-            <line x1="8" y1="23" x2="16" y2="23" />
-            {isMuted && <line x1="1" y1="1" x2="23" y2="23" />}
-          </svg>
-          <span style={{ fontSize: '0.55rem', fontWeight: 600 }}>
-            {isMuted ? 'Unmute' : 'Muet'}
-          </span>
+      <div style={{ display: 'flex', gap: '2rem', alignItems: 'center' }}>
+        <button onClick={() => setIsMuted(!isMuted)} style={{
+          width: 56, height: 56, borderRadius: '50%',
+          background: isMuted ? 'rgba(239,68,68,0.2)' : 'rgba(255,255,255,0.1)',
+          border: `1px solid ${isMuted ? '#ef4444' : 'rgba(255,255,255,0.2)'}`,
+          color: isMuted ? '#ef4444' : 'white', cursor: 'pointer',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          fontSize: '1.2rem',
+        }}>
+          {isMuted ? '🔇' : '🎤'}
+          <span style={{ fontSize: '0.55rem', marginTop: 2 }}>{isMuted ? 'Muet' : 'Micro'}</span>
         </button>
 
-        {/* End call button */}
-        <button
-          onClick={handleEndCall}
-          style={{
-            width: 72, height: 72, borderRadius: '50%',
-            background: '#ef4444',
-            border: 'none',
-            color: '#fff',
-            cursor: 'pointer',
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            gap: '2px',
-            boxShadow: '0 4px 24px rgba(239,68,68,0.4)',
-            transition: 'all 0.2s',
-          }}
-          onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.05)'; e.currentTarget.style.boxShadow = '0 6px 32px rgba(239,68,68,0.6)' }}
-          onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; e.currentTarget.style.boxShadow = '0 4px 24px rgba(239,68,68,0.4)' }}
-        >
-          {/* Phone down icon */}
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91" />
-            <line x1="23" y1="1" x2="1" y2="23" />
-          </svg>
-          <span style={{ fontSize: '0.6rem', fontWeight: 700 }}>Raccrocher</span>
+        <button onClick={handleEndCall} style={{
+          width: 72, height: 72, borderRadius: '50%',
+          background: 'linear-gradient(135deg, #ef4444, #dc2626)',
+          border: 'none', color: 'white', cursor: 'pointer',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          fontSize: '1.5rem', boxShadow: '0 0 20px rgba(239,68,68,0.4)',
+        }}>
+          ✕
+          <span style={{ fontSize: '0.6rem', marginTop: 2 }}>Raccrocher</span>
         </button>
 
-        {/* Speaker button */}
-        <button
-          onClick={() => setSpeakerOn(s => !s)}
-          style={{
-            width: 56, height: 56, borderRadius: '50%',
-            background: speakerOn ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.15)',
-            border: !speakerOn ? '2px solid rgba(255,255,255,0.3)' : '1px solid rgba(255,255,255,0.12)',
-            color: !speakerOn ? '#fff' : 'rgba(255,255,255,0.7)',
-            cursor: 'pointer',
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            gap: '2px', transition: 'all 0.2s',
-          }}
-        >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-            {speakerOn ? (
-              <>
-                <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
-                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-              </>
-            ) : (
-              <line x1="23" y1="9" x2="17" y2="15" />
-            )}
-          </svg>
-          <span style={{ fontSize: '0.55rem', fontWeight: 600 }}>
-            {speakerOn ? 'HP' : 'HP off'}
-          </span>
+        <button onClick={() => setSpeakerOn(!speakerOn)} style={{
+          width: 56, height: 56, borderRadius: '50%',
+          background: speakerOn ? 'rgba(255,255,255,0.1)' : 'rgba(239,68,68,0.2)',
+          border: `1px solid ${speakerOn ? 'rgba(255,255,255,0.2)' : '#ef4444'}`,
+          color: speakerOn ? 'white' : '#ef4444', cursor: 'pointer',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          fontSize: '1.2rem',
+        }}>
+          {speakerOn ? '🔊' : '🔈'}
+          <span style={{ fontSize: '0.55rem', marginTop: 2 }}>HP</span>
         </button>
       </div>
     </div>
