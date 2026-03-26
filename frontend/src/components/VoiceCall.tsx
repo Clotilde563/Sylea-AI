@@ -267,7 +267,9 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
             onMessageRef.current('', res.message)
 
             // Play the greeting — try audioData first, then browser TTS
+            console.log('[VoiceCall] About to call playAndContinue')
             const playAndContinue = () => {
+              console.log('[VoiceCall] playAndContinue CALLED')
               if (res.audioData) {
                 console.log('[VoiceCall] Playing audioData...')
                 const audio = new Audio(`data:audio/mp3;base64,${res.audioData}`)
@@ -317,7 +319,12 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
               console.log('[VoiceCall] Browser TTS started')
             }
 
-            playAndContinue()
+            try {
+              playAndContinue()
+            } catch(err) {
+              console.log('[VoiceCall] playAndContinue ERROR:', err)
+              startRecognitionRef.current()
+            }
           })
           .catch((e) => {
             console.log('[VoiceCall] Greeting error:', e)
@@ -358,8 +365,8 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
 
   return (
     <div style={{
-      position: 'fixed', inset: 0, zIndex: 2000,
-      background: 'radial-gradient(ellipse at center, rgba(20,0,0,0.95), #050510)',
+      position: 'fixed', inset: 0, zIndex: 9999,
+      background: 'radial-gradient(ellipse at center, rgba(20,0,0,0.98), #050510)',
       display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
       opacity: fadeIn ? 1 : 0, transition: 'opacity 0.5s ease',
     }}>
