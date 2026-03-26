@@ -402,6 +402,12 @@ function ChartSousObjectifs({
     // However, since impact_net is the main probability impact, not the SO progression delta,
     // we use a simpler approach: accumulate SO progression from decisions.
 
+    // Build a lookup from SO titre → SO id (sous_objectif_impacte stores the titre)
+    const titreToId: Record<string, string> = {}
+    for (const so of sousObjectifs) {
+      titreToId[so.titre] = so.id
+    }
+
     // Start all SOs at 0%
     const soProgression: Record<string, number> = {}
     for (const so of sousObjectifs) {
@@ -417,8 +423,9 @@ function ChartSousObjectifs({
     // Process decisions in chronological order
     for (const d of sorted) {
       if (!d.sous_objectif_impacte) continue
-      const soId = d.sous_objectif_impacte
-      if (!timelines.has(soId)) continue
+      // sous_objectif_impacte contains the SO titre, not the SO id
+      const soId = titreToId[d.sous_objectif_impacte]
+      if (!soId || !timelines.has(soId)) continue
 
       const tMs = Math.max(0, new Date(d.cree_le).getTime() - t0)
       const impact = Math.abs(d.impact_net ?? 0)
