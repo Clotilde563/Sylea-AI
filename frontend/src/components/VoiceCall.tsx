@@ -153,73 +153,70 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
 
     const recognition = new SR()
     recognition.lang = 'fr-FR'
-    recognition.continuous = true
-    recognition.interimResults = true
-    finalTranscriptRef.current = ''
+    recognition.continuous = false  // Single phrase mode — more reliable
+    recognition.interimResults = false  // Only final results
+
+    console.log('[VoiceCall] Creating recognition instance...')
 
     recognition.onstart = () => {
-      console.log('[VoiceCall] Recognition started')
+      console.log('[VoiceCall] Recognition STARTED — speak now')
       setStatus('Parle maintenant...')
+      setIsSpeaking('idle')
     }
 
     recognition.onresult = (event: any) => {
       if (!activeRef.current) return
-      let interim = ''
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        if (event.results[i].isFinal) {
-          finalTranscriptRef.current += event.results[i][0].transcript + ' '
-        } else {
-          interim = event.results[i][0].transcript
-        }
+      const text = event.results[0][0].transcript.trim()
+      console.log('[VoiceCall] Got result:', text)
+      if (text) {
+        setTranscript(text)
+        setIsSpeaking('user')
+        // Send to agent immediately
+        sendToAgent(text)
       }
-      setTranscript(finalTranscriptRef.current + interim)
-      setIsSpeaking('user')
-      setStatus('Ecoute...')
-
-      // Reset silence timer
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current)
-      silenceTimerRef.current = setTimeout(() => {
-        const text = finalTranscriptRef.current.trim()
-        if (text && activeRef.current) {
-          // Stop recognition before sending
-          if (recognitionRef.current) {
-            try { recognitionRef.current.abort() } catch { /* */ }
-            recognitionRef.current = null
-          }
-          finalTranscriptRef.current = ''
-          setTranscript('')
-          sendToAgent(text)
-        }
-      }, 2500) // 2.5 seconds of silence
     }
 
     recognition.onerror = (event: any) => {
       console.log('[VoiceCall] Recognition error:', event.error)
-      if (activeRef.current && event.error !== 'aborted' && event.error !== 'not-allowed') {
-        setTimeout(() => { if (activeRef.current) startRecognition() }, 1000)
+      if (event.error === 'no-speech') {
+        // No speech detected — just restart
+        if (activeRef.current) {
+          console.log('[VoiceCall] No speech, restarting...')
+          setTimeout(() => { if (activeRef.current) startRecognitionRef.current() }, 300)
+        }
+      } else if (event.error === 'aborted') {
+        // Intentionally stopped
+      } else if (event.error === 'not-allowed') {
+        setStatus('Permission micro refusee')
+      } else {
+        if (activeRef.current) {
+          setTimeout(() => { if (activeRef.current) startRecognitionRef.current() }, 1000)
+        }
       }
     }
 
     recognition.onend = () => {
       console.log('[VoiceCall] Recognition ended')
-      // Auto-restart if still active and not during agent response
-      if (activeRef.current && recognitionRef.current === recognition) {
-        setTimeout(() => { if (activeRef.current) startRecognition() }, 500)
-      }
+      // In single-phrase mode, recognition ends after each result
+      // Only restart if we're not in agent-speaking mode
+      // sendToAgent will restart after agent finishes
     }
 
     recognitionRef.current = recognition
     try {
       recognition.start()
+      console.log('[VoiceCall] recognition.start() called')
     } catch (e) {
       console.log('[VoiceCall] Start error:', e)
-      setTimeout(() => { if (activeRef.current) startRecognition() }, 1000)
+      setTimeout(() => { if (activeRef.current) startRecognitionRef.current() }, 1000)
     }
   }, [isMuted, sendToAgent])
 
-  // Use a ref for startRecognition to avoid stale closures
+  // Use refs to avoid stale closures
   const startRecognitionRef = useRef(startRecognition)
   startRecognitionRef.current = startRecognition
+  const sendToAgentRef = useRef(sendToAgent)
+  sendToAgentRef.current = sendToAgent
 
   // Handle "Commencer l'appel" click
   const handleStartCall = useCallback(() => {
@@ -231,18 +228,47 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
       setCallDuration(prev => prev + 1)
     }, 1000)
 
-    // Request mic permission then start recognition
+    // Request mic permission
     navigator.mediaDevices.getUserMedia({ audio: true })
       .then((stream) => {
         stream.getTracks().forEach(t => t.stop())
         console.log('[VoiceCall] Mic permission granted')
-        // Use ref to get the latest version of startRecognition
-        startRecognitionRef.current()
+        // Agent speaks first (like answering a phone call)
+        setStatus('Agent decroche...')
+        setIsSpeaking('agent')
+        // Send a greeting request to get the agent to speak first
+        const greetMsgs = [{ role: 'user', content: '[APPEL VOCAL] L utilisateur vient de lancer un appel vocal avec toi. Decroche et dis-lui bonjour naturellement en 1 phrase.' }]
+        chatEndpoint(greetMsgs)
+          .then((res) => {
+            if (!activeRef.current) return
+            onMessage('', res.message)
+            // Play the greeting
+            if (res.audioData) {
+              const audio = new Audio(`data:audio/mp3;base64,${res.audioData}`)
+              audioRef.current = audio
+              audio.onended = () => {
+                audioRef.current = null
+                if (activeRef.current) {
+                  setIsSpeaking('idle')
+                  setStatus('A ton tour...')
+                  startRecognitionRef.current()
+                }
+              }
+              audio.play().catch(() => { startRecognitionRef.current() })
+            } else {
+              // Fallback TTS
+              const synth = window.speechSynthesis
+              const utt = new SpeechSynthesisUtterance(res.message)
+              utt.lang = 'fr-FR'
+              utt.onend = () => { startRecognitionRef.current() }
+              synth.speak(utt)
+            }
+          })
+          .catch(() => { startRecognitionRef.current() })
       })
       .catch((err) => {
         console.log('[VoiceCall] Mic error:', err)
         setStatus('Permission micro requise')
-        startRecognitionRef.current()
       })
   }, [])
 
