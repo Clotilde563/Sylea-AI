@@ -233,6 +233,7 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
 
   // Handle "Commencer l'appel" click
   const handleStartCall = useCallback(() => {
+    activeRef.current = true  // Ensure active flag is set
     setCallStarted(true)
     setStatus('Demarrage...')
 
@@ -263,9 +264,9 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
           .then((res) => {
             console.log('[VoiceCall] Greeting received:', res.message?.substring(0, 50))
             console.log('[VoiceCall] Has audioData:', !!res.audioData)
-            if (!activeRef.current) return
+            // Don't check activeRef here — the greeting must always play
 
-            try { onMessageRef.current('', res.message) } catch(e) { console.log('[VoiceCall] onMessage error (ignored):', e) }
+            console.log('[VoiceCall] Step 1 - about to play TTS')
 
             // Play greeting — use browser TTS directly (most reliable)
             console.log('[VoiceCall] Starting TTS playback...')
