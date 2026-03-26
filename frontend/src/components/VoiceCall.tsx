@@ -217,6 +217,10 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
   startRecognitionRef.current = startRecognition
   const sendToAgentRef = useRef(sendToAgent)
   sendToAgentRef.current = sendToAgent
+  const chatEndpointRef = useRef(chatEndpoint)
+  chatEndpointRef.current = chatEndpoint
+  const onMessageRef = useRef(onMessage)
+  onMessageRef.current = onMessage
 
   // Handle "Commencer l'appel" click
   const handleStartCall = useCallback(() => {
@@ -236,12 +240,14 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
         // Agent speaks first (like answering a phone call)
         setStatus('Agent decroche...')
         setIsSpeaking('agent')
+        console.log('[VoiceCall] Calling chatEndpoint for greeting...')
         // Send a greeting request to get the agent to speak first
         const greetMsgs = [{ role: 'user', content: '[APPEL VOCAL] L utilisateur vient de lancer un appel vocal avec toi. Decroche et dis-lui bonjour naturellement en 1 phrase.' }]
-        chatEndpoint(greetMsgs)
+        chatEndpointRef.current(greetMsgs)
           .then((res) => {
+            console.log('[VoiceCall] Greeting response received:', res.message?.substring(0, 50))
             if (!activeRef.current) return
-            onMessage('', res.message)
+            onMessageRef.current('', res.message)
             // Play the greeting
             if (res.audioData) {
               const audio = new Audio(`data:audio/mp3;base64,${res.audioData}`)
