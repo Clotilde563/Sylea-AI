@@ -154,7 +154,7 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
 
               {/* Onglet 1: Aide et ressources */}
               <button
-                onClick={() => setDropdownOpen(false)}
+                onClick={() => { setDropdownOpen(false); navigate('/help') }}
                 style={{
                   display: 'flex', alignItems: 'center', gap: '0.6rem',
                   width: '100%', padding: '0.75rem 1rem',

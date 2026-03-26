@@ -1,7 +1,7 @@
 // Page de connexion / inscription Sylea.AI
 
 import { useState, useRef, type FormEvent, type KeyboardEvent, type ClipboardEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { useAuthStore } from '../auth/authStore'
 import { SyleaLogo } from '../components/SyleaLogo'
 
@@ -15,6 +15,8 @@ export default function LoginPage() {
   const [localError, setLocalError] = useState<string | null>(null)
   const [successMsg, setSuccessMsg] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [acceptCGU, setAcceptCGU] = useState(false)
+  const [acceptPrivacy, setAcceptPrivacy] = useState(false)
 
   // Verification step
   const [verificationStep, setVerificationStep] = useState(false)
@@ -34,6 +36,8 @@ export default function LoginPage() {
     setConfirmPassword('')
     setVerificationStep(false)
     setVerificationCode(['', '', '', '', '', ''])
+    setAcceptCGU(false)
+    setAcceptPrivacy(false)
   }
 
   const handleDigitChange = (index: number, value: string) => {
@@ -113,6 +117,11 @@ export default function LoginPage() {
 
     if (tab === 'register' && password.length < 6) {
       setLocalError('Le mot de passe doit contenir au moins 6 caracteres.')
+      return
+    }
+
+    if (tab === 'register' && (!acceptCGU || !acceptPrivacy)) {
+      setLocalError('Veuillez accepter les Conditions Generales et la Politique de Confidentialite.')
       return
     }
 
@@ -303,6 +312,47 @@ export default function LoginPage() {
                       onChange={(e) => setConfirmPassword(e.target.value)}
                       autoComplete="new-password"
                     />
+                  </div>
+                )}
+
+                {tab === 'register' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', marginTop: '0.25rem' }}>
+                    <label style={{
+                      display: 'flex', alignItems: 'flex-start', gap: '0.5rem',
+                      fontSize: '0.78rem', color: 'var(--text-secondary)',
+                      cursor: 'pointer', lineHeight: 1.5,
+                    }}>
+                      <input
+                        type="checkbox"
+                        checked={acceptCGU}
+                        onChange={() => setAcceptCGU(!acceptCGU)}
+                        style={{ marginTop: '0.15rem', accentColor: 'var(--accent-violet)' }}
+                      />
+                      <span>
+                        J'accepte les{' '}
+                        <Link to="/terms" style={{ color: 'var(--accent-violet-light)' }} target="_blank">
+                          Conditions Generales d'Utilisation
+                        </Link>
+                      </span>
+                    </label>
+                    <label style={{
+                      display: 'flex', alignItems: 'flex-start', gap: '0.5rem',
+                      fontSize: '0.78rem', color: 'var(--text-secondary)',
+                      cursor: 'pointer', lineHeight: 1.5,
+                    }}>
+                      <input
+                        type="checkbox"
+                        checked={acceptPrivacy}
+                        onChange={() => setAcceptPrivacy(!acceptPrivacy)}
+                        style={{ marginTop: '0.15rem', accentColor: 'var(--accent-violet)' }}
+                      />
+                      <span>
+                        J'ai lu et j'accepte la{' '}
+                        <Link to="/privacy" style={{ color: 'var(--accent-violet-light)' }} target="_blank">
+                          Politique de Confidentialite
+                        </Link>
+                      </span>
+                    </label>
                   </div>
                 )}
 
