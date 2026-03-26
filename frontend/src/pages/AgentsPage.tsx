@@ -134,6 +134,7 @@ function VoiceMessageBubble({ msg, isAgent, onSpeakToggle, isSpeaking, agentColo
   isSpeaking: boolean
   agentColor?: string  // '#ef4444' for Agent 2, default gold for Agent 1
 }) {
+  const isRed = !!agentColor && agentColor.includes('ef4444')
   const [playing, setPlaying] = useState(false)
   const [progress, setProgress] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -325,7 +326,6 @@ function VoiceMessageBubble({ msg, isAgent, onSpeakToggle, isSpeaking, agentColo
     window.speechSynthesis.speak(utterance)
   }
 
-  const isRed = !!agentColor && agentColor.includes('ef4444')
   const barColor = isRed
     ? (isAgent ? '#ef4444' : '#f87171')
     : (isAgent ? '#f59e0b' : '#fbbf24')
@@ -890,13 +890,13 @@ export default function AgentsPage() {
 
   // ── Agent 2 chat endpoint for voice call ───────────────────────────────────
   const agent2ChatEndpoint = useCallback(async (msgs: Array<{ role: string; content: string }>) => {
-    // Use the same agent chat API — the voice call sends conversation history
+    // Use Agent 2 chat API with voice type to get TTS audio back
     const chatHistory = msgs.map(m => ({
       role: m.role === 'assistant' ? 'assistant' : 'user',
       content: m.content,
-      type: 'text' as const,
+      type: 'voice' as const,
     }))
-    return api.agentChat(chatHistory, deviceCtx ?? undefined)
+    return api.agent2Chat(chatHistory, deviceCtx ?? undefined)
   }, [deviceCtx])
 
   const handleVoiceCallMessage = useCallback((userText: string, agentText: string) => {
