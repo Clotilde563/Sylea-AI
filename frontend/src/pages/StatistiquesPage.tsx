@@ -376,7 +376,8 @@ function ChartSousObjectifs({
   const windowMs = isZoomed ? cutoffMs : totalElapsedMs
 
   const elapsedDays = windowMs / MS_DAY
-  const xTicks = buildTimeTicks(elapsedDays)
+  const offsetDays = windowStartMs / MS_DAY
+  const xTicks = buildTimeTicks(elapsedDays, offsetDays)
 
   // Active SO index
   const activeIdx = sousObjectifs.findIndex(so => so.progression < 100)
@@ -779,7 +780,8 @@ function Chart2({
 
   const windowMs = isZoomed ? cutoffMs : totalElapsedMs
   const elapsedDays = windowMs / MS_DAY
-  const xTicks      = buildTimeTicks(elapsedDays)
+  const offsetDays2 = windowStartMs / MS_DAY
+  const xTicks      = buildTimeTicks(elapsedDays, offsetDays2)
 
   // ── Auto-scale Y pour les modes zoomés ────────────────────────────────────
   const allProbs = zoomedPoints.map(p => p.prob)
@@ -1019,10 +1021,9 @@ function Chart2({
       {hover && (() => {
         const tipX = hover.x > W - PAD.right - 130 ? hover.x - 130 : hover.x + 10
         const tipY = hover.y < PAD.top + 55 ? hover.y + 10 : hover.y - 55
-        // En mode zoomé, afficher le temps relatif à la fenêtre (pas absolu)
-        const relativeMs = isZoomed ? hover.elapsedMs - windowStartMs : hover.elapsedMs
-        const elapsedDaysH = relativeMs / MS_DAY
-        const ticks = buildTimeTicks(elapsedDaysH)
+        // Afficher le temps absolu (depuis le début de l'objectif)
+        const absDaysH = hover.elapsedMs / MS_DAY
+        const ticks = buildTimeTicks(absDaysH)
         const timeLabel = ticks.length > 0 ? ticks[ticks.length - 1].label : '—'
         return (
           <g>
