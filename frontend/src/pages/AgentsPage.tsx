@@ -4,6 +4,7 @@ import { useT } from '../i18n/LanguageContext'
 import { api } from '../api/client'
 import { useDeviceContext } from '../contexts/DeviceContext'
 import { useStore } from '../store/useStore'
+import VoiceCall from '../components/VoiceCall'
 
 // ── Gold variant of the Sylea logo SVG ──────────────────────────────────────
 const CX = 190, CY = 170
@@ -453,6 +454,9 @@ export default function AgentsPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
+  // Voice call state (Agent 2)
+  const [inCall, setInCall] = useState(false)
+
   // OpenAI TTS cache for speaker button on text messages
   const ttsAudioCacheRef = useRef<Map<number, string>>(new Map())
   const ttsSpeakingAudioRef = useRef<HTMLAudioElement | null>(null)
@@ -869,14 +873,513 @@ export default function AgentsPage() {
     ? `Derniere interaction : ${relativeTime(messages[messages.length - 1].timestamp)}`
     : 'Aucune interaction'
 
+  // ── Agent 2 chat endpoint for voice call ───────────────────────────────────
+  const agent2ChatEndpoint = useCallback(async (msgs: Array<{ role: string; content: string }>) => {
+    // Use the same agent chat API — the voice call sends conversation history
+    const chatHistory = msgs.map(m => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.content,
+      type: 'text' as const,
+    }))
+    return api.agentChat(chatHistory, deviceCtx ?? undefined)
+  }, [deviceCtx])
+
+  const handleVoiceCallMessage = useCallback((userText: string, agentText: string) => {
+    // Messages from voice call are saved via the chat endpoint already
+    // This callback can be used to update local state if needed
+    void userText
+    void agentText
+  }, [])
+
+  // ── Agent 2 state ──────────────────────────────────────────────────────────
+  const STORAGE_ACTIVE_2 = 'sylea_agent2_active'
+  const loadActive2 = () => { try { return localStorage.getItem(STORAGE_ACTIVE_2) === 'true' } catch { return false } }
+  const saveActive2 = (v: boolean) => { try { localStorage.setItem(STORAGE_ACTIVE_2, String(v)) } catch {} }
+
+  const [active2, setActive2] = useState(loadActive2)
+  const [showActivateModal2, setShowActivateModal2] = useState(false)
+  const [showDeactivateModal2, setShowDeactivateModal2] = useState(false)
+  const [chat2Open, setChat2Open] = useState(false)
+  const [messages2, setMessages2] = useState<AgentMessage[]>([])
+  const [inputText2, setInputText2] = useState('')
+  const [sending2, setSending2] = useState(false)
+  const [loadingMessages2, setLoadingMessages2] = useState(false)
+  const messagesEndRef2 = useRef<HTMLDivElement>(null)
+  const inputRef2 = useRef<HTMLInputElement>(null)
+  const [actionToast, setActionToast] = useState<string | null>(null)
+
+  useEffect(() => { saveActive2(active2) }, [active2])
+  useEffect(() => {
+    messagesEndRef2.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages2, chat2Open])
+  useEffect(() => {
+    if (chat2Open) inputRef2.current?.focus()
+  }, [chat2Open])
+
+  // Reminder checker
+  useEffect(() => {
+    if (!active2) return
+    const checkReminders = setInterval(async () => {
+      try {
+        const reminders = await api.agent2GetReminders()
+        const now = new Date()
+        reminders.forEach(r => {
+          const reminderTime = new Date(`${r.date}T${r.time}`)
+          if (Math.abs(now.getTime() - reminderTime.getTime()) < 60000 && !r.completed) {
+            if ('Notification' in window && Notification.permission === 'granted') {
+              new Notification('Agent Sylea 2 - Rappel', { body: r.message })
+            }
+            api.agent2CompleteReminder(r.id)
+          }
+        })
+      } catch { /* silent */ }
+    }, 30000)
+    return () => clearInterval(checkReminders)
+  }, [active2])
+
+  const handleActivate2 = () => {
+    setActive2(true)
+    setShowActivateModal2(false)
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission()
+    }
+  }
+  const handleDeactivate2 = () => {
+    setActive2(false)
+    setShowDeactivateModal2(false)
+    setChat2Open(false)
+  }
+
+  const WELCOME_MESSAGE_2 = "Salut ! Je suis ton Agent Sylea 2. Je peux envoyer des mails, rediger des textes, creer des rappels et bien plus. Qu'est-ce que je peux faire pour toi ?"
+
+  const openChat2 = useCallback(async () => {
+    setChat2Open(true)
+    setLoadingMessages2(true)
+    try {
+      const serverMessages = await api.getAgent2Messages()
+      if (serverMessages && serverMessages.length > 0) {
+        setMessages2(serverMessages.map(m => ({
+          role: m.role as 'agent' | 'user',
+          content: m.content,
+          timestamp: m.created_at,
+          type: (m.type || 'text') as 'text' | 'voice',
+          audioData: (m as any).audioData || undefined,
+        })))
+      } else {
+        setMessages2([{
+          role: 'agent', content: WELCOME_MESSAGE_2,
+          timestamp: new Date().toISOString(), type: 'text',
+        }])
+      }
+    } catch {
+      if (messages2.length === 0) {
+        setMessages2([{
+          role: 'agent', content: WELCOME_MESSAGE_2,
+          timestamp: new Date().toISOString(), type: 'text',
+        }])
+      }
+    } finally {
+      setLoadingMessages2(false)
+    }
+  }, [messages2.length])
+
+  // ── Action parsing & handling ────────────────────────────────────────────
+  interface AgentAction {
+    type: 'EMAIL' | 'TEXT' | 'REMINDER' | 'LINK' | 'COPY'
+    data: Record<string, string>
+  }
+
+  const parseActions = (content: string): { text: string; actions: AgentAction[] } => {
+    const actions: AgentAction[] = []
+    let text = content
+    const regex = /\[ACTION:(EMAIL|TEXT|REMINDER|LINK|COPY)\]([\s\S]*?)\[\/ACTION\]/g
+    let match
+    while ((match = regex.exec(content)) !== null) {
+      try {
+        const data = JSON.parse(match[2])
+        actions.push({ type: match[1] as AgentAction['type'], data })
+      } catch { /* skip malformed */ }
+      text = text.replace(match[0], '')
+    }
+    return { text: text.trim(), actions }
+  }
+
+  const handleAction = async (action: AgentAction) => {
+    switch (action.type) {
+      case 'EMAIL': {
+        try {
+          const res = await api.agent2SendEmail(action.data.to, action.data.subject, action.data.body)
+          setActionToast(res.ok ? 'Email envoye avec succes !' : `Erreur : ${res.error || 'Envoi echoue'}`)
+        } catch { setActionToast("Erreur lors de l'envoi") }
+        setTimeout(() => setActionToast(null), 3000)
+        break
+      }
+      case 'TEXT': {
+        const blob = new Blob([action.data.content], { type: 'text/plain;charset=utf-8' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url; a.download = `${action.data.title || 'document'}.txt`; a.click()
+        URL.revokeObjectURL(url)
+        setActionToast('Fichier telecharge !')
+        setTimeout(() => setActionToast(null), 3000)
+        break
+      }
+      case 'REMINDER': {
+        try {
+          await api.agent2CreateReminder(action.data.time, action.data.date, action.data.message)
+          setActionToast('Rappel cree !')
+        } catch { setActionToast('Erreur lors de la creation du rappel') }
+        setTimeout(() => setActionToast(null), 3000)
+        break
+      }
+      case 'LINK':
+        window.open(action.data.url, '_blank')
+        break
+      case 'COPY':
+        try {
+          await navigator.clipboard.writeText(action.data.text)
+          setActionToast('Copie dans le presse-papier !')
+        } catch { setActionToast('Erreur de copie') }
+        setTimeout(() => setActionToast(null), 3000)
+        break
+    }
+  }
+
+  const handleSend2 = useCallback(async (overrideText?: string) => {
+    const text = (overrideText ?? inputText2).trim()
+    if (!text || sending2) return
+    const userMsg: AgentMessage = {
+      role: 'user', content: text,
+      timestamp: new Date().toISOString(), type: 'text',
+    }
+    const updated = [...messages2, userMsg]
+    setMessages2(updated)
+    setInputText2('')
+    setSending2(true)
+    try {
+      const chatHistory = updated.map(m => ({
+        role: m.role === 'agent' ? 'assistant' : 'user',
+        content: m.content, type: m.type,
+      }))
+      const res = await api.agent2Chat(chatHistory, deviceCtx ?? undefined)
+      setMessages2(prev => [...prev, {
+        role: 'agent', content: res.message,
+        timestamp: new Date().toISOString(), type: 'text',
+        audioData: res.audioData || undefined,
+      }])
+    } catch {
+      setMessages2(prev => [...prev, {
+        role: 'agent', content: "Desole, une erreur est survenue. Reessayez dans un instant.",
+        timestamp: new Date().toISOString(), type: 'text',
+      }])
+    } finally { setSending2(false) }
+  }, [inputText2, sending2, messages2, deviceCtx])
+
+  const lastInteraction2 = messages2.length > 0
+    ? `Derniere interaction : ${relativeTime(messages2[messages2.length - 1].timestamp)}`
+    : 'Aucune interaction'
+
   // ── Future agents placeholder data ─────────────────────────────────────────
   const futureAgents = [
-    { name: 'Agent Sylea 2', subtitle: 'Assistant en ligne', desc: 'Recherches, formations, emails' },
     { name: 'Agent Sylea 3', subtitle: 'Executant de taches', desc: 'Toutes taches sur instruction' },
     { name: 'Super Agent Sylea', subtitle: 'Cerveau autonome 24/7', desc: 'Agit pour vous pendant que vous dormez' },
   ]
 
-  // ── Chat view ──────────────────────────────────────────────────────────────
+  // ── Agent 2 Chat view ────────────────────────────────────────────────────
+  if (chat2Open) {
+    return (
+      <div className="page animate-fade-in">
+        <style>{`
+          @keyframes agent-msg-in {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+          }
+          @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+          @keyframes toast-in {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+          }
+        `}</style>
+        <div className="container page-content" style={{ maxWidth: 680, margin: '0 auto', padding: '0', display: 'flex', flexDirection: 'column', height: 'calc(100vh - 3.5rem - 3rem)' }}>
+          {/* Chat header */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '0.75rem',
+            padding: '1rem 1.25rem',
+            borderBottom: '1px solid var(--border)',
+            background: 'rgba(3,7,15,0.6)',
+            backdropFilter: 'blur(12px)',
+          }}>
+            <button onClick={() => setChat2Open(false)} style={{
+              background: 'transparent', border: 'none', color: 'var(--text-muted)',
+              cursor: 'pointer', fontSize: '0.9rem', padding: '0.25rem 0.5rem',
+              borderRadius: '6px', transition: 'all 0.15s',
+            }}
+              onMouseEnter={e => e.currentTarget.style.color = '#f87171'}
+              onMouseLeave={e => e.currentTarget.style.color = 'var(--text-muted)'}
+            >
+              {'\u2190'} Retour
+            </button>
+            <svg width={24} height={24} viewBox="0 0 380 380" style={{ overflow: 'visible' }}>
+              <defs>
+                <linearGradient id="agent2-chat-g" x1="50%" y1="100%" x2="50%" y2="0%">
+                  <stop offset="0%" stopColor="#b91c1c" />
+                  <stop offset="40%" stopColor="#ef4444" />
+                  <stop offset="100%" stopColor="#f87171" />
+                </linearGradient>
+              </defs>
+              <path d={S_PATH} stroke="url(#agent2-chat-g)" strokeWidth="46" fill="none" strokeLinecap="round" />
+              <path d={S_PATH} stroke="#050810" strokeWidth="18" fill="none" strokeLinecap="butt" />
+            </svg>
+            <div style={{ flex: 1 }}>
+              <p style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)', lineHeight: 1.2 }}>Agent Sylea 2</p>
+              <p style={{ fontSize: '0.7rem', color: '#4ade80', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', display: 'inline-block' }} />
+                {t('agents.status_active')}
+              </p>
+            </div>
+          </div>
+
+          {/* Messages area */}
+          <div style={{
+            flex: 1, overflowY: 'auto', padding: '1rem 1.25rem',
+            display: 'flex', flexDirection: 'column', gap: '0.75rem',
+          }}>
+            {loadingMessages2 && (
+              <div style={{ display: 'flex', justifyContent: 'center', padding: '2rem' }}>
+                <span className="spinner spinner-sm" />
+              </div>
+            )}
+            {messages2.map((msg, idx) => {
+              const { text: msgText, actions } = msg.role === 'agent' ? parseActions(msg.content) : { text: msg.content, actions: [] }
+              return (
+                <div key={idx} style={{
+                  display: 'flex',
+                  justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                  animation: 'agent-msg-in 0.3s ease forwards',
+                }}>
+                  <div style={{ maxWidth: '80%' }}>
+                    {msgText && (
+                      <div style={{
+                        padding: '0.75rem 1rem',
+                        borderRadius: msg.role === 'user' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
+                        background: msg.role === 'user'
+                          ? 'linear-gradient(135deg, #b91c1c, #ef4444)'
+                          : 'rgba(255,255,255,0.06)',
+                        borderLeft: msg.role === 'agent' ? '3px solid #ef4444' : 'none',
+                        color: 'var(--text-primary)',
+                        fontSize: '0.88rem', lineHeight: '1.55',
+                        boxShadow: msg.role === 'user'
+                          ? '0 2px 12px rgba(239,68,68,0.3)'
+                          : '0 1px 8px rgba(0,0,0,0.25)',
+                      }}>
+                        <p style={{ margin: 0 }}>{msgText}</p>
+                        <div style={{
+                          margin: '0.35rem 0 0', fontSize: '0.65rem',
+                          color: msg.role === 'user' ? 'rgba(255,255,255,0.5)' : 'var(--text-muted)',
+                          textAlign: msg.role === 'user' ? 'right' : 'left',
+                        }}>
+                          {new Date(msg.timestamp).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+                        </div>
+                      </div>
+                    )}
+                    {/* Action cards */}
+                    {actions.map((action, ai) => (
+                      <div key={ai} style={{
+                        marginTop: '0.5rem', padding: '0.75rem',
+                        borderRadius: '12px',
+                        background: 'rgba(239,68,68,0.06)',
+                        border: '1px solid rgba(239,68,68,0.2)',
+                      }}>
+                        {action.type === 'EMAIL' && (
+                          <>
+                            <div style={{ fontSize: '0.72rem', color: '#f87171', fontWeight: 700, marginBottom: '0.35rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                              Email
+                            </div>
+                            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '0 0 0.15rem' }}>
+                              <strong>A :</strong> {action.data.to}
+                            </p>
+                            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '0 0 0.15rem' }}>
+                              <strong>Objet :</strong> {action.data.subject}
+                            </p>
+                            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '0 0 0.5rem', lineHeight: 1.4, maxHeight: '4rem', overflow: 'hidden' }}>
+                              {action.data.body?.substring(0, 200)}...
+                            </p>
+                            <div style={{ display: 'flex', gap: '0.5rem' }}>
+                              <button onClick={() => handleAction(action)} style={{
+                                padding: '0.4rem 1rem', borderRadius: '8px', border: 'none',
+                                background: '#22c55e', color: '#fff', fontSize: '0.78rem',
+                                fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
+                              }}>
+                                Envoyer
+                              </button>
+                              <button onClick={() => {
+                                try { navigator.clipboard.writeText(action.data.body) } catch {}
+                                setActionToast('Corps du mail copie !')
+                                setTimeout(() => setActionToast(null), 3000)
+                              }} style={{
+                                padding: '0.4rem 1rem', borderRadius: '8px',
+                                background: 'rgba(255,255,255,0.08)', border: '1px solid var(--border)',
+                                color: 'var(--text-muted)', fontSize: '0.78rem',
+                                fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
+                              }}>
+                                Copier
+                              </button>
+                            </div>
+                          </>
+                        )}
+                        {action.type === 'TEXT' && (
+                          <>
+                            <div style={{ fontSize: '0.72rem', color: '#f87171', fontWeight: 700, marginBottom: '0.35rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                              Document : {action.data.title}
+                            </div>
+                            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '0 0 0.5rem', lineHeight: 1.4, maxHeight: '4rem', overflow: 'hidden' }}>
+                              {action.data.content?.substring(0, 200)}...
+                            </p>
+                            <div style={{ display: 'flex', gap: '0.5rem' }}>
+                              <button onClick={() => handleAction(action)} style={{
+                                padding: '0.4rem 1rem', borderRadius: '8px', border: 'none',
+                                background: 'linear-gradient(135deg, #b91c1c, #ef4444)', color: '#fff',
+                                fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer',
+                              }}>
+                                Telecharger
+                              </button>
+                              <button onClick={() => handleAction({ type: 'COPY', data: { text: action.data.content } })} style={{
+                                padding: '0.4rem 1rem', borderRadius: '8px',
+                                background: 'rgba(255,255,255,0.08)', border: '1px solid var(--border)',
+                                color: 'var(--text-muted)', fontSize: '0.78rem',
+                                fontWeight: 600, cursor: 'pointer',
+                              }}>
+                                Copier
+                              </button>
+                            </div>
+                          </>
+                        )}
+                        {action.type === 'REMINDER' && (
+                          <>
+                            <div style={{ fontSize: '0.72rem', color: '#f87171', fontWeight: 700, marginBottom: '0.35rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                              Rappel
+                            </div>
+                            <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '0 0 0.5rem' }}>
+                              {action.data.date} a {action.data.time} - {action.data.message}
+                            </p>
+                            <button onClick={() => handleAction(action)} style={{
+                              padding: '0.4rem 1rem', borderRadius: '8px', border: 'none',
+                              background: '#22c55e', color: '#fff', fontSize: '0.78rem',
+                              fontWeight: 600, cursor: 'pointer',
+                            }}>
+                              Confirmer le rappel
+                            </button>
+                          </>
+                        )}
+                        {action.type === 'LINK' && (
+                          <>
+                            <div style={{ fontSize: '0.72rem', color: '#f87171', fontWeight: 700, marginBottom: '0.35rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                              Lien
+                            </div>
+                            <button onClick={() => handleAction(action)} style={{
+                              padding: '0.4rem 1rem', borderRadius: '8px', border: 'none',
+                              background: 'linear-gradient(135deg, #2563eb, #3b82f6)', color: '#fff',
+                              fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer',
+                              display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+                            }}>
+                              Ouvrir : {action.data.label || action.data.url}
+                            </button>
+                          </>
+                        )}
+                        {action.type === 'COPY' && (
+                          <button onClick={() => handleAction(action)} style={{
+                            padding: '0.4rem 1rem', borderRadius: '8px', border: 'none',
+                            background: 'rgba(255,255,255,0.08)', color: 'var(--text-secondary)',
+                            fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer',
+                            border: '1px solid var(--border)',
+                          }}>
+                            Copier dans le presse-papier
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )
+            })}
+            {sending2 && (
+              <div style={{ display: 'flex', justifyContent: 'flex-start', animation: 'agent-msg-in 0.3s ease forwards' }}>
+                <div style={{
+                  padding: '0.75rem 1.25rem', borderRadius: '16px 16px 16px 4px',
+                  background: 'rgba(255,255,255,0.06)', borderLeft: '3px solid #ef4444',
+                  display: 'flex', alignItems: 'center', gap: '0.4rem',
+                }}>
+                  <span className="spinner spinner-sm" />
+                  <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>{t('agents.thinking')}</span>
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef2} />
+          </div>
+
+          {/* Input bar */}
+          <div style={{
+            padding: '0.75rem 1.25rem', borderTop: '1px solid var(--border)',
+            background: 'rgba(3,7,15,0.6)', backdropFilter: 'blur(12px)',
+            display: 'flex', alignItems: 'center', gap: '0.5rem',
+          }}>
+            <input
+              ref={inputRef2}
+              type="text"
+              value={inputText2}
+              onChange={e => setInputText2(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend2() } }}
+              placeholder="Demande-moi quelque chose..."
+              style={{
+                flex: 1, background: 'rgba(255,255,255,0.06)',
+                border: '1px solid var(--border)',
+                borderRadius: '24px', padding: '0.65rem 1rem', color: 'var(--text-primary)',
+                fontSize: '0.88rem', outline: 'none', transition: 'all 0.2s',
+              }}
+              onFocus={e => e.currentTarget.style.borderColor = 'rgba(239,68,68,0.5)'}
+              onBlur={e => e.currentTarget.style.borderColor = 'var(--border)'}
+            />
+            <button
+              onClick={() => handleSend2()}
+              disabled={!inputText2.trim() || sending2}
+              style={{
+                width: 40, height: 40, borderRadius: '50%', border: 'none',
+                background: inputText2.trim() && !sending2
+                  ? 'linear-gradient(135deg, #b91c1c, #ef4444)'
+                  : 'rgba(255,255,255,0.06)',
+                color: inputText2.trim() && !sending2 ? '#fff' : 'var(--text-muted)',
+                cursor: inputText2.trim() && !sending2 ? 'pointer' : 'not-allowed',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                transition: 'all 0.2s', flexShrink: 0,
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13" />
+                <polygon points="22 2 15 22 11 13 2 9 22 2" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        {/* Action toast */}
+        {actionToast && (
+          <div style={{
+            position: 'fixed', bottom: '5rem', left: '50%', transform: 'translateX(-50%)',
+            padding: '0.6rem 1.5rem', borderRadius: '999px', zIndex: 2000,
+            background: 'rgba(34,197,94,0.9)', color: '#fff', fontSize: '0.85rem',
+            fontWeight: 600, animation: 'toast-in 0.2s ease', boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
+          }}>
+            {actionToast}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // ── Agent 1 Chat view ──────────────────────────────────────────────────
   if (chatOpen) {
     return (
       <div className="page animate-fade-in">
@@ -1318,6 +1821,161 @@ export default function AgentsPage() {
           </div>
         </div>
 
+        {/* Agent 2 — horizontal card */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '1rem',
+          background: active2
+            ? 'linear-gradient(135deg, rgba(239,68,68,0.08), rgba(248,113,113,0.03), var(--bg-surface))'
+            : 'var(--bg-surface)',
+          border: active2 ? '1px solid rgba(239,68,68,0.3)' : '1px solid var(--border)',
+          borderRadius: 'var(--radius-lg)',
+          padding: '1rem 1.25rem',
+          boxShadow: active2 ? '0 2px 20px rgba(239,68,68,0.1)' : '0 1px 8px rgba(0,0,0,0.15)',
+          transition: 'all 0.3s',
+          marginBottom: '0.75rem',
+        }}>
+          {/* Logo */}
+          <div style={{ flexShrink: 0 }}>
+            <svg width={48} height={48} viewBox="0 0 380 380" style={{ overflow: 'visible' }}>
+              <defs>
+                <linearGradient id="agent2-red-g" x1="50%" y1="100%" x2="50%" y2="0%">
+                  <stop offset="0%" stopColor="#b91c1c" />
+                  <stop offset="40%" stopColor="#ef4444" />
+                  <stop offset="100%" stopColor="#f87171" />
+                </linearGradient>
+                <filter id="agent2-red-blur">
+                  <feGaussianBlur stdDeviation="20" />
+                </filter>
+              </defs>
+              <path d={S_PATH} stroke="url(#agent2-red-g)" strokeWidth="90" fill="none" strokeLinecap="round"
+                style={{ filter: 'url(#agent2-red-blur)', opacity: 0.18 }} />
+              <path d={S_PATH} stroke="rgba(2,4,16,0.98)" strokeWidth="58" fill="none" strokeLinecap="round" />
+              <path d={S_PATH} stroke="url(#agent2-red-g)" strokeWidth="46" fill="none" strokeLinecap="round" />
+              <path d={S_PATH} stroke="#050810" strokeWidth="18" fill="none" strokeLinecap="butt" />
+              <path d={S_PATH} stroke="rgba(255,150,150,0.5)" strokeWidth="2.5" fill="none" strokeLinecap="round" />
+            </svg>
+          </div>
+
+          {/* Text center */}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h3 style={{
+              fontSize: '1rem', fontWeight: 700, margin: '0 0 0.15rem',
+              background: 'linear-gradient(135deg, #b91c1c, #ef4444, #f87171)',
+              WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+            }}>
+              Agent Sylea 2
+            </h3>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '0 0 0.25rem', lineHeight: 1.3 }}>
+              Votre assistant personnel
+            </p>
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
+              Envoi de mails, redaction de textes, rappels et notifications, appel vocal.
+            </p>
+            {active2 && (
+              <p style={{ fontSize: '0.68rem', color: 'var(--text-muted)', margin: '0.2rem 0 0', fontStyle: 'italic', opacity: 0.7 }}>
+                {lastInteraction2}
+              </p>
+            )}
+          </div>
+
+          {/* Status + buttons right */}
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.4rem', flexShrink: 0 }}>
+            {active2 ? (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+                padding: '0.2rem 0.6rem', borderRadius: '999px', fontSize: '0.65rem',
+                fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
+                background: 'rgba(74,222,128,0.1)', border: '1px solid rgba(74,222,128,0.3)',
+                color: '#4ade80', whiteSpace: 'nowrap',
+              }}>
+                <span style={{
+                  width: 6, height: 6, borderRadius: '50%', background: '#4ade80',
+                  animation: 'agent-pulse-dot 2s ease-in-out infinite',
+                }} />
+                ACTIF
+              </span>
+            ) : (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+                padding: '0.2rem 0.6rem', borderRadius: '999px', fontSize: '0.65rem',
+                fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
+                background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)',
+                color: 'var(--text-muted)', whiteSpace: 'nowrap',
+              }}>
+                INACTIF
+              </span>
+            )}
+
+            {active2 ? (
+              <>
+                <div style={{ display: 'flex', gap: '0.4rem' }}>
+                  <button
+                    onClick={openChat2}
+                    style={{
+                      padding: '0.55rem 1rem', borderRadius: 'var(--radius-md)',
+                      border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '0.82rem',
+                      background: 'linear-gradient(135deg, #b91c1c, #ef4444, #f87171)',
+                      color: '#fff', transition: 'all 0.2s', whiteSpace: 'nowrap',
+                      boxShadow: '0 2px 10px rgba(239,68,68,0.3)',
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-1px)'}
+                    onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}
+                  >
+                    Discuter
+                  </button>
+                  <button
+                    onClick={() => setInCall(true)}
+                    style={{
+                      padding: '0.55rem 0.8rem', borderRadius: 'var(--radius-md)',
+                      border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '0.82rem',
+                      background: 'linear-gradient(135deg, #b91c1c, #ef4444)',
+                      color: '#fff', transition: 'all 0.2s', whiteSpace: 'nowrap',
+                      boxShadow: '0 2px 10px rgba(239,68,68,0.3)',
+                      display: 'flex', alignItems: 'center', gap: '0.3rem',
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-1px)'}
+                    onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2z" />
+                    </svg>
+                    Appeler
+                  </button>
+                </div>
+                <button
+                  onClick={() => setShowDeactivateModal2(true)}
+                  style={{
+                    background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)',
+                    borderRadius: 'var(--radius-md)', cursor: 'pointer',
+                    color: '#ef4444', fontSize: '0.78rem', fontWeight: 600,
+                    padding: '0.4rem 1rem',
+                    transition: 'all 0.15s', whiteSpace: 'nowrap',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.15)'; e.currentTarget.style.borderColor = 'rgba(239,68,68,0.4)' }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.08)'; e.currentTarget.style.borderColor = 'rgba(239,68,68,0.2)' }}
+                >
+                  Desactiver cet agent
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={() => setShowActivateModal2(true)}
+                style={{
+                  padding: '0.55rem 1.4rem', borderRadius: 'var(--radius-md)',
+                  border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '0.85rem',
+                  background: 'linear-gradient(135deg, #b91c1c, #ef4444, #f87171)',
+                  color: '#fff', transition: 'all 0.2s', whiteSpace: 'nowrap',
+                  boxShadow: '0 2px 10px rgba(239,68,68,0.3)',
+                }}
+                onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-1px)'}
+                onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}
+              >
+                Activer cet agent
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* Future agent placeholder cards */}
         {futureAgents.map((agent, i) => (
           <div key={i} style={{
@@ -1360,6 +2018,17 @@ export default function AgentsPage() {
           </div>
         ))}
       </div>
+
+      {/* ── Voice Call overlay (Agent 2) ── */}
+      {inCall && (
+        <VoiceCall
+          onEndCall={() => setInCall(false)}
+          onMessage={handleVoiceCallMessage}
+          agentColor="#ef4444"
+          agentName="Agent Sylea 2"
+          chatEndpoint={agent2ChatEndpoint}
+        />
+      )}
 
       {/* ── Activation modal ── */}
       {showActivateModal && (
@@ -1448,6 +2117,110 @@ export default function AgentsPage() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── Agent 2 Activation modal ── */}
+      {showActivateModal2 && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 1000,
+          background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          animation: 'fadeInScale 0.2s ease',
+        }}
+          onClick={() => setShowActivateModal2(false)}
+        >
+          <div style={{
+            background: 'var(--bg-card)', border: '1px solid rgba(239,68,68,0.25)',
+            borderRadius: 'var(--radius-lg)', padding: '2rem', maxWidth: 420, width: '90%',
+            boxShadow: '0 8px 40px rgba(0,0,0,0.5)',
+          }}
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#f87171', marginBottom: '0.75rem' }}>
+              Activer l'Agent Sylea 2
+            </h3>
+            <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', lineHeight: '1.6', marginBottom: '1.5rem' }}>
+              L'Agent Sylea 2 est votre assistant personnel capable d'agir : envoi de mails, redaction de textes,
+              rappels et notifications. Il apprend a vous connaitre pour agir en votre nom.
+            </p>
+            <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowActivateModal2(false)} style={{
+                padding: '0.6rem 1.25rem', borderRadius: 'var(--radius-md)',
+                background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)',
+                color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.85rem',
+                transition: 'all 0.15s',
+              }}>
+                {t('common.annuler')}
+              </button>
+              <button onClick={handleActivate2} style={{
+                padding: '0.6rem 1.25rem', borderRadius: 'var(--radius-md)',
+                background: 'linear-gradient(135deg, #b91c1c, #ef4444)', border: 'none',
+                color: '#fff', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600,
+                transition: 'all 0.15s',
+              }}>
+                Activer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Agent 2 Deactivation modal ── */}
+      {showDeactivateModal2 && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 1000,
+          background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          animation: 'fadeInScale 0.2s ease',
+        }}
+          onClick={() => setShowDeactivateModal2(false)}
+        >
+          <div style={{
+            background: 'var(--bg-card)', border: '1px solid rgba(239,68,68,0.25)',
+            borderRadius: 'var(--radius-lg)', padding: '2rem', maxWidth: 420, width: '90%',
+            boxShadow: '0 8px 40px rgba(0,0,0,0.5)',
+          }}
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#ef4444', marginBottom: '0.75rem' }}>
+              Desactiver l'Agent Sylea 2
+            </h3>
+            <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', lineHeight: '1.6', marginBottom: '1.5rem' }}>
+              Votre Agent Sylea 2 sera mis en pause. Il ne pourra plus envoyer de mails,
+              creer des rappels ou rediger des textes pour vous.
+            </p>
+            <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowDeactivateModal2(false)} style={{
+                padding: '0.6rem 1.25rem', borderRadius: 'var(--radius-md)',
+                background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)',
+                color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.85rem',
+                transition: 'all 0.15s',
+              }}>
+                {t('common.annuler')}
+              </button>
+              <button onClick={handleDeactivate2} style={{
+                padding: '0.6rem 1.25rem', borderRadius: 'var(--radius-md)',
+                background: '#ef4444', border: 'none',
+                color: '#fff', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600,
+                transition: 'all 0.15s',
+              }}>
+                Desactiver
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Action toast for Agent 2 */}
+      {actionToast && (
+        <div style={{
+          position: 'fixed', bottom: '5rem', left: '50%', transform: 'translateX(-50%)',
+          padding: '0.6rem 1.5rem', borderRadius: '999px', zIndex: 2000,
+          background: 'rgba(34,197,94,0.9)', color: '#fff', fontSize: '0.85rem',
+          fontWeight: 600, boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
+        }}>
+          {actionToast}
         </div>
       )}
     </div>

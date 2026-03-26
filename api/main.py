@@ -31,6 +31,7 @@ except ImportError:
 
 from api.routers import profil, dilemme, historique, evenement, bilan, objectifs, service_client
 from api.routers.agent_companion import router as agent_companion_router
+from api.routers.agent_assistant import router as agent_assistant_router
 from api.auth.router import router as auth_router
 from api.schemas import HealthOut
 
@@ -66,6 +67,7 @@ app.include_router(bilan.router)
 app.include_router(objectifs.router)
 app.include_router(service_client.router)
 app.include_router(agent_companion_router)
+app.include_router(agent_assistant_router)
 app.include_router(auth_router)
 
 
