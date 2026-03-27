@@ -39,3 +39,8 @@ desktop.ini
 
 # Claude
 .claude/
+
+# Desktop (Tauri/Rust build artifacts)
+desktop/src-tauri/target/
+desktop/node_modules/
+desktop/dist/
