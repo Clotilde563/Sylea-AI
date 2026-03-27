@@ -171,7 +171,7 @@ export default function TermsPage() {
           Pour toute question relative aux presentes CGU :
         </p>
         <ul style={{ paddingLeft: '1.25rem', margin: '0.5rem 0' }}>
-          <li><strong>Email :</strong> contact@sylea.ai</li>
+          <li><strong>Email :</strong> sylea.ai.assistance@gmail.com</li>
           <li><strong>Formulaire :</strong> disponible dans la section <Link to="/help" style={{ color: 'var(--accent-violet-light)' }}>Aide et ressources</Link></li>
         </ul>
       </Section>
