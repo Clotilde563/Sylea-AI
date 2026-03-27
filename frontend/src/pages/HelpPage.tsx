@@ -300,7 +300,7 @@ export default function HelpPage() {
         <Accordion title="Comment supprimer mon compte ?">
           <p>
             Pour supprimer votre compte et toutes vos donnees, contactez-nous par email
-            a contact@sylea.ai ou via le formulaire de contact ci-dessous. La suppression
+            a sylea.ai.assistance@gmail.com ou via le formulaire de contact ci-dessous. La suppression
             sera effective dans un delai de 30 jours.
           </p>
         </Accordion>
@@ -324,7 +324,7 @@ export default function HelpPage() {
       {/* ── Contact ─────────────────────────────────────────────────── */}
       <CategorySection icon="&#x1F4E7;" title="Contact">
         <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
-          Une question ? Un probleme ? Contactez-nous par email a <strong>contact@sylea.ai</strong> ou
+          Une question ? Un probleme ? Contactez-nous par email a <strong>sylea.ai.assistance@gmail.com</strong> ou
           utilisez le formulaire ci-dessous.
         </p>
         <ContactForm />

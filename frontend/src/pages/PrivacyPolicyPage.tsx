@@ -82,8 +82,8 @@ export default function PrivacyPolicyPage() {
         <p>
           <strong>Responsable :</strong> Sylea.AI SAS<br />
           <strong>Adresse :</strong> Paris, France<br />
-          <strong>Contact :</strong> contact@sylea.ai<br />
-          <strong>Delegue a la protection des donnees (DPO) :</strong> dpo@sylea.ai
+          <strong>Contact :</strong> sylea.ai.assistance@gmail.com<br />
+          <strong>Delegue a la protection des donnees (DPO) :</strong> sylea.ai.assistance@gmail.com
         </p>
       </Section>
 
@@ -152,7 +152,7 @@ export default function PrivacyPolicyPage() {
           <li><strong>Droit a la limitation</strong> — limiter le traitement de vos donnees</li>
         </ul>
         <p style={{ marginTop: '0.75rem' }}>
-          Pour exercer vos droits, contactez-nous a : <strong>dpo@sylea.ai</strong>
+          Pour exercer vos droits, contactez-nous a : <strong>sylea.ai.assistance@gmail.com</strong>
         </p>
         <p>
           Vous disposez egalement du droit d'introduire une reclamation aupres de la CNIL
@@ -196,8 +196,8 @@ export default function PrivacyPolicyPage() {
           Pour toute question relative a cette politique de confidentialite ou a vos donnees personnelles :
         </p>
         <ul style={{ paddingLeft: '1.25rem', margin: '0.5rem 0' }}>
-          <li><strong>Email :</strong> contact@sylea.ai</li>
-          <li><strong>DPO :</strong> dpo@sylea.ai</li>
+          <li><strong>Email :</strong> sylea.ai.assistance@gmail.com</li>
+          <li><strong>DPO :</strong> sylea.ai.assistance@gmail.com</li>
           <li><strong>Formulaire :</strong> disponible dans la section <Link to="/help" style={{ color: 'var(--accent-violet-light)' }}>Aide et ressources</Link></li>
         </ul>
       </Section>

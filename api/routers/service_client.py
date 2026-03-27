@@ -49,7 +49,7 @@ FAQ :
 
 RGPD :
 - Vous avez un droit d'acces, de rectification et de suppression de vos donnees.
-- Contact : l'equipe Sylea.AI est joignable via le formulaire de contact dans la page Aide, ou par email a contact@sylea.ai.
+- Contact : l'equipe Sylea.AI est joignable via le formulaire de contact dans la page Aide, ou par email a sylea.ai.assistance@gmail.com.
 - Politique de confidentialite accessible sur /privacy.
 - Conditions generales d'utilisation sur /terms.
 """
