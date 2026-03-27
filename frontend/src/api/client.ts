@@ -368,4 +368,8 @@ export const api = {
       return null
     }
   },
+
+  // Desktop status
+  checkDesktopStatus: (): Promise<{ connected: boolean }> =>
+    request('/desktop/status'),
 }
