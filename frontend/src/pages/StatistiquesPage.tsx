@@ -422,36 +422,41 @@ function ChartSousObjectifs({
     }
 
     // Process decisions in chronological order
+    // Use impact_net directly (positif = progression monte, négatif = descend)
     for (const d of sorted) {
       if (!d.sous_objectif_impacte) continue
-      // sous_objectif_impacte contains the SO titre, not the SO id
       const soId = titreToId[d.sous_objectif_impacte]
       if (!soId || !timelines.has(soId)) continue
 
       const tMs = Math.max(0, new Date(d.cree_le).getTime() - t0)
-      const impact = Math.abs(d.impact_net ?? 0)
-      // Each decision adds some progression to the impacted SO
-      // Use impact_net as a proxy for progression increment (scaled)
-      soProgression[soId] = Math.min(100, soProgression[soId] + impact * 2)
+      const impact = d.impact_net ?? 0
+      // Impact peut être positif OU négatif
+      soProgression[soId] = Math.max(0, Math.min(100, soProgression[soId] + impact))
       timelines.get(soId)!.push({ elapsedMs: tMs, prog: soProgression[soId] })
     }
 
-    // Adjust final points to match actual current progression
+    // Pour les SO sans décisions associées, tracer une ligne plate à leur progression actuelle
+    // Pour les SO avec décisions, ajuster le dernier point et scaler proportionnellement
     for (const so of sousObjectifs) {
       const timeline = timelines.get(so.id)!
-      const lastProg = timeline[timeline.length - 1].prog
       const currentProg = so.progression
 
-      // If we have decision-based data, scale to match current progression
-      if (timeline.length > 1 && lastProg > 0) {
-        const scale = currentProg / lastProg
-        for (let i = 1; i < timeline.length; i++) {
-          timeline[i].prog = Math.min(100, timeline[i].prog * scale)
+      if (timeline.length <= 1) {
+        // Pas de décisions pour ce SO — ligne plate de 0 à la progression actuelle
+        // Interpoler linéairement sur toute la durée
+        timeline.push({ elapsedMs: totalElapsedMs, prog: currentProg })
+      } else {
+        // Des décisions existent — scaler pour matcher la progression réelle
+        const lastProg = timeline[timeline.length - 1].prog
+        if (lastProg > 0) {
+          const scale = currentProg / lastProg
+          for (let i = 1; i < timeline.length; i++) {
+            timeline[i].prog = Math.max(0, Math.min(100, timeline[i].prog * scale))
+          }
         }
+        // Ajouter le point "maintenant" à la progression actuelle
+        timeline.push({ elapsedMs: totalElapsedMs, prog: currentProg })
       }
-
-      // Add final point at current time with current progression
-      timeline.push({ elapsedMs: totalElapsedMs, prog: currentProg })
     }
 
     // Apply zoom filtering
