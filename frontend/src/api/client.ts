@@ -18,7 +18,8 @@ import type {
   DeviceContext,
 } from '../types'
 
-const BASE = '/api'
+const API_BASE = import.meta.env.VITE_API_URL || ''
+const BASE = `${API_BASE}/api`
 const AUTH_TOKEN_KEY = 'sylea_auth_token'
 
 function getAuthHeaders(): Record<string, string> {

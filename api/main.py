@@ -12,6 +12,7 @@ Lancement :
 
 from __future__ import annotations
 
+import os
 import sys
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Depends
@@ -45,17 +46,25 @@ app = FastAPI(
     description="API REST pour l'application Syléa.AI — Votre assistant de vie augmenté.",
 )
 
-# CORS : autoriser le frontend React (Vite dev sur :5173, prod sur même origine)
+# CORS : autoriser le frontend React (dev + production)
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://localhost:1420",
+    "https://sylea-ai.vercel.app",   # Production frontend
+    "https://*.vercel.app",          # Preview deployments
+    "tauri://localhost",
+    "https://tauri.localhost",
+]
+
+extra_origins = os.environ.get("CORS_ORIGINS", "")
+if extra_origins:
+    origins.extend(extra_origins.split(","))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://localhost:1420",
-        "tauri://localhost",
-        "https://tauri.localhost",
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

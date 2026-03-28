@@ -24,6 +24,7 @@ frontend/dist/
 # Environment
 .env
 .env.local
+.env.production.local
 
 # IDE
 .vscode/
@@ -33,6 +34,12 @@ frontend/dist/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Database files
+*.db
+
+# Vercel
+.vercel/
 
 # Vite cache
 .vite/
