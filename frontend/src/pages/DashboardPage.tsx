@@ -188,7 +188,13 @@ export function DashboardPage() {
 
         {/* Bandeau bilan quotidien */}
         {!bilanFait && (
-          <button onClick={() => navigate('/bilan')} className="animate-fade-in"
+          <button onClick={() => {
+            // Demander permission notifications lors de la première interaction
+            if ('Notification' in window && Notification.permission === 'default') {
+              Notification.requestPermission()
+            }
+            navigate('/bilan')
+          }} className="animate-fade-in"
             style={{ width: '100%', background: 'linear-gradient(135deg, rgba(251,191,36,0.1), rgba(251,191,36,0.03))', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 'var(--radius-lg)', padding: '1.25rem 1.5rem', marginBottom: '1rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '1rem', textAlign: 'left', transition: 'all 0.2s' }}>
             <span style={{ fontSize: '1.75rem' }}>{'\u2600'}</span>
             <div style={{ flex: 1 }}>

@@ -46,13 +46,9 @@ export function ProtectedRoute() {
     }
   }, [token])
 
-  // Request notification permission as soon as user is authenticated (not just when agent is active)
-  useEffect(() => {
-    if (!token) return
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission()
-    }
-  }, [token])
+  // Notification permission is requested on user interaction only
+  // (agent activation, bilan click, etc.) — NOT on page load
+  // Chrome blocks auto-requests without user interaction
 
   // Daily check-in reminder — notify at 8am when check-in resets
   useEffect(() => {
