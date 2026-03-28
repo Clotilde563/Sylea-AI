@@ -74,9 +74,14 @@ def send_verification_email(to_email: str, code: str):
     """
     msg.attach(MIMEText(body, "html"))
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(smtp_email, smtp_password)
-        server.send_message(msg)
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
+            server.login(smtp_email, smtp_password)
+            server.send_message(msg)
+    except Exception as e:
+        # Si l'email échoue, on log l'erreur mais on continue (le code est en mémoire)
+        print(f"[SMTP ERROR] Could not send email to {to_email}: {e}")
+        print(f"[DEV FALLBACK] Verification code for {to_email}: {code}")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
