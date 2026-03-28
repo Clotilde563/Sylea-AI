@@ -99,11 +99,7 @@ export function SyleaSplash({ onDone }: { onDone: () => void }) {
               <feGaussianBlur stdDeviation="24"/>
             </filter>
 
-            {/* ── Mask tube creux (pas de fond opaque) ── */}
-            <mask id="sp-tube-mask">
-              <path d={S} stroke="white" strokeWidth="46" fill="none" strokeLinecap="round" />
-              <path d={S} stroke="black" strokeWidth="18" fill="none" strokeLinecap="butt" />
-            </mask>
+            {/* ── Mask supprimé — logo plein pour un rendu propre ── */}
           </defs>
 
           {/* Particules de fond */}
@@ -137,16 +133,21 @@ export function SyleaSplash({ onDone }: { onDone: () => void }) {
               animation: 'sp-logo-in 1.4s cubic-bezier(0.16,1,0.3,1) 1.2s both, sp-glow 3s ease-in-out 4s infinite',
             }}
           >
-            {/* Corps gradient avec tube creux via mask */}
+            {/* Corps gradient — S plein avec dégradé */}
             <path d={S}
-              stroke="url(#sp-g)" strokeWidth="46"
+              stroke="url(#sp-g)" strokeWidth="38"
               fill="none" strokeLinecap="round"
-              mask="url(#sp-tube-mask)"
             />
 
-            {/* Reflet spéculaire */}
+            {/* Ligne intérieure plus claire pour effet de profondeur */}
             <path d={S}
-              stroke="rgba(160,225,255,0.55)" strokeWidth="2.5"
+              stroke="rgba(100,200,255,0.25)" strokeWidth="14"
+              fill="none" strokeLinecap="round"
+            />
+
+            {/* Reflet spéculaire fin */}
+            <path d={S}
+              stroke="rgba(200,240,255,0.45)" strokeWidth="3"
               fill="none" strokeLinecap="round"
             />
           </g>
