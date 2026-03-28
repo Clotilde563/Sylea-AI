@@ -47,10 +47,9 @@ def _action_to_out(action) -> ActionAgentOut:
 
 def _decision_to_out(d: Decision) -> DecisionOut:
     chosen = d.get_option_choisie()
-    # Récupérer le titre du sous-objectif impacté à partir de l'ID
-    so_titre = None
-    if hasattr(d, 'sous_objectif_id') and d.sous_objectif_id:
-        so_titre = d.sous_objectif_id  # sera résolu en titre ci-dessous
+    # Récupérer l'ID et l'impact du sous-objectif
+    so_id = getattr(d, 'sous_objectif_id', None) or None
+    so_impact = getattr(d, 'impact_sous_objectif', 0.0) or 0.0
     return DecisionOut(
         id=d.id,
         user_id=d.user_id,
@@ -66,7 +65,9 @@ def _decision_to_out(d: Decision) -> DecisionOut:
             (d.probabilite_apres - d.probabilite_avant)
             if d.probabilite_apres is not None else None
         ),
-        sous_objectif_impacte=so_titre,
+        sous_objectif_impacte=so_id,
+        sous_objectif_id=so_id,
+        impact_sous_objectif=so_impact if so_impact else None,
     )
 
 
