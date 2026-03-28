@@ -403,7 +403,8 @@ function ChartSousObjectifs({
     // However, since impact_net is the main probability impact, not the SO progression delta,
     // we use a simpler approach: accumulate SO progression from decisions.
 
-    // Build a lookup from SO titre → SO id (sous_objectif_impacte stores the titre)
+    // Build lookups : ID → SO et titre → ID (pour supporter les 2 formats)
+    const idSet = new Set(sousObjectifs.map(so => so.id))
     const titreToId: Record<string, string> = {}
     for (const so of sousObjectifs) {
       titreToId[so.titre] = so.id
@@ -422,10 +423,11 @@ function ChartSousObjectifs({
     }
 
     // Process decisions in chronological order
-    // Use impact_net directly (positif = progression monte, négatif = descend)
+    // sous_objectif_impacte peut être un ID (UUID) ou un titre
     for (const d of sorted) {
       if (!d.sous_objectif_impacte) continue
-      const soId = titreToId[d.sous_objectif_impacte]
+      // Essayer comme ID d'abord, puis comme titre
+      let soId = idSet.has(d.sous_objectif_impacte) ? d.sous_objectif_impacte : titreToId[d.sous_objectif_impacte]
       if (!soId || !timelines.has(soId)) continue
 
       const tMs = Math.max(0, new Date(d.cree_le).getTime() - t0)
