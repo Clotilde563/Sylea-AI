@@ -291,3 +291,29 @@ class DatabaseManager:
                 )
             except Exception:
                 pass  # Colonne deja existante
+            # Migration : ajouter objectif_probabilite_calculee dans profil_utilisateur
+            try:
+                self._conn.execute(
+                    "ALTER TABLE profil_utilisateur ADD COLUMN objectif_probabilite_calculee REAL DEFAULT 0"
+                )
+            except Exception:
+                pass  # Colonne deja existante
+            # Migration : ajouter profil_id dans sous_objectifs (alias de user_id pour compatibilité)
+            try:
+                self._conn.execute(
+                    "ALTER TABLE profil_utilisateur ADD COLUMN competences TEXT DEFAULT ''"
+                )
+            except Exception:
+                pass
+            try:
+                self._conn.execute(
+                    "ALTER TABLE profil_utilisateur ADD COLUMN diplomes TEXT DEFAULT ''"
+                )
+            except Exception:
+                pass
+            try:
+                self._conn.execute(
+                    "ALTER TABLE profil_utilisateur ADD COLUMN langues TEXT DEFAULT ''"
+                )
+            except Exception:
+                pass
