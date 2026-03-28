@@ -95,11 +95,9 @@ export function SyleaSplash({ onDone }: { onDone: () => void }) {
             </linearGradient>
 
             {/* ── Filtre halo flou ── */}
-            <filter id="sp-blur-halo" x="-50%" y="-50%" width="200%" height="200%">
+            <filter id="sp-blur-halo">
               <feGaussianBlur stdDeviation="24"/>
             </filter>
-
-            {/* ── Mask supprimé — logo plein pour un rendu propre ── */}
           </defs>
 
           {/* Particules de fond */}
@@ -133,21 +131,41 @@ export function SyleaSplash({ onDone }: { onDone: () => void }) {
               animation: 'sp-logo-in 1.4s cubic-bezier(0.16,1,0.3,1) 1.2s both, sp-glow 3s ease-in-out 4s infinite',
             }}
           >
-            {/* Corps gradient — S plein avec dégradé */}
+            {/*
+              Couche 1 — Bordure extérieure noire (contour sombre du tube)
+              strokeWidth 58 : donne ~6px de bordure sombre de chaque côté
+            */}
             <path d={S}
-              stroke="url(#sp-g)" strokeWidth="38"
+              stroke="rgba(2,4,16,0.98)" strokeWidth="58"
               fill="none" strokeLinecap="round"
             />
 
-            {/* Ligne intérieure plus claire pour effet de profondeur */}
+            {/*
+              Couche 2 — Corps gradient (remplit les deux rails + espace entre)
+              strokeWidth 46 : tous les pixels visibles de gradient
+            */}
             <path d={S}
-              stroke="rgba(100,200,255,0.25)" strokeWidth="14"
+              stroke="url(#sp-g)" strokeWidth="46"
               fill="none" strokeLinecap="round"
             />
 
-            {/* Reflet spéculaire fin */}
+            {/*
+              Couche 3 — Creusement central (crée le canal vide entre les deux rails)
+              strokeLinecap="butt" : ne s'étend pas aux extrémités →
+              les caps (haut/bas du S) restent solides en gradient ✓
+              strokeWidth 18 → chaque rail visible = (46-18)/2 = 14px
+            */}
             <path d={S}
-              stroke="rgba(200,240,255,0.45)" strokeWidth="3"
+              stroke="#050810" strokeWidth="18"
+              fill="none" strokeLinecap="butt"
+            />
+
+            {/*
+              Couche 4 — Reflet spéculaire sur le bord intérieur des rails
+              Donne l'impression de brillance sur le dessus du tube
+            */}
+            <path d={S}
+              stroke="rgba(160,225,255,0.55)" strokeWidth="2.5"
               fill="none" strokeLinecap="round"
             />
           </g>
