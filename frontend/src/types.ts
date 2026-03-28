@@ -131,6 +131,8 @@ export interface Decision {
   option_choisie_description: string | null
   impact_net: number | null
   sous_objectif_impacte?: string | null
+  sous_objectif_id?: string | null
+  impact_sous_objectif?: number | null
 }
 
 export interface ProbabiliteResult {

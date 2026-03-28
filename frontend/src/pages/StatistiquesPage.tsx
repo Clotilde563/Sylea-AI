@@ -423,15 +423,18 @@ function ChartSousObjectifs({
     }
 
     // Process decisions in chronological order
-    // sous_objectif_impacte peut être un ID (UUID) ou un titre
+    // sous_objectif_id est l'UUID du SO impacté, sous_objectif_impacte peut être ID ou titre
     for (const d of sorted) {
-      if (!d.sous_objectif_impacte) continue
+      // Identifier le SO impacté : préférer sous_objectif_id, fallback sur sous_objectif_impacte
+      const soRef = d.sous_objectif_id || d.sous_objectif_impacte
+      if (!soRef) continue
       // Essayer comme ID d'abord, puis comme titre
-      let soId = idSet.has(d.sous_objectif_impacte) ? d.sous_objectif_impacte : titreToId[d.sous_objectif_impacte]
+      let soId = idSet.has(soRef) ? soRef : titreToId[soRef]
       if (!soId || !timelines.has(soId)) continue
 
       const tMs = Math.max(0, new Date(d.cree_le).getTime() - t0)
-      const impact = d.impact_net ?? 0
+      // Utiliser impact_sous_objectif (delta de progression SO) au lieu de impact_net (delta probabilité)
+      const impact = d.impact_sous_objectif ?? d.impact_net ?? 0
       // Impact peut être positif OU négatif
       soProgression[soId] = Math.max(0, Math.min(100, soProgression[soId] + impact))
       timelines.get(soId)!.push({ elapsedMs: tMs, prog: soProgression[soId] })

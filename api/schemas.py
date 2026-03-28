@@ -193,6 +193,8 @@ class DecisionOut(BaseModel):
     option_choisie_description: Optional[str] = None
     impact_net: Optional[float] = None
     sous_objectif_impacte: Optional[str] = None
+    sous_objectif_id: Optional[str] = None
+    impact_sous_objectif: Optional[float] = None
 
 
 # ── Probabilité ───────────────────────────────────────────────────────────────

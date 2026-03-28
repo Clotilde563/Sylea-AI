@@ -16,27 +16,30 @@ const CX = 190, CY = 170
 const S_PATH = `M ${CX} ${CY-105} C ${CX+90} ${CY-105}, ${CX+90} ${CY-28}, ${CX} ${CY} C ${CX-90} ${CY+28}, ${CX-90} ${CY+105}, ${CX} ${CY+105}`
 
 function AgentSyleaLogo({ size = 120 }: { size?: number }) {
+  const uid = 'agent-logo'
   return (
     <svg width={size} height={size} viewBox="0 0 380 380" style={{ overflow: 'visible' }}>
       <defs>
-        <linearGradient id="agent-gold-g" x1="50%" y1="100%" x2="50%" y2="0%">
+        <linearGradient id={`${uid}-gold-g`} x1="50%" y1="100%" x2="50%" y2="0%">
           <stop offset="0%" stopColor="#d4a017" />
           <stop offset="40%" stopColor="#f59e0b" />
           <stop offset="100%" stopColor="#fbbf24" />
         </linearGradient>
-        <filter id="agent-gold-blur" x="-50%" y="-50%" width="200%" height="200%">
+        <filter id={`${uid}-blur`} x="-50%" y="-50%" width="200%" height="200%">
           <feGaussianBlur stdDeviation="20" />
         </filter>
+        {/* Mask to create the hollow tube effect without opaque background colors */}
+        <mask id={`${uid}-tube-mask`}>
+          <path d={S_PATH} stroke="white" strokeWidth="46" fill="none" strokeLinecap="round" />
+          <path d={S_PATH} stroke="black" strokeWidth="18" fill="none" strokeLinecap="butt" />
+        </mask>
       </defs>
       {/* Halo */}
-      <path d={S_PATH} stroke="url(#agent-gold-g)" strokeWidth="90" fill="none" strokeLinecap="round"
-        style={{ filter: 'url(#agent-gold-blur)', opacity: 0.18 }} />
-      {/* Outer border */}
-      <path d={S_PATH} stroke="rgba(2,4,16,0.98)" strokeWidth="58" fill="none" strokeLinecap="round" />
-      {/* Gold body */}
-      <path d={S_PATH} stroke="url(#agent-gold-g)" strokeWidth="46" fill="none" strokeLinecap="round" />
-      {/* Inner hollow */}
-      <path d={S_PATH} stroke="#050810" strokeWidth="18" fill="none" strokeLinecap="butt" />
+      <path d={S_PATH} stroke={`url(#${uid}-gold-g)`} strokeWidth="90" fill="none" strokeLinecap="round"
+        style={{ filter: `url(#${uid}-blur)`, opacity: 0.18 }} />
+      {/* Gold tube body with hollow center via mask */}
+      <path d={S_PATH} stroke={`url(#${uid}-gold-g)`} strokeWidth="46" fill="none" strokeLinecap="round"
+        mask={`url(#${uid}-tube-mask)`} />
       {/* Specular highlight */}
       <path d={S_PATH} stroke="rgba(255,230,150,0.5)" strokeWidth="2.5" fill="none" strokeLinecap="round" />
     </svg>

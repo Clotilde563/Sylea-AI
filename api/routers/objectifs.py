@@ -310,7 +310,7 @@ async def generer_taches(
     device_context = format_device_context(data.contexte_appareil)
     prompt = (
         "Tu es un coach de vie expert. Genere un plan d'action CONCRET pour aujourd'hui "
-        "pour aider l'utilisateur a avancer vers son objectif.\n\n"
+        "avec des VRAIES RESSOURCES GRATUITES pour aider l'utilisateur a avancer vers son objectif.\n\n"
         f"PROFIL: {profil.nom}, {profil.age} ans, {profil.profession}\n"
         f"OBJECTIF: {profil.objectif.description if profil.objectif else 'Non defini'}\n"
         f"SOUS-OBJECTIF ACTUEL (a prioriser): {so_prioritaire}\n"
@@ -320,48 +320,73 @@ async def generer_taches(
         f"PROFIL COMPLET:\n{ctx}\n\n"
         f"SOUS-OBJECTIFS:\n{so_ctx}\n\n"
         "REGLES STRICTES:\n"
-        "1. Genere 3 a 5 taches VARIEES — PAS juste du code. Mix entre:\n"
-        "   - APPRENTISSAGE: Liens vers des formations/videos/articles REELS et POPULAIRES\n"
-        "     Utilise des plateformes connues: YouTube, Udemy, OpenClassrooms, freeCodeCamp, Coursera, Khan Academy\n"
-        "     Donne le VRAI titre de la video/cours et le VRAI lien\n"
-        "   - LECTURE: Articles, blogs, livres recommandes avec liens\n"
-        "   - ACTION CONCRETE: Une tache specifique, mesurable, realisable aujourd'hui\n"
-        "   - REFLEXION: Question de reflexion ou exercice mental sur l'objectif\n"
-        "   - RESEAU: Contacter quelqu'un, poster sur LinkedIn, rejoindre une communaute\n\n"
-        "2. Chaque tache doit avoir:\n"
-        '   - Un titre court et motivant (pas "Exercice 1")\n'
-        "   - Une description de 1-2 phrases\n"
-        '   - Une duree estimee (ex: "30 min", "1h")\n'
-        "   - Un lien URL si applicable (formation, video, article)\n"
-        '   - Un type: "apprentissage", "action", "lecture", "reflexion", "reseau"\n'
-        '   - Une icone selon le type: apprentissage="\U0001F393", lecture="\U0001F4D6", '
-        'action="\U0001F3AF", reflexion="\U0001F4A1", reseau="\U0001F91D"\n\n'
-        "3. Les taches doivent etre CONCRETES et REALISABLES aujourd'hui\n"
-        "4. Adapte au niveau et a la situation de l'utilisateur\n"
-        "5. Si l'utilisateur est debutant, propose des ressources pour debutants\n"
-        "6. Varie les types — jamais 5 taches du meme type\n\n"
+        "1. Genere 4 a 5 taches VARIEES avec un MIX OBLIGATOIRE de ces types:\n\n"
+        '   \U0001F3A5 TYPE "video" — Regarder un tutoriel video (OBLIGATOIRE: au moins 1)\n'
+        "     Propose des VRAIES videos YouTube de chaines populaires et reconnues:\n"
+        "     - freeCodeCamp (anglais, cours complets gratuits)\n"
+        "     - Traversy Media (anglais, tutoriels pratiques)\n"
+        "     - The Net Ninja (anglais, series structurees)\n"
+        "     - Grafikart (francais, dev web et plus)\n"
+        "     - Fireship (anglais, explications rapides)\n"
+        "     - Web Dev Simplified (anglais)\n"
+        "     - Melvynx (francais, React/Next.js)\n"
+        "     - Benjamin Code (francais, dev web)\n"
+        "     Donne le VRAI lien YouTube (https://www.youtube.com/watch?v=ID ou https://youtu.be/ID)\n"
+        "     Donne le VRAI titre de la video et le nom de la chaine\n\n"
+        '   \U0001F4D6 TYPE "lecture" — Lire un article ou documentation (OBLIGATOIRE: au moins 1)\n'
+        "     Propose des VRAIS liens vers:\n"
+        "     - MDN Web Docs (https://developer.mozilla.org/...)\n"
+        "     - dev.to articles populaires (https://dev.to/...)\n"
+        "     - Documentation officielle du langage/framework\n"
+        "     - freeCodeCamp articles (https://www.freecodecamp.org/news/...)\n"
+        "     - OpenClassrooms cours gratuits (https://openclassrooms.com/fr/courses/...)\n\n"
+        '   \U0001F4BB TYPE "pratique" — Pratiquer sur une plateforme interactive\n'
+        "     Propose des VRAIS exercices sur:\n"
+        "     - Codewars (https://www.codewars.com/kata/...)\n"
+        "     - HackerRank (https://www.hackerrank.com/challenges/...)\n"
+        "     - LeetCode (https://leetcode.com/problems/...)\n"
+        "     - freeCodeCamp exercices (https://www.freecodecamp.org/learn/...)\n"
+        "     - Exercism (https://exercism.org/tracks/...)\n"
+        "     - Codecademy gratuit (https://www.codecademy.com/learn/...)\n\n"
+        '   \U0001F9E0 TYPE "reflexion" — Reflechir, planifier, journaliser (pas de lien necessaire)\n'
+        "     Exemple: ecrire ses objectifs, faire un bilan, definir des priorites\n\n"
+        '   \U0001F91D TYPE "reseau" — Reseauter, se connecter, partager\n'
+        "     Exemple: poster sur LinkedIn, rejoindre un Discord/Slack, contacter un mentor\n"
+        "     Liens possibles: LinkedIn, meetup.com, communautes Discord\n\n"
+        "2. Chaque tache DOIT avoir:\n"
+        '   - "titre": titre court et motivant (pas "Exercice 1", mais le vrai titre de la ressource)\n'
+        '   - "description": 1-2 phrases expliquant POURQUOI cette tache aide le sous-objectif actuel\n'
+        '   - "duree": duree estimee realiste (ex: "20 min", "45 min", "1h")\n'
+        '   - "lien": URL REEL et VALIDE vers la ressource (sauf pour reflexion)\n'
+        '   - "type": un des types ci-dessus (video, lecture, pratique, reflexion, reseau)\n'
+        '   - "icone": emoji selon le type (\U0001F3A5, \U0001F4D6, \U0001F4BB, \U0001F9E0, \U0001F91D)\n\n'
+        "3. QUALITE DES LIENS — C'est CRUCIAL:\n"
+        "   - Donne UNIQUEMENT des liens vers des ressources qui EXISTENT REELLEMENT\n"
+        "   - Prefere les ressources GRATUITES et POPULAIRES\n"
+        "   - Pour YouTube, donne des liens vers des videos SPECIFIQUES (pas juste la chaine)\n"
+        "   - Pour les cours, donne le lien vers le MODULE SPECIFIQUE pertinent\n"
+        "   - Si tu n'es pas sur qu'un lien existe, donne le lien vers la PAGE PRINCIPALE\n"
+        "     de la plateforme (ex: https://www.freecodecamp.org/learn/) plutot qu'un faux lien\n\n"
+        "4. Les taches doivent etre CONCRETES et REALISABLES aujourd'hui\n"
+        "5. Adapte au niveau et a la situation de l'utilisateur\n"
+        "6. Varie les types — JAMAIS 3 taches du meme type, mixe obligatoirement\n\n"
         "PERSONNALISATION IMPORTANTE:\n"
-        "- Regarde le REVENU ANNUEL : si l'utilisateur a des moyens financiers, "
-        "recommande d'ACHETER des outils, formations, abonnements, logiciels ou services.\n"
-        "- Regarde les COMPETENCES et DIPLOMES : adapte le niveau de difficulte.\n"
-        "- Regarde le TEMPS DISPONIBLE (heures/jour) : si peu de temps, propose des micro-taches.\n"
-        "- Si l'utilisateur a deja des connaissances, propose des taches d'ACTION CONCRETE.\n\n"
-        "IMPORTANT: Pour les liens YouTube/formations, donne des VRAIS liens vers des ressources "
-        "populaires et reconnues.\n"
-        'Par exemple pour le dev web:\n'
-        '- "https://www.youtube.com/watch?v=..." (vraies videos populaires)\n'
-        '- "https://openclassrooms.com/fr/courses/..."\n'
-        '- "https://www.freecodecamp.org/learn/..."\n'
-        '- "https://www.udemy.com/course/..."\n\n'
+        "- COMPETENCES et DIPLOMES: adapte le niveau de difficulte des ressources\n"
+        "- LANGUES: si l'utilisateur parle francais, prefere les ressources en francais\n"
+        "  (Grafikart, OpenClassrooms, Melvynx) sinon en anglais\n"
+        "- TEMPS DISPONIBLE (heures/jour): si peu de temps, propose des micro-taches (15-20 min)\n"
+        "- REVENU ANNUEL: si l'utilisateur a les moyens, suggere aussi des formations payantes\n"
+        "  (Udemy, Formation en ligne, livres) en plus des gratuites\n"
+        "- Si l'utilisateur a deja des connaissances avancees, propose des ressources avancees\n\n"
         "CONTINUITE DES TACHES:\n"
         "1. Si des TACHES NON COMPLETEES HIER sont listees, REPROPOSE-LES A L'IDENTIQUE "
         "(copie exacte de la description). Ce sont les priorites du jour.\n"
-        "2. Complete avec de nouvelles taches pour arriver a 4 au total.\n"
+        "2. Complete avec de nouvelles taches pour arriver a 4-5 au total.\n"
         "3. Pour les nouvelles taches, regarde les taches COMPLETEES et propose la SUITE LOGIQUE.\n\n"
         f"{past_ctx}\n"
-        "Reponds UNIQUEMENT en JSON valide:\n"
-        '[{"titre": "...", "description": "...", "duree": "30 min", "type": "apprentissage", '
-        '"lien": "https://...", "icone": "\U0001F393"}, ...]'
+        "Reponds UNIQUEMENT en JSON valide (pas de markdown, pas de commentaires):\n"
+        '[{"titre": "...", "description": "...", "duree": "30 min", "type": "video", '
+        '"lien": "https://www.youtube.com/watch?v=...", "icone": "\U0001F3A5"}, ...]'
     )
     try:
         raw = await _call_claude_json(prompt, max_tokens=2500)
