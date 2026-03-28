@@ -35,7 +35,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   login: async (email: string, password: string) => {
     set({ loading: true, error: null })
     try {
-      const base = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+      const base = import.meta.env.VITE_API_URL || ''
       const res = await fetch(`${base}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -61,7 +61,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   register: async (email: string, password: string) => {
     set({ loading: true, error: null })
     try {
-      const base = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+      const base = import.meta.env.VITE_API_URL || ''
       const res = await fetch(`${base}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -93,7 +93,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   verifyCode: async (email: string, code: string) => {
     set({ loading: true, error: null })
     try {
-      const base = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+      const base = import.meta.env.VITE_API_URL || ''
       const res = await fetch(`${base}/api/auth/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
