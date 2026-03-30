@@ -71,11 +71,19 @@ def _load_agent_messages(
     db: DatabaseManager, auth_user_id: str, limit: int = 50,
 ) -> list[dict]:
     """Load recent messages from agent_messages table."""
-    cursor = db.conn.execute(
-        "SELECT id, role, content, type, created_at, audio_data FROM agent_messages "
-        "WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT ?",
-        (auth_user_id, limit),
-    )
+    try:
+        cursor = db.conn.execute(
+            "SELECT id, role, content, type, created_at, audio_data FROM agent_messages "
+            "WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT ?",
+            (auth_user_id, limit),
+        )
+    except Exception:
+        # Fallback if audio_data column doesn't exist yet
+        cursor = db.conn.execute(
+            "SELECT id, role, content, type, created_at, '' FROM agent_messages "
+            "WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT ?",
+            (auth_user_id, limit),
+        )
     rows = cursor.fetchall()
     # Reverse so oldest first
     return [

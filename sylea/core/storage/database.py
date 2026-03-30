@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS agent_messages (
     content TEXT NOT NULL,
     type TEXT DEFAULT 'text',
     created_at TEXT NOT NULL,
+    audio_data TEXT DEFAULT '',
     FOREIGN KEY (auth_user_id) REFERENCES users(id)
 );
 """
