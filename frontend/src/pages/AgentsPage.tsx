@@ -6,7 +6,7 @@ import { useDeviceContext } from '../contexts/DeviceContext'
 import { useStore } from '../store/useStore'
 
 // Agent 2 feature flag — set to true when desktop version is ready
-const AGENT2_ENABLED = false
+const AGENT2_ENABLED = true
 
 // VoiceCall is only used by Agent 2 — import kept but component only rendered when AGENT2_ENABLED is true
 import VoiceCall from '../components/VoiceCall'

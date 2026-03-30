@@ -37,6 +37,7 @@ class Agent2ChatIn(BaseModel):
 class Agent2ChatOut(BaseModel):
     message: str
     choices: list[str] | None = None
+    actions: list[dict] | None = None
     audioData: str | None = None
 
 
@@ -509,8 +510,36 @@ async def agent2_chat(
             recent = _load_agent2_messages(db, user_id, limit=20)
             await _extract_and_update_profile(db, user_id, recent)
 
+    # Parse actions from response and send to desktop via WebSocket
+    actions = []
+    import re as _re
+    for match in _re.finditer(r'\[ACTION:(\w+)\](.*?)\[/ACTION\]', agent_response, _re.DOTALL):
+        action_type = match.group(1)
+        try:
+            action_data = json.loads(match.group(2))
+            actions.append({"type": action_type, "data": action_data})
+        except Exception:
+            pass
+
+    # Clean action blocks from displayed message
+    clean_message = _re.sub(r'\[ACTION:\w+\].*?\[/ACTION\]', '', agent_response, flags=_re.DOTALL).strip()
+
+    # Send actions to desktop via WebSocket
+    if user_id and actions:
+        try:
+            from api.websocket import ws_manager
+            asyncio.create_task(ws_manager.send_to_user(user_id, {
+                "type": "agent_action",
+                "agent": "agent2",
+                "message": clean_message,
+                "actions": actions,
+            }))
+        except Exception:
+            pass
+
     return Agent2ChatOut(
-        message=agent_response,
+        message=clean_message or agent_response,
+        actions=actions if actions else None,
         audioData=agent_audio_data if agent_audio_data else None,
     )
 
