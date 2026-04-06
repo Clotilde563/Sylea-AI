@@ -7,35 +7,30 @@ import { api } from '../api/client'
 import { deltaFromImpact } from '../utils/duration'
 import { useT } from '../i18n/LanguageContext'
 import { useDeviceContext } from '../contexts/DeviceContext'
+import { AgentSyleaLogo } from '../components/AgentSyleaLogo'
+import { AGENT_COLORS } from '../constants/agentColors'
 import type { AnalyseEvenement } from '../types'
 
 type Phase = 'form' | 'loading' | 'result' | 'done'
 
-// ── Agent Sylea Logo (gold S) ────────────────────────────────────────────────
-const CX = 190, CY = 170
-const S_PATH = `M ${CX} ${CY-105} C ${CX+90} ${CY-105}, ${CX+90} ${CY-28}, ${CX} ${CY} C ${CX-90} ${CY+28}, ${CX-90} ${CY+105}, ${CX} ${CY+105}`
-
-function AgentSyleaLogo({ size = 24 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 380 380" style={{ overflow: 'visible' }}>
-      <defs>
-        <linearGradient id="evt-agent-gold-g" x1="50%" y1="100%" x2="50%" y2="0%">
-          <stop offset="0%" stopColor="#d4a017" />
-          <stop offset="40%" stopColor="#f59e0b" />
-          <stop offset="100%" stopColor="#fbbf24" />
-        </linearGradient>
-        <filter id="evt-agent-gold-blur" x="-50%" y="-50%" width="200%" height="200%">
-          <feGaussianBlur stdDeviation="20" />
-        </filter>
-      </defs>
-      <path d={S_PATH} stroke="url(#evt-agent-gold-g)" strokeWidth="90" fill="none" strokeLinecap="round"
-        style={{ filter: 'url(#evt-agent-gold-blur)', opacity: 0.18 }} />
-      <path d={S_PATH} stroke="rgba(2,4,16,0.98)" strokeWidth="58" fill="none" strokeLinecap="round" />
-      <path d={S_PATH} stroke="url(#evt-agent-gold-g)" strokeWidth="46" fill="none" strokeLinecap="round" />
-      <path d={S_PATH} stroke="#050810" strokeWidth="18" fill="none" strokeLinecap="butt" />
-      <path d={S_PATH} stroke="rgba(255,230,150,0.5)" strokeWidth="2.5" fill="none" strokeLinecap="round" />
-    </svg>
-  )
+// ── Active agent detection ───────────────────────────────────────────────────
+function getActiveAgent(): { id: 1 | 2 | 3; name: string; colors: { primary: string; gradient: string; bg: string; border: string; btnBg: string; btnColor: string } } | null {
+  const a1 = localStorage.getItem('sylea_agent1_active') === 'true'
+  const a2 = localStorage.getItem('sylea_agent2_active') === 'true'
+  const a3 = localStorage.getItem('sylea_agent3_active') === 'true'
+  if (a3) return {
+    id: 3, name: 'Agent Sylea 3',
+    colors: { primary: AGENT_COLORS.agent3.primary, gradient: 'linear-gradient(135deg, #1e3a5f, #2563eb, #d4a017, #fbbf24)', bg: 'rgba(37,99,235,0.08)', border: 'rgba(37,99,235,0.3)', btnBg: 'linear-gradient(135deg, #2563eb, #d4a017)', btnColor: 'white' },
+  }
+  if (a2) return {
+    id: 2, name: 'Agent Sylea 2',
+    colors: { primary: AGENT_COLORS.agent2.primary, gradient: 'linear-gradient(135deg, #b91c1c, #ef4444, #f87171)', bg: 'rgba(239,68,68,0.08)', border: 'rgba(239,68,68,0.3)', btnBg: 'linear-gradient(135deg, #b91c1c, #ef4444)', btnColor: 'white' },
+  }
+  if (a1) return {
+    id: 1, name: 'Agent Sylea 1',
+    colors: { primary: AGENT_COLORS.agent1.primary, gradient: 'linear-gradient(135deg, #d4a017, #f59e0b, #fbbf24)', bg: 'rgba(212,160,23,0.08)', border: 'rgba(212,160,23,0.3)', btnBg: 'linear-gradient(135deg, #d4a017, #f59e0b)', btnColor: '#0d0d14' },
+  }
+  return null
 }
 
 export function EvenementPage() {
@@ -274,8 +269,8 @@ export function EvenementPage() {
         {phase === 'form' && (
           <div className="card animate-fade-in-scale" style={{ maxWidth: '600px', margin: '0 auto' }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-              {/* Block if agent is inactive */}
-              {localStorage.getItem('sylea_agent1_active') !== 'true' && (
+              {/* Block if no agent is active */}
+              {!getActiveAgent() && (
                 <div style={{
                   padding: '1.5rem', borderRadius: 'var(--radius-lg)',
                   background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.2)',
@@ -284,7 +279,7 @@ export function EvenementPage() {
                 }}>
                   <AgentSyleaLogo size={36} />
                   <p style={{ color: 'var(--text-primary)', fontSize: '0.88rem', fontWeight: 600, margin: 0 }}>
-                    Activez l'Agent Sylea 1 pour enregistrer des evenements
+                    Activez un Agent Sylea pour enregistrer des evenements
                   </p>
                   <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', margin: 0, maxWidth: 400 }}>
                     L'agent enrichit le contexte de vos analyses pour des recommandations plus precises et personnalisees.
@@ -294,11 +289,11 @@ export function EvenementPage() {
                     style={{ marginTop: '0.25rem', padding: '0.55rem 1.5rem', fontSize: '0.82rem' }}
                     onClick={() => navigate('/agents')}
                   >
-                    Activer l'Agent 1
+                    Activer un Agent
                   </button>
                 </div>
               )}
-              {localStorage.getItem('sylea_agent1_active') === 'true' && (<>
+              {getActiveAgent() && (<>
               <div className="input-group">
                 <label className="input-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <span>
@@ -346,25 +341,28 @@ export function EvenementPage() {
               </div>
 
               {/* Context-gathering panel */}
-              {contextNeeded && contextQuestion && (
+              {contextNeeded && contextQuestion && (() => {
+                const ag = getActiveAgent()
+                const c = ag?.colors || { primary: '#d4a017', gradient: 'linear-gradient(135deg, #d4a017, #f59e0b, #fbbf24)', bg: 'rgba(212,160,23,0.08)', border: 'rgba(212,160,23,0.3)', btnBg: 'linear-gradient(135deg, #d4a017, #f59e0b)', btnColor: '#0d0d14' }
+                return (
                 <div
                   className="animate-fade-in"
                   style={{
-                    background: 'linear-gradient(135deg, rgba(212,160,23,0.08), rgba(245,158,11,0.04))',
-                    border: '1px solid rgba(212,160,23,0.3)',
+                    background: `linear-gradient(135deg, ${c.bg}, transparent)`,
+                    border: `1px solid ${c.border}`,
                     borderRadius: 'var(--radius-lg)',
                     padding: '1.25rem',
                   }}
                 >
                   {/* Agent header */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.75rem' }}>
-                    <AgentSyleaLogo size={24} />
+                    <AgentSyleaLogo size={24} color={c.primary} />
                     <span style={{
                       fontWeight: 700, fontSize: '0.85rem',
-                      background: 'linear-gradient(135deg, #d4a017, #f59e0b, #fbbf24)',
+                      background: c.gradient,
                       WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
                     }}>
-                      Agent Sylea 1
+                      {ag?.name || 'Agent Sylea 1'}
                     </span>
                   </div>
 
@@ -374,7 +372,7 @@ export function EvenementPage() {
                     borderRadius: 'var(--radius-md)',
                     padding: '0.85rem 1rem',
                     marginBottom: '0.85rem',
-                    borderLeft: '3px solid #d4a017',
+                    borderLeft: `3px solid ${c.primary}`,
                   }}>
                     <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', lineHeight: 1.5, margin: 0 }}>
                       {contextQuestion}
@@ -399,12 +397,12 @@ export function EvenementPage() {
                       style={{
                         background: isListeningCtx
                           ? 'linear-gradient(135deg, #ef4444, #dc2626)'
-                          : 'rgba(212,160,23,0.15)',
-                        border: `1px solid ${isListeningCtx ? '#ef4444' : 'rgba(212,160,23,0.4)'}`,
+                          : `${c.primary}26`,
+                        border: `1px solid ${isListeningCtx ? '#ef4444' : `${c.primary}66`}`,
                         borderRadius: 'var(--radius-md)',
                         padding: '0.5rem 0.65rem',
                         cursor: 'pointer',
-                        color: isListeningCtx ? 'white' : '#fbbf24',
+                        color: isListeningCtx ? 'white' : c.primary,
                         fontSize: '1rem',
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                       }}
@@ -422,13 +420,13 @@ export function EvenementPage() {
                       disabled={!contextInput.trim() || contextLoading}
                       style={{
                         background: contextInput.trim()
-                          ? 'linear-gradient(135deg, #d4a017, #f59e0b)'
+                          ? c.btnBg
                           : 'rgba(255,255,255,0.05)',
-                        border: '1px solid rgba(212,160,23,0.4)',
+                        border: `1px solid ${c.primary}66`,
                         borderRadius: 'var(--radius-md)',
                         padding: '0.5rem 0.85rem',
                         cursor: contextInput.trim() ? 'pointer' : 'default',
-                        color: contextInput.trim() ? '#0d0d14' : 'var(--text-muted)',
+                        color: contextInput.trim() ? c.btnColor : 'var(--text-muted)',
                         fontWeight: 600, fontSize: '0.82rem',
                       }}
                     >
@@ -456,7 +454,8 @@ export function EvenementPage() {
                     </div>
                   )}
                 </div>
-              )}
+                )
+              })()}
 
               {/* Context provided confirmation */}
               {contextProvided && (

@@ -39,7 +39,12 @@ CREATE TABLE IF NOT EXISTS profil_utilisateur (
     objectif_categorie      TEXT,
     objectif_deadline       TEXT,
     objectif_probabilite_base REAL DEFAULT 0.0,
+    objectif_probabilite_calculee REAL DEFAULT 0,
     probabilite_actuelle    REAL DEFAULT 0.0,
+    auth_user_id            TEXT DEFAULT NULL,
+    genre                   TEXT DEFAULT '',
+    objectif_modifie_le     TEXT,
+    phrase_personnalite     TEXT DEFAULT NULL,
     cree_le                 TEXT NOT NULL,
     mis_a_jour_le           TEXT NOT NULL
 );
@@ -168,6 +173,32 @@ CREATE TABLE IF NOT EXISTS agent_reminders (
 );
 """
 
+_CREATE_AGENT3_MESSAGES = """
+CREATE TABLE IF NOT EXISTS agent3_messages (
+    id TEXT PRIMARY KEY,
+    auth_user_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'text',
+    created_at TEXT NOT NULL,
+    audio_data TEXT DEFAULT '',
+    FOREIGN KEY (auth_user_id) REFERENCES users(id)
+);
+"""
+
+_CREATE_USER_EMAIL_SETTINGS = """
+CREATE TABLE IF NOT EXISTS user_email_settings (
+    user_id TEXT PRIMARY KEY,
+    smtp_email TEXT NOT NULL,
+    smtp_password TEXT NOT NULL,
+    smtp_host TEXT DEFAULT 'smtp.gmail.com',
+    smtp_port INTEGER DEFAULT 465,
+    display_name TEXT DEFAULT '',
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+"""
+
 
 class DatabaseManager:
     """Gestionnaire de connexion et de schéma SQLite."""
@@ -222,41 +253,21 @@ class DatabaseManager:
             self._conn.execute(_CREATE_AGENT_COLLECTED_INFO)
             self._conn.execute(_CREATE_AGENT2_MESSAGES)
             self._conn.execute(_CREATE_AGENT_REMINDERS)
-            # Migration : ajouter auth_user_id dans profil
-            try:
-                self._conn.execute(
-                    "ALTER TABLE profil_utilisateur ADD COLUMN auth_user_id TEXT DEFAULT NULL"
-                )
-            except Exception:
-                pass  # Colonne deja existante
-            # Migration : ajouter genre si absent
-            try:
-                self._conn.execute(
-                    "ALTER TABLE profil_utilisateur ADD COLUMN genre TEXT DEFAULT ''"
-                )
-            except Exception:
-                pass  # Colonne deja existante
-            # Migration : ajouter heures_objectif si la colonne est absente
-            try:
-                self._conn.execute(
-                    "ALTER TABLE profil_utilisateur ADD COLUMN heures_objectif REAL DEFAULT 1.0"
-                )
-            except Exception:
-                pass  # Colonne deja existante
-            # Migration : ajouter objectif_modifie_le si absent
-            try:
-                self._conn.execute(
-                    'ALTER TABLE profil_utilisateur ADD COLUMN objectif_modifie_le TEXT'
-                )
-            except Exception:
-                pass  # Colonne deja existante
-            # Migration : ajouter phrase_personnalite si absent
-            try:
-                self._conn.execute(
-                    "ALTER TABLE profil_utilisateur ADD COLUMN phrase_personnalite TEXT DEFAULT NULL"
-                )
-            except Exception:
-                pass  # Colonne deja existante
+            self._conn.execute(_CREATE_AGENT3_MESSAGES)
+            self._conn.execute(_CREATE_USER_EMAIL_SETTINGS)
+            # Migrations legacy (colonnes maintenant dans CREATE TABLE, gardees pour anciennes DBs)
+            for col_sql in [
+                "ALTER TABLE profil_utilisateur ADD COLUMN auth_user_id TEXT DEFAULT NULL",
+                "ALTER TABLE profil_utilisateur ADD COLUMN genre TEXT DEFAULT ''",
+                "ALTER TABLE profil_utilisateur ADD COLUMN heures_objectif REAL DEFAULT 1.0",
+                "ALTER TABLE profil_utilisateur ADD COLUMN objectif_modifie_le TEXT",
+                "ALTER TABLE profil_utilisateur ADD COLUMN phrase_personnalite TEXT DEFAULT NULL",
+                "ALTER TABLE profil_utilisateur ADD COLUMN objectif_probabilite_calculee REAL DEFAULT 0",
+            ]:
+                try:
+                    self._conn.execute(col_sql)
+                except Exception:
+                    pass  # Colonne deja existante
             # Migration : ajouter temps_estime dans sous_objectifs si absent
             try:
                 self._conn.execute(
@@ -292,29 +303,22 @@ class DatabaseManager:
                 )
             except Exception:
                 pass  # Colonne deja existante
-            # Migration : ajouter objectif_probabilite_calculee dans profil_utilisateur
+            # Index sur auth_user_id pour performance et cohérence multi-user
+            # Note: SQLite ne supporte pas ALTER TABLE ADD FOREIGN KEY.
+            # La contrainte est appliquée au niveau applicatif (repositories.py).
             try:
                 self._conn.execute(
-                    "ALTER TABLE profil_utilisateur ADD COLUMN objectif_probabilite_calculee REAL DEFAULT 0"
-                )
-            except Exception:
-                pass  # Colonne deja existante
-            # Migration : ajouter profil_id dans sous_objectifs (alias de user_id pour compatibilité)
-            try:
-                self._conn.execute(
-                    "ALTER TABLE profil_utilisateur ADD COLUMN competences TEXT DEFAULT ''"
+                    "CREATE INDEX IF NOT EXISTS idx_profil_auth_user_id ON profil_utilisateur(auth_user_id)"
                 )
             except Exception:
                 pass
-            try:
-                self._conn.execute(
-                    "ALTER TABLE profil_utilisateur ADD COLUMN diplomes TEXT DEFAULT ''"
-                )
-            except Exception:
-                pass
-            try:
-                self._conn.execute(
-                    "ALTER TABLE profil_utilisateur ADD COLUMN langues TEXT DEFAULT ''"
-                )
-            except Exception:
-                pass
+            # Legacy migrations for competences/diplomes/langues (now in CREATE TABLE)
+            for col_sql2 in [
+                "ALTER TABLE profil_utilisateur ADD COLUMN competences TEXT DEFAULT ''",
+                "ALTER TABLE profil_utilisateur ADD COLUMN diplomes TEXT DEFAULT ''",
+                "ALTER TABLE profil_utilisateur ADD COLUMN langues TEXT DEFAULT ''",
+            ]:
+                try:
+                    self._conn.execute(col_sql2)
+                except Exception:
+                    pass

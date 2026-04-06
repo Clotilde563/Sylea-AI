@@ -222,7 +222,7 @@ async def recalculer_probabilite(
             profil.objectif.probabilite_calculee = analyse.probabilite
             profil.objectif.probabilite_base = 0.1  # cosmetique (jauge)
             profil.marquer_modification()
-            repo.sauvegarder(profil)
+            repo.sauvegarder(profil, auth_user_id=user_id)
             return ProbabiliteOut(
                 probabilite=analyse.probabilite,
                 resume=analyse.resume,
@@ -238,7 +238,7 @@ async def recalculer_probabilite(
     profil.objectif.probabilite_calculee = prob_locale
     profil.objectif.probabilite_base = 0.1  # cosmetique (jauge)
     profil.marquer_modification()
-    repo.sauvegarder(profil)
+    repo.sauvegarder(profil, auth_user_id=user_id)
     return ProbabiliteOut(
         probabilite=prob_locale,
         resume="Probabilité calculée localement (mode sans IA).",

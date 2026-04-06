@@ -34,8 +34,32 @@ from api.dependencies import get_optional_user
 from api.routers import profil, dilemme, historique, evenement, bilan, objectifs, service_client
 from api.routers.agent_companion import router as agent_companion_router
 from api.routers.agent_assistant import router as agent_assistant_router
+from api.routers.agent3_openclaw import router as agent3_router
+from api.routers.coaching import router as coaching_router
+from api.routers.network import router as network_router
+from api.routers.workspace import router as workspace_router
+from api.routers.scenarios import router as scenarios_router
 from api.auth.router import router as auth_router
+from api.routers.integrations import router as integrations_router
 from api.schemas import HealthOut
+
+
+# ── Initialisation tables Agent 3 au démarrage ────────────────────────────────
+def _init_agent3_tables():
+    """Crée les tables Agent 3 (cron, memory, files, preferences, tasks) au démarrage."""
+    try:
+        from sylea.core.storage.database import DatabaseManager
+        from api.routers.agent3_openclaw import _ensure_agent3_tables
+        db = DatabaseManager()
+        db.connect()
+        try:
+            _ensure_agent3_tables(db)
+        finally:
+            db.disconnect()
+    except Exception:
+        pass  # DB not available yet or import error — tables will be created on first use
+
+_init_agent3_tables()
 
 
 # ── Application ────────────────────────────────────────────────────────────────
@@ -64,7 +88,7 @@ if extra_origins:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -81,7 +105,13 @@ app.include_router(objectifs.router)
 app.include_router(service_client.router)
 app.include_router(agent_companion_router)
 app.include_router(agent_assistant_router)
+app.include_router(agent3_router)
+app.include_router(coaching_router)
+app.include_router(network_router)
 app.include_router(auth_router)
+app.include_router(workspace_router)
+app.include_router(scenarios_router)
+app.include_router(integrations_router)
 
 
 # ── Routes utilitaires ────────────────────────────────────────────────────────
@@ -107,25 +137,26 @@ async def websocket_agent(websocket: WebSocket, token: str = Query(default="")):
         await websocket.close(code=4001, reason="Token manquant")
         return
 
-    try:
-        payload = decode_token(token)
-        user_id = payload.get("sub")
-        if not user_id:
-            await websocket.accept()
-            await websocket.close(code=4001, reason="Token invalide")
-            return
-    except Exception:
+    user_id = decode_token(token)
+    if not user_id:
         await websocket.accept()
         await websocket.close(code=4001, reason="Token invalide")
         return
 
     await ws_manager.connect(websocket, user_id)
+    print(f"[WS] User {user_id} connected successfully")
     try:
+        # Send a welcome message to confirm connection
+        await websocket.send_json({"type": "connected", "message": "Desktop connecte"})
         while True:
             data = await websocket.receive_text()
             if data == "ping":
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
+        print(f"[WS] User {user_id} disconnected")
+        ws_manager.disconnect(websocket, user_id)
+    except Exception as e:
+        print(f"[WS] Error for user {user_id}: {e}")
         ws_manager.disconnect(websocket, user_id)
 
 
@@ -146,3 +177,4 @@ def root():
             "health": "/api/health",
         }
     )
+# reload trigger

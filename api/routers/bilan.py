@@ -16,21 +16,22 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from sylea.core.storage.repositories import ProfilRepository
 from api.schemas import BilanIn, BilanOut, BilanCheckOut
-from api.dependencies import get_profil_repo, get_db
+from api.dependencies import get_profil_repo, get_db, get_optional_user
 
 router = APIRouter(prefix="/api/bilan", tags=["bilan"])
 
 
 @router.get("/aujourd-hui", response_model=BilanCheckOut)
 async def check_bilan_aujourdhui(
+    user_id: str | None = Depends(get_optional_user),
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     db=Depends(get_db),
 ):
     """Verifie si un bilan existe pour aujourd'hui."""
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
 
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
@@ -65,14 +66,15 @@ async def check_bilan_aujourdhui(
 @router.post("", response_model=BilanOut)
 async def creer_bilan(
     data: BilanIn,
+    user_id: str | None = Depends(get_optional_user),
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     db=Depends(get_db),
 ):
     """Cree le bilan du jour et met a jour les scores du profil."""
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
 
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
@@ -108,7 +110,7 @@ async def creer_bilan(
     profil.heures_transport = data.heures_transport
     profil.heures_objectif = data.heures_objectif
     profil.marquer_modification()
-    profil_repo.sauvegarder(profil)
+    profil_repo.sauvegarder(profil, auth_user_id=user_id)
 
     return BilanOut(
         id=bilan_id,
@@ -130,14 +132,15 @@ async def creer_bilan(
 @router.get("/historique", response_model=list)
 async def historique_bilans(
     limite: int = 30,
+    user_id: str | None = Depends(get_optional_user),
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     db=Depends(get_db),
 ):
     """Liste des bilans recents."""
-    if not profil_repo.existe():
+    if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
 
-    profil = profil_repo.charger()
+    profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 

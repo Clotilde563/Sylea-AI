@@ -53,6 +53,8 @@ export function BilanPage() {
   const [voiceActive, setVoiceActive] = useState(false)
   const [voiceError, setVoiceError]   = useState<string | null>(null)
   const recognitionRef = useRef<any>(null)
+  const descJourneeRef = useRef(descJournee)
+  descJourneeRef.current = descJournee
 
   useEffect(() => {
     if (!profil) {
@@ -80,15 +82,13 @@ export function BilanPage() {
     r.continuous = true
     r.interimResults = true
     recognitionRef.current = r
-    let finalText = descJournee
     r.onresult = (ev: any) => {
-      let interim = ''
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         if (ev.results[i].isFinal) {
-          finalText += (finalText ? ' ' : '') + ev.results[i][0].transcript
-          setDescJournee(finalText)
-        } else {
-          interim += ev.results[i][0].transcript
+          const current = descJourneeRef.current
+          const updated = current + (current ? ' ' : '') + ev.results[i][0].transcript
+          setDescJournee(updated)
+          descJourneeRef.current = updated
         }
       }
     }

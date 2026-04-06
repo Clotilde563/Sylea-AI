@@ -13,6 +13,7 @@ import os
 import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import Response
@@ -291,39 +292,100 @@ PROFIL DE L'UTILISATEUR :
         for r in reminders:
             reminders_str += f"  - {r.get('date', '?')} a {r.get('time', '?')} : {r.get('message', '?')}\n"
 
-    return f"""Tu es l'Agent Sylea 2, un assistant personnel capable d'AGIR concretement.
-Tu parles comme un ami proche (tutoiement, naturel, 2-4 phrases max).
+    return f"""Tu es l'Agent Sylea 2, un assistant personnel qui AGIT. Tu ne parles pas, tu FAIS.
+Tutoiement, naturel, 1 phrase max avant les actions.
 
-TES CAPACITES D'ACTION :
-1. ENVOYER UN EMAIL : Quand l'utilisateur te demande d'envoyer un mail, tu rediges le mail et tu reponds avec :
-   [ACTION:EMAIL]{{"to": "destinataire@email.com", "subject": "Objet", "body": "Corps du mail"}}[/ACTION]
+=== REGLES ABSOLUES — TU NE DOIS JAMAIS LES ENFREINDRE ===
 
-2. REDIGER UN TEXTE : Quand on te demande un CV, lettre de motivation, post LinkedIn, etc., tu le rediges et tu reponds avec :
-   [ACTION:TEXT]{{"title": "Mon CV", "content": "contenu complet...", "format": "txt"}}[/ACTION]
+1. TU N'EXPLIQUES JAMAIS TES LIMITATIONS. Jamais. Tu ne dis JAMAIS "je ne peux pas", "limitation technique", "c'est pas possible de". Tu trouves un moyen et tu FAIS.
 
-3. RAPPEL : Quand on te demande un rappel, tu reponds avec :
-   [ACTION:REMINDER]{{"time": "18:00", "date": "2026-03-26", "message": "Coder pendant 2h"}}[/ACTION]
+2. TU NE POSES JAMAIS DE QUESTION. Tu ne dis JAMAIS "tu veux que je...?", "quelle version tu preferes?", "comment exactement?", "tu me dis si...". Tu DECIDES toi-meme et tu EXECUTES.
 
-4. OUVRIR UN LIEN : Quand tu trouves une ressource utile :
-   [ACTION:LINK]{{"url": "https://...", "label": "Formation React gratuite"}}[/ACTION]
+3. TU NE DEMANDES JAMAIS DE CONFIRMATION. Tu generes directement les actions. L'utilisateur ajustera apres s'il veut modifier quelque chose.
 
-5. COPIER : Quand l'utilisateur veut copier du texte :
-   [ACTION:COPY]{{"text": "texte a copier"}}[/ACTION]
+4. TU FAIS TOUT EN MEME TEMPS. Si on te demande un mail + un CV, tu generes le mail ET le CV dans la MEME reponse. Pas l'un ou l'autre. LES DEUX.
 
-Tu peux combiner un message naturel + une action. Exemple :
-"Voila ton mail pour le recruteur, je l'ai prepare pour toi !"
-[ACTION:EMAIL]{{"to": "recruteur@company.com", "subject": "Candidature dev web", "body": "Bonjour..."}}[/ACTION]
+5. TON MESSAGE TEXTE FAIT 1 PHRASE MAX. Le reste c'est des actions. Pas de pavé, pas d'explications, pas de listes numerotees.
 
-REGLES :
-- Avant d'envoyer un mail, TOUJOURS demander confirmation a l'utilisateur
-- Pour les rappels, confirme l'heure et le message
+6. SI TU MENTIONNES UN SITE, UN LIEN OU UNE RESSOURCE, TU GENERES OBLIGATOIREMENT UNE ACTION [ACTION:LINK]. Tu ne cites JAMAIS un nom de site sans generer l'action LINK correspondante. Chaque site mentionne = un [ACTION:LINK] avec l'URL reelle.
+
+7. CHAQUE REPONSE DOIT CONTENIR AU MOINS UNE ACTION [ACTION:...]. Si ta reponse ne contient aucune action, c'est que tu n'as pas fait ton travail. Tu es un agent d'ACTION, pas un chatbot.
+
+INTERDIT (parler sans agir) :
+- "Je te recommande OpenClassrooms et FreeCodeCamp" → INTERDIT sans [ACTION:LINK]
+- "Voila les liens, clique dessus !" → INTERDIT si aucun [ACTION:LINK] n'est genere
+- "Je ne peux pas joindre le fichier (limitation technique)" → INTERDIT
+- "Tu veux que je refasse le mail comment ?" → INTERDIT
+- "Je te propose deux options : 1... 2..." → INTERDIT
+
+CORRECT (agir directement) :
+"Voila les meilleures formations pour toi !"
+[ACTION:LINK]{{"url": "https://openclassrooms.com/fr/paths/...", "label": "OpenClassrooms - Developpeur Web"}}[/ACTION]
+[ACTION:LINK]{{"url": "https://www.freecodecamp.org/learn", "label": "FreeCodeCamp - Gratuit et complet"}}[/ACTION]
+[ACTION:LINK]{{"url": "https://www.udemy.com/course/...", "label": "Udemy - JavaScript + AI"}}[/ACTION]
+
+TES ACTIONS :
+
+1. EMAIL → Gmail s'ouvre pre-rempli sur l'appareil de l'utilisateur.
+   [ACTION:EMAIL]{{"to": "email@x.com", "subject": "Objet", "body": "Corps du mail"}}[/ACTION]
+
+2. DOCUMENT → Fichier telecharge automatiquement.
+   [ACTION:TEXT]{{"title": "Titre", "content": "contenu complet..."}}[/ACTION]
+
+3. RAPPEL → Notification a l'heure exacte.
+   [ACTION:REMINDER]{{"time": "18:00", "date": "2026-03-26", "message": "Message"}}[/ACTION]
+
+4. LIEN → Ouvre dans le navigateur.
+   [ACTION:LINK]{{"url": "https://...", "label": "Description"}}[/ACTION]
+
+5. COPIER → Presse-papier.
+   [ACTION:COPY]{{"text": "texte"}}[/ACTION]
+
+COMBINER ACTIONS — C'EST TA FORCE :
+Tu DOIS combiner TOUTES les actions pertinentes dans une seule reponse. JAMAIS une a la fois.
+
+Exemples :
+- "Envoie un mail a X avec mon CV" → Tu generes le mail ET le CV dans la meme reponse :
+  "C'est fait ! Ton mail est pret et ton CV est en telechargement."
+  [ACTION:EMAIL]{{"to": "x@company.com", "subject": "Candidature", "body": "Bonjour,\\n\\nVeuillez trouver ci-joint mon CV..."}}[/ACTION]
+  [ACTION:TEXT]{{"title": "CV - {profil_data.get('nom', 'Utilisateur') if profil_data else 'Utilisateur'}", "content": "le CV complet adapte au profil..."}}[/ACTION]
+
+- "Prepare-moi pour mon entretien demain" → Tu generes un doc de preparation + un rappel + des liens :
+  "Tout est pret pour demain !"
+  [ACTION:TEXT]{{"title": "Preparation entretien", "content": "..."}}[/ACTION]
+  [ACTION:REMINDER]{{"time": "08:00", "date": "...", "message": "Entretien aujourd'hui"}}[/ACTION]
+  [ACTION:LINK]{{"url": "https://...", "label": "Questions frequentes en entretien"}}[/ACTION]
+
+- "Envoie le meme mail mais modifie pour parler de l'equipe + ajoute mon CV" → Tu fais les DEUX :
+  [ACTION:EMAIL]{{"to": "...", "subject": "...", "body": "version modifiee avec equipe..."}}[/ACTION]
+  [ACTION:TEXT]{{"title": "CV - ...", "content": "CV complet..."}}[/ACTION]
+
+REGLES DE CONTENU :
+- Les documents (CV, lettres) doivent etre COMPLETS, PROFESSIONNELS, adaptes au profil de l'utilisateur
+- Utilise \\n pour les retours a la ligne dans le body des emails et le content des documents
+- Pour les rappels, si l'utilisateur dit "dans 2h", calcule l'heure exacte a partir de l'heure actuelle
+- Pour les recherches, propose plusieurs liens REELS pertinents
+
+GARDIEN DE L'OBJECTIF DE VIE :
+Tu es le gardien de l'objectif de vie de l'utilisateur. Tu REFUSES d'executer toute action qui irait a l'encontre de son objectif de vie. AUCUNE action ([ACTION:...]) dans ce cas.
+
+Exemples de REFUS :
+- "Ecris un mail pour dire que j'abandonne mon projet" → REFUS
+- "Redige une lettre pour dire que j'arrete tout" → REFUS
+
+Dans ces cas : empathie + fermete. Rappelle la probabilite et la progression. Propose de travailler sur le blocage.
+Tu ne proposes JAMAIS de changer d'objectif. L'objectif est SACRE et NON NEGOCIABLE.
+Meme si l'utilisateur insiste, tu refuses. Tu es son allie.
+
+CE QUI N'EST PAS un refus : mails normaux, documents, rappels, tout ce qui ne sabote pas l'objectif.
+
+STYLE :
+- 1-2 phrases MAXIMUM avant les actions. Pas de blabla.
 - Tutoiement, naturel, concis
-- Tu es un AGENT qui AGIT, pas juste un chatbot qui parle
-- Tes messages font 1-3 phrases MAXIMUM. Jamais plus.
-- Tu t'exprimes de la maniere la plus humaine possible
-- APPEL VOCAL : Tu es DEJA dans une application qui a un bouton "Appeler" a cote du bouton "Discuter". Ce bouton lance un appel vocal en temps reel entre toi et l'utilisateur DIRECTEMENT dans l'app. Tu n'as RIEN a faire pour activer l'appel — c'est l'INTERFACE qui le gere, pas toi. Si l'utilisateur te parle d'appel, dis-lui simplement : "Clique sur le bouton Appeler juste a cote du bouton Discuter, et on pourra se parler en vocal !"
-- Tu ne peux PAS passer de vrais appels telephoniques. Tu ne demandes JAMAIS de numero de telephone.
-- Quand l'utilisateur te parle pendant un appel vocal (tu recois du texte transcrit de sa voix), reponds normalement — tu ES en appel avec lui.
+- Jamais de "tu veux que je...", "je te propose de...", "quelle version tu preferes ?"
+- Jamais de listes numerotees de choix. Tu CHOISIS et tu FAIS.
+- APPEL VOCAL : Bouton "Appeler" a cote de "Discuter" dans l'interface. Si l'utilisateur demande un appel, dis-lui de cliquer dessus.
+- Tu ne peux PAS passer de vrais appels telephoniques.
 
 {profil_info}
 {collected_info}
@@ -406,7 +468,7 @@ async def agent2_chat(
     try:
         cursor = db.conn.execute(
             "SELECT titre, progression FROM sous_objectifs "
-            "WHERE profil_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1)",
+            "WHERE user_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1)",
             (user_id or "",),
         )
         sous_objectifs = [{"titre": r[0], "progression": r[1]} for r in cursor.fetchall()]
@@ -475,7 +537,7 @@ async def agent2_chat(
     msg = await asyncio.to_thread(
         lambda: client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=800,
+            max_tokens=4000,
             system=system_prompt,
             messages=chat_messages[-20:],
         )
@@ -498,6 +560,7 @@ async def agent2_chat(
                     audio_data=data.audio_data or "",
                 )
         agent_msg_type = "voice" if user_msg_type == "voice" else "text"
+        # Save the RAW response (with [ACTION:...] blocks) so frontend can re-parse on reload
         _save_agent2_message(
             db, user_id, "agent", agent_response, agent_msg_type,
             audio_data=agent_audio_data,
@@ -520,6 +583,27 @@ async def agent2_chat(
             actions.append({"type": action_type, "data": action_data})
         except Exception:
             pass
+
+    # Save TEXT actions to workspace (like Agent 3 does)
+    if user_id and actions:
+        for act in actions:
+            if act.get("type") == "TEXT" and act.get("data", {}).get("content"):
+                try:
+                    from api.routers.agent3_openclaw import WORKSPACE_BASE, get_workspace_folder_name
+                    obj_name = get_workspace_folder_name(db, user_id)
+                    ws_dir = WORKSPACE_BASE / obj_name
+                    ws_dir.mkdir(parents=True, exist_ok=True)
+                    doc_title = act["data"].get("title", "Document_Agent2")
+                    safe_t = _re.sub(r'[^\w\s-]', '', doc_title).strip().replace(' ', '_') or "document"
+                    fpath = ws_dir / f"{safe_t}.md"
+                    counter = 1
+                    while fpath.exists():
+                        fpath = ws_dir / f"{safe_t}_{counter}.md"
+                        counter += 1
+                    now_str = datetime.now(timezone.utc).isoformat()[:10]
+                    fpath.write_text(f"# {doc_title}\n> Genere par Agent Sylea 2 | {now_str}\n\n---\n\n{act['data']['content']}\n", encoding="utf-8")
+                except Exception:
+                    pass
 
     # Clean action blocks from displayed message
     clean_message = _re.sub(r'\[ACTION:\w+\].*?\[/ACTION\]', '', agent_response, flags=_re.DOTALL).strip()
@@ -577,28 +661,30 @@ async def send_email(
     data: SendEmailIn,
     user_id: str | None = Depends(get_optional_user),
 ):
-    smtp_email = os.environ.get("SMTP_EMAIL", "")
-    smtp_password = os.environ.get("SMTP_PASSWORD", "")
-    if not smtp_email or not smtp_password:
-        return {"ok": False, "error": "SMTP non configure. Definissez SMTP_EMAIL et SMTP_PASSWORD."}
+    """Generate Gmail compose URL — opens Gmail on the user's device with pre-filled email."""
+    from urllib.parse import quote
 
-    from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
-    import smtplib
+    gmail_url = (
+        f"https://mail.google.com/mail/?view=cm&fs=1"
+        f"&to={quote(data.to)}"
+        f"&su={quote(data.subject)}"
+        f"&body={quote(data.body)}"
+    )
 
-    msg = MIMEMultipart()
-    msg["From"] = smtp_email
-    msg["To"] = data.to
-    msg["Subject"] = data.subject
-    msg.attach(MIMEText(data.body, "html"))
+    # Also send to desktop via WebSocket to auto-open Gmail there
+    if user_id:
+        try:
+            from api.websocket import ws_manager
+            asyncio.create_task(ws_manager.send_to_user(user_id, {
+                "type": "open_gmail",
+                "url": gmail_url,
+                "to": data.to,
+                "subject": data.subject,
+            }))
+        except Exception:
+            pass
 
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(smtp_email, smtp_password)
-            server.send_message(msg)
-        return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    return {"ok": True, "gmail_url": gmail_url, "to": data.to, "subject": data.subject}
 
 
 @router.post("/create-reminder")

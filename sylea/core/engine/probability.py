@@ -54,7 +54,7 @@ _MOTS_IRONMAN = ["ironman", "iron man"]
 _MOTS_MARATHON_ELITE = ["marathon en 3h", "marathon en 2h", "sub-3", "sub3"]
 _MOTS_MARATHON = ["marathon", "trail", "ultra", "triathlon"]
 _MOTS_STARTUP = ["licorne", "unicorn", "milliard", "ipo", "entrée en bourse"]
-_MOTS_FONDATEUR = ["créer", "fonder", "startup", "lancer ma", "mon entreprise", "ma boîte"]
+_MOTS_FONDATEUR = ["créer une entreprise", "fonder une entreprise", "fonder une startup", "startup", "lancer ma", "mon entreprise", "ma boîte", "créer ma boîte", "fonder ma boîte"]
 _MOTS_PROMOTION = ["promotion", "directeur", "manager", "chef de", "responsable"]
 _MOTS_CHANGEMENT = ["reconversion", "changer de métier", "changer de carrière", "nouveau métier"]
 

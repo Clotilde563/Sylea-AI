@@ -2,6 +2,7 @@
 
 import { create } from 'zustand'
 import { useStore } from '../store/useStore'
+import { API_BASE } from '../api/client'
 
 interface AuthUser {
   id: string
@@ -35,8 +36,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   login: async (email: string, password: string) => {
     set({ loading: true, error: null })
     try {
-      const base = import.meta.env.VITE_API_URL || ''
-      const res = await fetch(`${base}/api/auth/login`, {
+      const res = await fetch(`${API_BASE}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
@@ -61,8 +61,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   register: async (email: string, password: string) => {
     set({ loading: true, error: null })
     try {
-      const base = import.meta.env.VITE_API_URL || ''
-      const res = await fetch(`${base}/api/auth/register`, {
+      const res = await fetch(`${API_BASE}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password, password_confirm: password }),
@@ -93,8 +92,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   verifyCode: async (email: string, code: string) => {
     set({ loading: true, error: null })
     try {
-      const base = import.meta.env.VITE_API_URL || ''
-      const res = await fetch(`${base}/api/auth/verify`, {
+      const res = await fetch(`${API_BASE}/api/auth/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, code }),

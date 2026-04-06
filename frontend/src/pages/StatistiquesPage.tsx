@@ -695,58 +695,6 @@ function ChartSousObjectifs({
 }
 
 // ── Graphique 2 (courbe réelle rouge) ─────────────────────────────────────────
-/** Monotone cubic Hermite spline — courbe lisse passant par tous les points sans oscillation */
-function buildSmoothPath(pts: { x: number; y: number }[]): string {
-  const n = pts.length
-  if (n < 2) return ''
-  if (n === 2) return `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)} L ${pts[1].x.toFixed(1)} ${pts[1].y.toFixed(1)}`
-
-  // 1. Calculer les pentes (differences)
-  const dx: number[] = []
-  const dy: number[] = []
-  const m: number[] = []
-  for (let i = 0; i < n - 1; i++) {
-    dx.push(pts[i + 1].x - pts[i].x)
-    dy.push(pts[i + 1].y - pts[i].y)
-    m.push(dx[i] === 0 ? 0 : dy[i] / dx[i])
-  }
-
-  // 2. Tangentes monotones (Fritsch-Carlson)
-  const t: number[] = [m[0]]
-  for (let i = 1; i < n - 1; i++) {
-    if (m[i - 1] * m[i] <= 0) {
-      t.push(0)
-    } else {
-      t.push((m[i - 1] + m[i]) / 2)
-    }
-  }
-  t.push(m[n - 2])
-
-  // 3. Ajuster pour monotonie
-  for (let i = 0; i < n - 1; i++) {
-    if (Math.abs(m[i]) < 1e-10) { t[i] = 0; t[i + 1] = 0; continue }
-    const a = t[i] / m[i]
-    const b = t[i + 1] / m[i]
-    const s = a * a + b * b
-    if (s > 9) {
-      const tau = 3 / Math.sqrt(s)
-      t[i] = tau * a * m[i]
-      t[i + 1] = tau * b * m[i]
-    }
-  }
-
-  // 4. Generer le path SVG avec des courbes cubiques
-  let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`
-  for (let i = 0; i < n - 1; i++) {
-    const dxi = dx[i] / 3
-    const cp1x = pts[i].x + dxi
-    const cp1y = pts[i].y + t[i] * dxi
-    const cp2x = pts[i + 1].x - dxi
-    const cp2y = pts[i + 1].y - t[i + 1] * dxi
-    d += ` C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${pts[i + 1].x.toFixed(1)} ${pts[i + 1].y.toFixed(1)}`
-  }
-  return d
-}
 
 function Chart2({
   uid, profil, histPoints, totalElapsedMs, probActuelle, loading, zoomPeriod = 'max', smooth = false,

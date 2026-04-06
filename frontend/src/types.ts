@@ -83,6 +83,7 @@ export interface ProfilIn {
 }
 
 export interface AnalyseOption {
+  lettre: string
   description: string
   pros: string[]
   cons: string[]

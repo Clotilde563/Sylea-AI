@@ -127,9 +127,8 @@ async def analyser_dilemme(
                     + "\n".join(f"  {m}" for m in relevant_msgs[:5])
                     + "\n\n=== FIN DES INFORMATIONS CRITIQUES ===\n"
                 )
-    except Exception as e:
-        with open("debug_dilemme_error.txt", "w", encoding="utf-8") as ef:
-            ef.write(f"ERROR in message extraction: {e}\nuser_id: {user_id}\n")
+    except Exception:
+        pass  # Message extraction failed — continue without agent context
 
     # Aussi charger les infos collectées par l'agent (agent_collected_info)
     try:

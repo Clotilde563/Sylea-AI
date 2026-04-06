@@ -18,11 +18,11 @@ import type {
   DeviceContext,
 } from '../types'
 
-const API_BASE = import.meta.env.VITE_API_URL || ''
+export const API_BASE = import.meta.env.VITE_API_URL || ''
 const BASE = `${API_BASE}/api`
 const AUTH_TOKEN_KEY = 'sylea_auth_token'
 
-function getAuthHeaders(): Record<string, string> {
+export function getAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const token = localStorage.getItem(AUTH_TOKEN_KEY)
   if (token) {
@@ -273,13 +273,9 @@ export const api = {
 
   agentTTS: async (text: string): Promise<Blob | null> => {
     try {
-      const token = localStorage.getItem('sylea_auth_token')
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-      if (token) headers['Authorization'] = `Bearer ${token}`
-
       const res = await fetch(`${BASE}/agent/tts`, {
         method: 'POST',
-        headers,
+        headers: getAuthHeaders(),
         body: JSON.stringify({ text }),
       })
       if (res.ok) {
@@ -316,8 +312,8 @@ export const api = {
 
   // ── Agent assistant (Agent Sylea 2) ──────────────────────────────────
 
-  agent2Chat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; audioData?: string }> =>
-    request<{ message: string; choices?: string[]; audioData?: string }>('/agent2/chat', {
+  agent2Chat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string }> =>
+    request<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string }>('/agent2/chat', {
       method: 'POST',
       body: JSON.stringify({ messages, contexte_appareil, audio_data: audioData }),
     }),
@@ -328,7 +324,7 @@ export const api = {
   clearAgent2Messages: (): Promise<{ detail: string }> =>
     request('/agent2/messages', { method: 'DELETE' }),
 
-  agent2SendEmail: (to: string, subject: string, body: string): Promise<{ ok: boolean; error?: string }> =>
+  agent2SendEmail: (to: string, subject: string, body: string): Promise<{ ok: boolean; gmail_url?: string; error?: string }> =>
     request('/agent2/send-email', {
       method: 'POST',
       body: JSON.stringify({ to, subject, body }),
@@ -351,13 +347,9 @@ export const api = {
 
   agent2TTS: async (text: string): Promise<Blob | null> => {
     try {
-      const token = localStorage.getItem('sylea_auth_token')
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-      if (token) headers['Authorization'] = `Bearer ${token}`
-
       const res = await fetch(`${BASE}/agent2/tts`, {
         method: 'POST',
-        headers,
+        headers: getAuthHeaders(),
         body: JSON.stringify({ text }),
       })
       if (res.ok) {
@@ -370,7 +362,377 @@ export const api = {
     }
   },
 
+  // ── Agent 3 (Agent Sylea 3 — OpenClaw) ──────────────────────────────────
+
+  agent3Chat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string; openclaw_model?: string }> =>
+    request<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string; openclaw_model?: string }>('/agent3/chat', {
+      method: 'POST',
+      body: JSON.stringify({ messages, contexte_appareil, audio_data: audioData }),
+    }),
+
+  /** Agent 3 Chat with SSE streaming — returns EventSource-like stream */
+  agent3ChatStream: (
+    messages: Array<{ role: string; content: string; type?: string }>,
+    contexte_appareil?: DeviceContext,
+    audioData?: string,
+    callbacks?: {
+      onSteps?: (steps: Array<{ id: string; label: string; status: string; detail: string }>) => void
+      onStepUpdate?: (stepId: string, status: string) => void
+      onLog?: (text: string, type: string) => void
+      onToolProgress?: (tool: string, description: string, status: string, index: number) => void
+      onToken?: (token: string) => void
+      onResult?: (result: { message: string; actions?: any[]; tools_used?: any[]; openclaw_model?: string }) => void
+      onError?: (message: string) => void
+    }
+  ): Promise<{ message: string; actions?: any[]; tools_used?: any[]; openclaw_model?: string }> => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const resp = await fetch(`${BASE}/agent3/chat/stream`, {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          body: JSON.stringify({ messages, contexte_appareil, audio_data: audioData }),
+        })
+
+        if (!resp.ok || !resp.body) {
+          reject(new Error(`HTTP ${resp.status}`))
+          return
+        }
+
+        const reader = resp.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+
+          let currentEvent = ''
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              currentEvent = line.slice(7).trim()
+            } else if (line.startsWith('data: ') && currentEvent) {
+              try {
+                const data = JSON.parse(line.slice(6))
+                switch (currentEvent) {
+                  case 'steps':
+                    callbacks?.onSteps?.(data.steps)
+                    break
+                  case 'step_update':
+                    callbacks?.onStepUpdate?.(data.step_id, data.status)
+                    break
+                  case 'log':
+                    callbacks?.onLog?.(data.text, data.type)
+                    break
+                  case 'tool_progress':
+                    callbacks?.onToolProgress?.(data.tool, data.description, data.status, data.index ?? 0)
+                    break
+                  case 'token':
+                    callbacks?.onToken?.(data.token)
+                    break
+                  case 'result':
+                    callbacks?.onResult?.(data)
+                    resolve(data)
+                    break
+                  case 'error':
+                    callbacks?.onError?.(data.message)
+                    reject(new Error(data.message))
+                    break
+                }
+              } catch { /* skip malformed JSON */ }
+              currentEvent = ''
+            } else if (line === '') {
+              currentEvent = ''
+            }
+          }
+        }
+      } catch (err) {
+        reject(err)
+      }
+    })
+  },
+
+  getAgent3Messages: (): Promise<Array<{ id: string; role: string; content: string; type: string; created_at: string; audioData?: string }>> =>
+    request('/agent3/messages'),
+
+  clearAgent3Messages: (): Promise<{ detail: string }> =>
+    request('/agent3/messages', { method: 'DELETE' }),
+
+  agent3Status: (): Promise<{ openclaw_connected: boolean; openclaw_error?: string }> =>
+    request('/agent3/status'),
+
+  agent3Proactive: (): Promise<{ message: string | null }> =>
+    request('/agent3/proactive', { method: 'POST' }),
+
+  agent3TTS: async (text: string): Promise<Blob | null> => {
+    try {
+      const res = await fetch(`${BASE}/agent3/tts`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ text }),
+      })
+      if (res.ok) {
+        const blob = await res.blob()
+        if (blob.size > 0) return blob
+      }
+      return null
+    } catch {
+      return null
+    }
+  },
+
+  // ── Integrations ──────────────────────────────────────────────────────
+
+  getIntegrations: (): Promise<any[]> =>
+    request<any[]>('/integrations'),
+
+  connectIntegration: (provider: string, data: any): Promise<any> =>
+    request<any>(`/integrations/${provider}/connect`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  disconnectIntegration: (provider: string): Promise<void> =>
+    request<void>(`/integrations/${provider}/disconnect`, { method: 'DELETE' }),
+
+  getIntegrationStatus: (provider: string): Promise<any> =>
+    request<any>(`/integrations/${provider}/status`),
+
+  getCalendarEvents: (): Promise<any[]> =>
+    request<any[]>('/integrations/google_calendar/events'),
+
+  getGmailInbox: (): Promise<any[]> =>
+    request<any[]>('/integrations/gmail/inbox'),
+
+  getGithubActivity: (): Promise<any[]> =>
+    request<any[]>('/integrations/github/activity'),
+
+  // ── Network ─────────────────────────────────────────────────────────
+
+  getNetworkProfile: (): Promise<any> =>
+    request<any>('/network/profile'),
+
+  updateNetworkProfile: (data: any): Promise<any> =>
+    request<any>('/network/profile', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  discoverUsers: (): Promise<any[]> =>
+    request<any[]>('/network/discover'),
+
+  sendConnectionRequest: (userId: string): Promise<any> =>
+    request<any>(`/network/connect/${userId}`, { method: 'POST' }),
+
+  getConnections: (): Promise<any[]> =>
+    request<any[]>('/network/connections'),
+
+  getPendingConnections: (): Promise<any[]> =>
+    request<any[]>('/network/connections/pending'),
+
+  acceptConnection: (id: string): Promise<any> =>
+    request<any>(`/network/connections/${id}/accept`, { method: 'PUT' }),
+
+  rejectConnection: (id: string): Promise<any> =>
+    request<any>(`/network/connections/${id}/reject`, { method: 'PUT' }),
+
+  getMentors: (): Promise<any[]> =>
+    request<any[]>('/network/mentors'),
+
+  requestMentoring: (data: any): Promise<any> =>
+    request<any>('/network/mentoring/request', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  getChallenges: (): Promise<any[]> =>
+    request<any[]>('/network/challenges'),
+
+  joinChallenge: (id: string): Promise<any> =>
+    request<any>(`/network/challenges/${id}/join`, { method: 'POST' }),
+
+  getChallengeLeaderboard: (id: string): Promise<any[]> =>
+    request<any[]>(`/network/challenges/${id}/leaderboard`),
+
+  updateChallengeProgress: (id: string, progress: number): Promise<any> =>
+    request<any>(`/network/challenges/${id}/progress`, {
+      method: 'PUT',
+      body: JSON.stringify({ progress }),
+    }),
+
+  getVictories: (): Promise<any[]> =>
+    request<any[]>('/network/victories'),
+
+  getVictoriesFeed: (): Promise<any[]> =>
+    request<any[]>('/network/victories/feed'),
+
+  postVictory: (data: any): Promise<any> =>
+    request<any>('/network/victories', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  reactToVictory: (id: string): Promise<any> =>
+    request<any>(`/network/victories/${id}/react`, {
+      method: 'POST',
+      body: JSON.stringify({ reaction_type: 'celebrate' }),
+    }),
+
   // Desktop status
   checkDesktopStatus: (): Promise<{ connected: boolean }> =>
     request('/desktop/status'),
+
+  // --- Computer Use ---
+  computerUseStart: (
+    prompt: string,
+    callbacks?: {
+      onScreenshot?: () => void
+      onAction?: (action: string, params: Record<string, any>) => void
+      onThinking?: (text: string) => void
+      onConfirmationNeeded?: (data: { action: string; params: Record<string, any>; reason: string }) => void
+      onIteration?: (current: number, max: number) => void
+      onComplete?: (text: string) => void
+      onError?: (message: string) => void
+    }
+  ): Promise<void> => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const response = await fetch(`${BASE}/agent3/computer-use/start`, {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          body: JSON.stringify({ prompt }),
+        })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        if (!response.body) throw new Error('No response body')
+
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        let currentEvent = ''
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              currentEvent = line.slice(7).trim()
+            } else if (line.startsWith('data: ') && currentEvent) {
+              try {
+                const data = JSON.parse(line.slice(6))
+                switch (currentEvent) {
+                  case 'screenshot': callbacks?.onScreenshot?.(); break
+                  case 'action': callbacks?.onAction?.(data.action, data.params); break
+                  case 'thinking': callbacks?.onThinking?.(data.text); break
+                  case 'confirmation_needed': callbacks?.onConfirmationNeeded?.(data); break
+                  case 'iteration': callbacks?.onIteration?.(data.current, data.max); break
+                  case 'complete': callbacks?.onComplete?.(data.text); resolve(); break
+                  case 'error': callbacks?.onError?.(data.message); break
+                }
+              } catch {}
+              currentEvent = ''
+            }
+          }
+        }
+        resolve()
+      } catch (err: any) {
+        callbacks?.onError?.(err.message)
+        reject(err)
+      }
+    })
+  },
+
+  computerUseScreenshot: (): Promise<{ screenshot: string }> =>
+    request('/agent3/computer-use/screenshot'),
+
+  computerUseConfirm: (approved: boolean): Promise<{ success: boolean }> =>
+    request('/agent3/computer-use/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ approved }),
+    }),
+
+  computerUseAbort: (): Promise<{ success: boolean }> =>
+    request('/agent3/computer-use/abort', { method: 'POST' }),
+
+  // ── Workspace ──────────────────────────────────────────────────────────────
+  getProjects: () => request<any[]>('/workspace/projects'),
+  createProject: (data: any) => request<any>('/workspace/projects', { method: 'POST', body: JSON.stringify(data) }),
+  deleteProject: (id: string) => request<void>(`/workspace/projects/${id}`, { method: 'DELETE' }),
+  getDocuments: () => request<any[]>('/workspace/documents'),
+  deleteDocument: (id: string) => request<void>(`/workspace/documents/${id}`, { method: 'DELETE' }),
+  getTemplates: () => request<any[]>('/workspace/templates'),
+  getKnowledge: () => request<any[]>('/workspace/knowledge'),
+  addKnowledge: (data: any) => request<any>('/workspace/knowledge', { method: 'POST', body: JSON.stringify(data) }),
+  searchKnowledge: (q: string) => request<any[]>(`/workspace/knowledge/search?q=${encodeURIComponent(q)}`),
+  deleteKnowledge: (id: string) => request<void>(`/workspace/knowledge/${id}`, { method: 'DELETE' }),
+
+  // ── Scenarios ──────────────────────────────────────────────────────────────
+  getScenarios: () => request<any[]>('/scenarios'),
+  createScenario: (data: any) => request<any>('/scenarios/create', { method: 'POST', body: JSON.stringify(data) }),
+  deleteScenario: (id: string) => request<void>(`/scenarios/${id}`, { method: 'DELETE' }),
+  compareScenarios: (ids: string[]) => request<any>('/scenarios/compare', { method: 'POST', body: JSON.stringify({ scenario_ids: ids }) }),
+
+  // ── Coaching ───────────────────────────────────────────────────────────────
+  getCoachingPreferences: () => request<any>('/coaching/preferences'),
+  updateCoachingPreferences: (data: any) => request<any>('/coaching/preferences', { method: 'PUT', body: JSON.stringify(data) }),
+  getCoachingSessions: () => request<any[]>('/coaching/sessions'),
+  getPendingSession: () => request<any>('/coaching/sessions/pending'),
+  startCoachingSession: (type: string) => request<any>('/coaching/sessions/start', { method: 'POST', body: JSON.stringify({ session_type: type }) }),
+
+  // ── Agent 3 Management endpoints ──────────────────────────────────────
+
+  // CRON management
+  agent3GetCrons: (): Promise<Array<{ id: string; label: string; instruction: string; cron_expr: string; enabled: boolean; last_run?: string; last_result?: string; created_at: string }>> =>
+    request('/agent3/cron'),
+
+  agent3CreateCron: (data: { label: string; instruction: string; cron_expr?: string; enabled?: boolean }): Promise<{ cron_id: string }> =>
+    request('/agent3/cron', { method: 'POST', body: JSON.stringify(data) }),
+
+  agent3DeleteCron: (cronId: string): Promise<{ success: boolean }> =>
+    request(`/agent3/cron/${cronId}`, { method: 'DELETE' }),
+
+  agent3ToggleCron: (cronId: string): Promise<{ success: boolean; enabled: boolean }> =>
+    request(`/agent3/cron/${cronId}/toggle`, { method: 'PUT' }),
+
+  agent3RunCron: (cronId: string): Promise<{ success: boolean; result: string }> =>
+    request(`/agent3/cron/${cronId}/run`, { method: 'POST' }),
+
+  // Memory management
+  agent3GetMemories: (): Promise<Array<{ key: string; value: string; category?: string; created_at: string }>> =>
+    request('/agent3/memory'),
+
+  agent3DeleteMemory: (key: string): Promise<{ success: boolean }> =>
+    request(`/agent3/memory/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+
+  // File management
+  agent3GetFiles: (): Promise<Array<{ id: string; filename: string; filetype: string; filesize: number; created_at: string }>> =>
+    request('/agent3/files'),
+
+  // Tool diagnostics
+  agent3TestTools: (): Promise<Record<string, any>> =>
+    request('/agent3/tools/test'),
+
+  // Capabilities
+  agent3Capabilities: (): Promise<Record<string, any>> =>
+    request('/agent3/capabilities'),
+
+  // Preferences (confirmation actions destructives, etc.)
+  agent3GetPreferences: (): Promise<{ confirm_destructive: boolean }> =>
+    request('/agent3/preferences'),
+
+  agent3UpdatePreferences: (prefs: { confirm_destructive?: boolean }): Promise<{ ok: boolean }> =>
+    request('/agent3/preferences', { method: 'PUT', body: JSON.stringify(prefs) }),
+
+  // Tasks (tâches multi-étapes persistantes)
+  agent3GetTasks: (): Promise<Array<{ id: string; title: string; description: string; steps: Array<{ label: string; status: string; result?: string }>; status: string; progress: number; created_at: string; updated_at: string }>> =>
+    request('/agent3/tasks'),
+
+  agent3DeleteTask: (taskId: string): Promise<{ success: boolean }> =>
+    request(`/agent3/tasks/${taskId}`, { method: 'DELETE' }),
 }
