@@ -61,6 +61,10 @@ def _init_agent3_tables():
 
 _init_agent3_tables()
 
+# Start background cron scheduler
+from api.scheduler import scheduler as cron_scheduler
+cron_scheduler.start()
+
 
 # ── Application ────────────────────────────────────────────────────────────────
 

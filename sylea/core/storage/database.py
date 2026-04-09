@@ -200,6 +200,19 @@ CREATE TABLE IF NOT EXISTS user_email_settings (
 """
 
 
+_CREATE_WORKSPACE_SHARES = """
+CREATE TABLE IF NOT EXISTS workspace_shares (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    shared_with_user_id TEXT NOT NULL,
+    permission TEXT DEFAULT 'read',
+    created_at TEXT NOT NULL,
+    UNIQUE(project_id, shared_with_user_id)
+);
+"""
+
+
 class DatabaseManager:
     """Gestionnaire de connexion et de schéma SQLite."""
 
@@ -255,6 +268,7 @@ class DatabaseManager:
             self._conn.execute(_CREATE_AGENT_REMINDERS)
             self._conn.execute(_CREATE_AGENT3_MESSAGES)
             self._conn.execute(_CREATE_USER_EMAIL_SETTINGS)
+            self._conn.execute(_CREATE_WORKSPACE_SHARES)
             # Migrations legacy (colonnes maintenant dans CREATE TABLE, gardees pour anciennes DBs)
             for col_sql in [
                 "ALTER TABLE profil_utilisateur ADD COLUMN auth_user_id TEXT DEFAULT NULL",

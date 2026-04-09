@@ -255,7 +255,83 @@ async def oauth_google(data: OAuthIn, db=Depends(get_db)):
             user = _create_user(db, email, provider="google", provider_id=google_id)
 
     jwt_token = create_access_token(user["id"])
+
+    # Auto-connect Google integrations (Calendar, Gmail, Drive)
+    _google_access = token_data.get("access_token", "")
+    _google_refresh = token_data.get("refresh_token", "")
+    _google_expires = token_data.get("expires_in", 3600)
+    _user_id = user["id"]
+
+    if _google_access:
+        _now_iso = datetime.now(timezone.utc).isoformat()
+        # Ensure integrations table exists
+        try:
+            from api.routers.integrations import _ensure_integrations_tables
+            _ensure_integrations_tables(db)
+        except Exception:
+            pass
+
+        for _svc in ["google_calendar", "gmail", "google_drive"]:
+            try:
+                existing = _get_conn(db).execute(
+                    "SELECT id FROM user_integrations WHERE auth_user_id = ? AND provider = ?",
+                    (_user_id, _svc),
+                ).fetchone()
+                if existing:
+                    _get_conn(db).execute(
+                        "UPDATE user_integrations SET access_token = ?, refresh_token = ?, "
+                        "token_expires_at = ?, updated_at = ? "
+                        "WHERE auth_user_id = ? AND provider = ?",
+                        (_google_access, _google_refresh, str(_google_expires), _now_iso, _user_id, _svc),
+                    )
+                else:
+                    _get_conn(db).execute(
+                        "INSERT INTO user_integrations (id, auth_user_id, provider, access_token, refresh_token, "
+                        "token_expires_at, connected_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (str(uuid.uuid4()), _user_id, _svc, _google_access, _google_refresh, str(_google_expires), _now_iso, _now_iso),
+                    )
+                _get_conn(db).commit()
+            except Exception:
+                pass
+
     return TokenOut(access_token=jwt_token)
+
+
+# ── OAuth Google URL ──────────────────────────────────────────────────────────
+
+@router.get("/oauth/google/url")
+async def google_oauth_url(redirect_uri: str = "", state: str = "login"):
+    """Return the Google OAuth consent URL with Calendar+Gmail+Drive scopes.
+    state='login' pour inscription/connexion, state='integration' pour connecter les services."""
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(status_code=501, detail="Google OAuth non configure")
+
+    if not redirect_uri:
+        redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:5173/auth/callback")
+
+    scopes = " ".join([
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/drive.readonly",
+    ])
+
+    import urllib.parse
+    params = urllib.parse.urlencode({
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": scopes,
+        "access_type": "offline",
+        "prompt": "consent",
+    })
+
+    return {"url": f"https://accounts.google.com/o/oauth2/v2/auth?{params}"}
 
 
 # ── OAuth GitHub ──────────────────────────────────────────────────────────────

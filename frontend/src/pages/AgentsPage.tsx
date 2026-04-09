@@ -1612,7 +1612,7 @@ export default function AgentsPage() {
   const [computerThinking, setComputerThinking] = useState('')
   const [computerConfirmation, setComputerConfirmation] = useState<{ action: string; params: Record<string, any>; reason: string } | null>(null)
   const [computerIteration, setComputerIteration] = useState({ current: 0, max: 25 })
-  const [computerUseMode, setComputerUseMode] = useState(false)
+  // computerUseMode removed — Computer Use is now triggered automatically by the agent
 
   // Agent 3 management panels
   const [showCronPanel, setShowCronPanel] = useState(false)
@@ -1891,12 +1891,6 @@ export default function AgentsPage() {
     const text = (overrideText ?? inputText3).trim()
     if (!text || sending3) return
 
-    if (computerUseMode) {
-      handleComputerUse(text)
-      setInputText3('')
-      setComputerUseMode(false)
-      return
-    }
     const userMsg: AgentMessage = {
       role: 'user', content: text,
       timestamp: new Date().toISOString(), type: msgType,
@@ -1954,10 +1948,15 @@ export default function AgentsPage() {
                   .then(r => r.json()).then(data => setWorkspaceInfo(data)).catch(() => {})
               }
             }
+            // Auto-trigger Computer Use when agent decides to use it
+            const cuAction = result.actions?.find((a: any) => a.type === 'COMPUTER_USE')
+            if (cuAction?.data?.started && cuAction?.data?.prompt) {
+              handleComputerUse(cuAction.data.prompt)
+            }
             setMessages3(prev => [...prev, {
               role: 'agent', content: result.message,
               timestamp: new Date().toISOString(), type: agentResponseType,
-              actions: result.actions || undefined,
+              actions: result.actions?.filter((a: any) => a.type !== 'COMPUTER_USE') || undefined,
             }])
           },
           onError: (errMsg) => {
@@ -3881,37 +3880,33 @@ export default function AgentsPage() {
               )}
             </button>
 
-            {/* Computer Use toggle */}
-            <button
-              onClick={() => {
-                if (computerUseActive) {
-                  handleComputerAbort()
-                } else {
-                  setComputerUseMode(prev => !prev)
-                }
-              }}
-              title={computerUseActive ? "Arreter Computer Use" : computerUseMode ? "Mode Computer Use actif" : "Activer Computer Use"}
-              style={{
-                background: computerUseMode || computerUseActive ? 'rgba(212, 160, 23, 0.2)' : 'transparent',
-                border: computerUseMode || computerUseActive ? '1px solid rgba(212, 160, 23, 0.5)' : '1px solid rgba(255,255,255,0.1)',
-                borderRadius: '8px',
-                padding: '6px 8px',
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '4px',
-                color: computerUseMode || computerUseActive ? '#d4a017' : 'var(--text-secondary)',
-                fontSize: '0.8rem',
-                transition: 'all 0.2s',
-              }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
-                <line x1="8" y1="21" x2="16" y2="21"/>
-                <line x1="12" y1="17" x2="12" y2="21"/>
-              </svg>
-              {computerUseActive && <span style={{ fontSize: '0.7rem' }}>LIVE</span>}
-            </button>
+            {/* Computer Use abort button (only when active) */}
+            {computerUseActive && (
+              <button
+                onClick={() => handleComputerAbort()}
+                title="Arreter Computer Use"
+                style={{
+                  background: 'rgba(212, 160, 23, 0.2)',
+                  border: '1px solid rgba(212, 160, 23, 0.5)',
+                  borderRadius: '8px',
+                  padding: '6px 8px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  color: '#d4a017',
+                  fontSize: '0.8rem',
+                  transition: 'all 0.2s',
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                  <line x1="8" y1="21" x2="16" y2="21"/>
+                  <line x1="12" y1="17" x2="12" y2="21"/>
+                </svg>
+                <span style={{ fontSize: '0.7rem' }}>LIVE</span>
+              </button>
+            )}
 
             {/* Send button (GOLD gradient for Agent 3) */}
             <button

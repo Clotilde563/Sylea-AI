@@ -310,6 +310,20 @@ export const api = {
   authMe: (): Promise<{ id: string; email: string; provider: string }> =>
     request('/auth/me'),
 
+  // Google OAuth
+  authGoogleUrl: (redirectUri?: string, state: string = 'login'): Promise<{ url: string }> => {
+    const params = new URLSearchParams()
+    if (redirectUri) params.set('redirect_uri', redirectUri)
+    params.set('state', state)
+    return request(`/auth/oauth/google/url?${params.toString()}`)
+  },
+
+  authOAuthGoogle: (code: string, redirectUri: string): Promise<{ access_token: string }> =>
+    request('/auth/oauth/google', {
+      method: 'POST',
+      body: JSON.stringify({ code, redirect_uri: redirectUri }),
+    }),
+
   // ── Agent assistant (Agent Sylea 2) ──────────────────────────────────
 
   agent2Chat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string }> =>
@@ -495,6 +509,13 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  // Connecter Google (Calendar+Gmail+Drive) via OAuth — pour utilisateurs inscrits par email
+  connectGoogleOAuth: (code: string, redirectUri: string): Promise<{ connected: boolean; services: string[] }> =>
+    request('/integrations/google/oauth', {
+      method: 'POST',
+      body: JSON.stringify({ code, redirect_uri: redirectUri }),
+    }),
+
   disconnectIntegration: (provider: string): Promise<void> =>
     request<void>(`/integrations/${provider}/disconnect`, { method: 'DELETE' }),
 
@@ -509,6 +530,9 @@ export const api = {
 
   getGithubActivity: (): Promise<any[]> =>
     request<any[]>('/integrations/github/activity'),
+
+  getDriveFiles: (): Promise<any[]> =>
+    request<any[]>('/integrations/google_drive/files'),
 
   // ── Network ─────────────────────────────────────────────────────────
 
