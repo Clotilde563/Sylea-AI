@@ -2222,3 +2222,721 @@ class TestPromptWithScratchpad:
         )
         assert "MEMOIRE DE TRAVAIL" in prompt
         assert "search_results" in prompt
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 32. Vision Pipeline
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestVisionPipeline:
+    """Tests du pipeline de vision multi-modale."""
+
+    def test_build_vision_prompt_basic(self):
+        from api.routers.agent3_openclaw import VisionPipeline
+        prompt = VisionPipeline.build_vision_prompt("Trouver le bouton login")
+        assert "Trouver le bouton login" in prompt
+        assert "JSON" in prompt
+
+    def test_build_vision_prompt_with_observations(self):
+        from api.routers.agent3_openclaw import VisionPipeline
+        obs = ["Page de login visible", "Bouton bleu en bas"]
+        prompt = VisionPipeline.build_vision_prompt("Cliquer login", obs)
+        assert "Observations precedentes" in prompt
+        assert "Page de login visible" in prompt
+
+    def test_parse_valid_json(self):
+        from api.routers.agent3_openclaw import VisionPipeline
+        text = '{"description": "Login page", "state": "ready", "elements": [], "next_action": null}'
+        result = VisionPipeline.parse_vision_response(text)
+        assert result["description"] == "Login page"
+        assert result["state"] == "ready"
+
+    def test_parse_invalid_json(self):
+        from api.routers.agent3_openclaw import VisionPipeline
+        result = VisionPipeline.parse_vision_response("Not a JSON response")
+        assert result["state"] == "unknown"
+        assert result["description"].startswith("Not a JSON")
+
+    def test_should_continue_with_next_action(self):
+        from api.routers.agent3_openclaw import VisionPipeline
+        obs = {"state": "in_progress", "next_action": {"type": "click", "target": "btn"}}
+        assert VisionPipeline.should_continue(obs) is True
+
+    def test_should_stop_when_done(self):
+        from api.routers.agent3_openclaw import VisionPipeline
+        obs = {"state": "done", "next_action": None}
+        assert VisionPipeline.should_continue(obs) is False
+
+    def test_should_stop_at_max_steps(self):
+        from api.routers.agent3_openclaw import VisionPipeline
+        obs = {"state": "in_progress", "next_action": {"type": "click"}}
+        assert VisionPipeline.should_continue(obs, max_steps=5, current_step=5) is False
+
+    def test_should_stop_on_error(self):
+        from api.routers.agent3_openclaw import VisionPipeline
+        obs = {"state": "error", "next_action": {"type": "click"}}
+        assert VisionPipeline.should_continue(obs) is False
+
+    def test_extract_text_regions(self):
+        from api.routers.agent3_openclaw import VisionPipeline
+        obs = {"elements": [
+            {"type": "button", "text": "Login", "action": "click"},
+            {"type": "input", "text": "", "action": "fill"},
+            {"type": "label", "text": "Email", "action": "none"},
+        ]}
+        texts = VisionPipeline.extract_text_regions(obs)
+        assert texts == ["Login", "Email"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 33. Dynamic Tool Factory
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestDynamicToolFactory:
+    """Tests de la fabrique d'outils dynamiques."""
+
+    def setup_method(self):
+        from api.routers.agent3_openclaw import DynamicToolFactory
+        DynamicToolFactory.clear()
+
+    def test_register_valid_tool(self):
+        from api.routers.agent3_openclaw import DynamicToolFactory
+        result = DynamicToolFactory.register("add", "result = args.get('a', 0) + args.get('b', 0)", "Addition")
+        assert result["success"] is True
+
+    def test_register_invalid_syntax(self):
+        from api.routers.agent3_openclaw import DynamicToolFactory
+        result = DynamicToolFactory.register("bad", "def broken(:", "Broken")
+        assert result["success"] is False
+        assert "syntaxe" in result["error"].lower() or "syntax" in result["error"].lower()
+
+    def test_register_blocked_import(self):
+        from api.routers.agent3_openclaw import DynamicToolFactory
+        result = DynamicToolFactory.register("danger", "import subprocess; subprocess.run(['ls'])", "Dangerous")
+        assert result["success"] is False
+
+    def test_register_empty_code(self):
+        from api.routers.agent3_openclaw import DynamicToolFactory
+        result = DynamicToolFactory.register("empty", "", "Nothing")
+        assert result["success"] is False
+
+    def test_execute_tool(self):
+        from api.routers.agent3_openclaw import DynamicToolFactory
+        DynamicToolFactory.register("add", "result = args.get('a', 0) + args.get('b', 0)")
+        result = DynamicToolFactory.execute("add", a=3, b=7)
+        assert result["success"] is True
+        assert result["result"] == 10
+
+    def test_execute_nonexistent(self):
+        from api.routers.agent3_openclaw import DynamicToolFactory
+        result = DynamicToolFactory.execute("nonexistent")
+        assert result["success"] is False
+
+    def test_list_tools(self):
+        from api.routers.agent3_openclaw import DynamicToolFactory
+        DynamicToolFactory.register("t1", "result = 1", "Tool 1")
+        DynamicToolFactory.register("t2", "result = 2", "Tool 2")
+        tools = DynamicToolFactory.list_tools()
+        assert len(tools) == 2
+        names = [t["name"] for t in tools]
+        assert "t1" in names and "t2" in names
+
+    def test_unregister(self):
+        from api.routers.agent3_openclaw import DynamicToolFactory
+        DynamicToolFactory.register("temp", "result = 42")
+        assert DynamicToolFactory.unregister("temp") is True
+        assert DynamicToolFactory.get("temp") is None
+
+    def test_use_counter(self):
+        from api.routers.agent3_openclaw import DynamicToolFactory
+        DynamicToolFactory.register("counter_test", "result = 'ok'")
+        DynamicToolFactory.execute("counter_test")
+        DynamicToolFactory.execute("counter_test")
+        tool = DynamicToolFactory.get("counter_test")
+        assert tool["uses"] == 2
+
+    def test_validate_blocks_eval(self):
+        from api.routers.agent3_openclaw import DynamicToolFactory
+        valid, msg = DynamicToolFactory.validate_tool_code("x = eval('1+1')")
+        assert valid is False
+
+    def test_validate_blocks_exec(self):
+        from api.routers.agent3_openclaw import DynamicToolFactory
+        valid, msg = DynamicToolFactory.validate_tool_code("exec('import os')")
+        assert valid is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 34. Parallel Executor
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestParallelExecutor:
+    """Tests de l'executeur parallele."""
+
+    def test_execute_empty(self):
+        import asyncio
+        from api.routers.agent3_openclaw import ParallelExecutor
+        async def noop(t, d): return {"success": True, "result": None}
+        results = asyncio.get_event_loop().run_until_complete(
+            ParallelExecutor.execute_parallel([], noop)
+        )
+        assert results == []
+
+    def test_execute_all_succeed(self):
+        import asyncio
+        from api.routers.agent3_openclaw import ParallelExecutor
+        async def ok_exec(t, d):
+            return {"success": True, "result": f"done_{d.get('n', '')}"}
+        tasks = [
+            {"id": "t1", "type": "SEARCH", "data": {"n": 1}},
+            {"id": "t2", "type": "SEARCH", "data": {"n": 2}},
+            {"id": "t3", "type": "SEARCH", "data": {"n": 3}},
+        ]
+        results = asyncio.get_event_loop().run_until_complete(
+            ParallelExecutor.execute_parallel(tasks, ok_exec)
+        )
+        assert len(results) == 3
+        assert all(r["success"] for r in results)
+
+    def test_execute_with_failure(self):
+        import asyncio
+        from api.routers.agent3_openclaw import ParallelExecutor
+        async def mixed_exec(t, d):
+            if d.get("fail"):
+                return {"success": False, "result": None, "error": "boom"}
+            return {"success": True, "result": "ok"}
+        tasks = [
+            {"id": "t1", "type": "A", "data": {}},
+            {"id": "t2", "type": "B", "data": {"fail": True}},
+        ]
+        results = asyncio.get_event_loop().run_until_complete(
+            ParallelExecutor.execute_parallel(tasks, mixed_exec)
+        )
+        assert len(results) == 2
+        successes = [r for r in results if r["success"]]
+        failures = [r for r in results if not r["success"]]
+        assert len(successes) == 1
+        assert len(failures) == 1
+
+    def test_execute_with_timeout(self):
+        import asyncio
+        from api.routers.agent3_openclaw import ParallelExecutor
+        async def slow_exec(t, d):
+            await asyncio.sleep(10)
+            return {"success": True, "result": "done"}
+        tasks = [{"id": "slow", "type": "A", "data": {}}]
+        results = asyncio.get_event_loop().run_until_complete(
+            ParallelExecutor.execute_parallel(tasks, slow_exec, timeout_per_task=0.1)
+        )
+        assert len(results) == 1
+        assert results[0]["success"] is False
+        assert "Timeout" in results[0]["error"]
+
+    def test_aggregate_results(self):
+        from api.routers.agent3_openclaw import ParallelExecutor
+        results = [
+            {"id": "t1", "success": True, "result": "a", "error": "", "duration": 1.0},
+            {"id": "t2", "success": True, "result": "b", "error": "", "duration": 2.0},
+            {"id": "t3", "success": False, "result": None, "error": "fail", "duration": 0.5},
+        ]
+        agg = ParallelExecutor.aggregate_results(results)
+        assert agg["total"] == 3
+        assert agg["succeeded"] == 2
+        assert agg["failed"] == 1
+        assert agg["success_rate"] == 66.7
+        assert agg["total_duration"] == 3.5
+
+    def test_split_independent_tasks(self):
+        from api.routers.agent3_openclaw import ParallelExecutor
+        plan = [
+            {"id": "a", "depends_on": []},
+            {"id": "b", "depends_on": []},
+            {"id": "c", "depends_on": ["a", "b"]},
+            {"id": "d", "depends_on": ["c"]},
+        ]
+        waves = ParallelExecutor.split_independent_tasks(plan)
+        assert len(waves) == 3  # [a,b], [c], [d]
+        ids_wave0 = [t["id"] for t in waves[0]]
+        assert "a" in ids_wave0 and "b" in ids_wave0
+        assert waves[1][0]["id"] == "c"
+        assert waves[2][0]["id"] == "d"
+
+    def test_split_empty_plan(self):
+        from api.routers.agent3_openclaw import ParallelExecutor
+        assert ParallelExecutor.split_independent_tasks([]) == []
+
+    def test_split_all_sequential(self):
+        from api.routers.agent3_openclaw import ParallelExecutor
+        plan = [
+            {"id": "a", "depends_on": []},
+            {"id": "b", "depends_on": ["a"]},
+            {"id": "c", "depends_on": ["b"]},
+        ]
+        waves = ParallelExecutor.split_independent_tasks(plan)
+        assert len(waves) == 3
+        assert all(len(w) == 1 for w in waves)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 35. Context Manager
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestContextManager:
+    """Tests de la gestion du contexte long."""
+
+    def test_estimate_tokens(self):
+        from api.routers.agent3_openclaw import ContextManager
+        assert ContextManager.estimate_tokens("hello world") >= 1
+        assert ContextManager.estimate_tokens("a" * 400) == 100
+
+    def test_summarize_empty(self):
+        from api.routers.agent3_openclaw import ContextManager
+        assert ContextManager.summarize_messages([]) == ""
+
+    def test_summarize_messages(self):
+        from api.routers.agent3_openclaw import ContextManager
+        msgs = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"},
+        ]
+        summary = ContextManager.summarize_messages(msgs)
+        assert "RESUME" in summary
+        assert "[user]" in summary.lower()
+
+    def test_build_context_window_small(self):
+        from api.routers.agent3_openclaw import ContextManager
+        msgs = [{"role": "user", "content": "short"} for _ in range(3)]
+        recent, summary = ContextManager.build_context_window(msgs, max_tokens=5000)
+        assert len(recent) == 3
+        assert summary == ""
+
+    def test_build_context_window_large(self):
+        from api.routers.agent3_openclaw import ContextManager
+        msgs = [{"role": "user", "content": "x" * 500} for _ in range(50)]
+        recent, summary = ContextManager.build_context_window(msgs, max_tokens=2000, recent_keep=5)
+        assert len(recent) == 5
+        assert "RESUME" in summary
+
+    def test_extract_facts_emails(self):
+        from api.routers.agent3_openclaw import ContextManager
+        msgs = [{"role": "user", "content": "Mon email est jean@example.com"}]
+        facts = ContextManager.extract_facts(msgs)
+        emails = [f for f in facts if f["type"] == "email"]
+        assert len(emails) >= 1
+        assert emails[0]["value"] == "jean@example.com"
+
+    def test_extract_facts_urls(self):
+        from api.routers.agent3_openclaw import ContextManager
+        msgs = [{"role": "user", "content": "Va voir https://example.com/page"}]
+        facts = ContextManager.extract_facts(msgs)
+        urls = [f for f in facts if f["type"] == "url"]
+        assert len(urls) >= 1
+
+    def test_extract_facts_empty(self):
+        from api.routers.agent3_openclaw import ContextManager
+        assert ContextManager.extract_facts([]) == []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 36. Action Validator
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestActionValidator:
+    """Tests de la validation pre-execution."""
+
+    def test_valid_pdf(self):
+        from api.routers.agent3_openclaw import ActionValidator
+        r = ActionValidator.validate("PDF", {"title": "Report"})
+        assert r["valid"] is True
+        assert r["risk"] == "low"
+
+    def test_missing_required_field(self):
+        from api.routers.agent3_openclaw import ActionValidator
+        r = ActionValidator.validate("EMAIL", {"to": "a@b.com", "subject": ""})
+        assert r["valid"] is False
+        assert any("subject" in e for e in r["errors"])
+
+    def test_invalid_email(self):
+        from api.routers.agent3_openclaw import ActionValidator
+        r = ActionValidator.validate("EMAIL", {"to": "not_an_email", "subject": "Hi", "body": "Hello"})
+        assert r["valid"] is False
+
+    def test_valid_email(self):
+        from api.routers.agent3_openclaw import ActionValidator
+        r = ActionValidator.validate("EMAIL", {"to": "a@b.com", "subject": "Hi", "body": "Hello"})
+        assert r["valid"] is True
+        assert r["risk"] == "high"
+
+    def test_invalid_cron(self):
+        from api.routers.agent3_openclaw import ActionValidator
+        r = ActionValidator.validate("CRON", {"label": "Test", "instruction": "Do", "cron_expr": "bad"})
+        assert r["valid"] is False
+
+    def test_valid_cron(self):
+        from api.routers.agent3_openclaw import ActionValidator
+        r = ActionValidator.validate("CRON", {"label": "Test", "instruction": "Do", "cron_expr": "0 9 * * *"})
+        assert r["valid"] is True
+
+    def test_dangerous_path_warning(self):
+        from api.routers.agent3_openclaw import ActionValidator
+        r = ActionValidator.validate("FILE_CREATE", {"path": "../../etc/passwd", "content": "hack"})
+        assert len(r["warnings"]) >= 1
+
+    def test_validate_batch(self):
+        from api.routers.agent3_openclaw import ActionValidator
+        actions = [
+            {"type": "PDF", "data": {"title": "OK"}},
+            {"type": "EMAIL", "data": {"to": "bad", "subject": "Hi", "body": "Hello"}},
+        ]
+        result = ActionValidator.validate_batch(actions)
+        assert result["all_valid"] is False
+        assert len(result["results"]) == 2
+        assert result["results"][0]["valid"] is True
+        assert result["results"][1]["valid"] is False
+
+    def test_unknown_action_type(self):
+        from api.routers.agent3_openclaw import ActionValidator
+        r = ActionValidator.validate("UNKNOWN_TYPE", {"foo": "bar"})
+        assert r["valid"] is True  # No required fields, so valid
+        assert r["risk"] == "unknown"
+
+    def test_empty_action_type(self):
+        from api.routers.agent3_openclaw import ActionValidator
+        r = ActionValidator.validate("", {})
+        assert r["valid"] is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 37. Feedback Learner
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestFeedbackLearner:
+    """Tests de l'apprentissage par correction."""
+
+    def test_detect_correction_non(self):
+        from api.routers.agent3_openclaw import FeedbackLearner
+        assert FeedbackLearner.detect_correction("non je voulais un PDF") is True
+
+    def test_detect_correction_refais(self):
+        from api.routers.agent3_openclaw import FeedbackLearner
+        assert FeedbackLearner.detect_correction("refais ca correctement") is True
+
+    def test_detect_correction_pas_ca(self):
+        from api.routers.agent3_openclaw import FeedbackLearner
+        assert FeedbackLearner.detect_correction("c'est pas ca du tout") is True
+
+    def test_detect_normal_message(self):
+        from api.routers.agent3_openclaw import FeedbackLearner
+        assert FeedbackLearner.detect_correction("cherche les tendances AI") is False
+
+    def test_detect_positive_message(self):
+        from api.routers.agent3_openclaw import FeedbackLearner
+        assert FeedbackLearner.detect_correction("super merci beaucoup") is False
+
+    def test_extract_feedback(self):
+        from api.routers.agent3_openclaw import FeedbackLearner
+        fb = FeedbackLearner.extract_feedback("non je voulais un tableau", "Voici le PDF")
+        assert fb["type"] == "correction"
+        assert "tableau" in fb["user_said"]
+        assert "PDF" in fb["agent_said"]
+        assert "timestamp" in fb
+
+    def test_format_feedback_empty(self):
+        from api.routers.agent3_openclaw import FeedbackLearner
+        assert FeedbackLearner.format_feedback_context([]) == ""
+
+    def test_format_feedback_with_data(self):
+        from api.routers.agent3_openclaw import FeedbackLearner
+        feedbacks = [{"lesson": "L'utilisateur prefere les tableaux aux PDFs"}]
+        text = FeedbackLearner.format_feedback_context(feedbacks)
+        assert "LECONS" in text
+        assert "tableaux" in text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 38. Agent Observer
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestAgentObserver:
+    """Tests de l'observabilite et trace de raisonnement."""
+
+    def test_create_observer(self):
+        from api.routers.agent3_openclaw import AgentObserver
+        obs = AgentObserver(user_id="u1")
+        assert obs.user_id == "u1"
+        assert len(obs.trace) == 0
+
+    def test_log_thought(self):
+        from api.routers.agent3_openclaw import AgentObserver
+        obs = AgentObserver()
+        obs.log_thought("L'utilisateur veut un PDF")
+        assert len(obs.trace) == 1
+        assert obs.trace[0]["type"] == "thought"
+
+    def test_log_action_success(self):
+        from api.routers.agent3_openclaw import AgentObserver
+        obs = AgentObserver()
+        obs.log_action("PDF", True, "rapport.pdf genere")
+        assert obs.metrics["actions_executed"] == 1
+        assert obs.metrics["actions_succeeded"] == 1
+        assert "PDF" in obs.metrics["tools_used"]
+
+    def test_log_action_failure(self):
+        from api.routers.agent3_openclaw import AgentObserver
+        obs = AgentObserver()
+        obs.log_action("EMAIL", False, "SMTP error")
+        assert obs.metrics["actions_failed"] == 1
+
+    def test_get_summary(self):
+        from api.routers.agent3_openclaw import AgentObserver
+        obs = AgentObserver(user_id="u1")
+        obs.log_action("SEARCH", True)
+        obs.log_action("PDF", True)
+        summary = obs.get_summary()
+        assert summary["user_id"] == "u1"
+        assert summary["metrics"]["actions_executed"] == 2
+        assert summary["steps_count"] == 2
+
+    def test_format_trace(self):
+        from api.routers.agent3_openclaw import AgentObserver
+        obs = AgentObserver()
+        obs.log_thought("Analyser la demande")
+        obs.log_action("SEARCH", True, "3 resultats")
+        obs.log_observation("Resultats pertinents trouves")
+        trace_str = obs.format_trace()
+        assert "TRACE" in trace_str
+        assert "2 OK" in trace_str or "1 OK" in trace_str
+
+    def test_tools_used_no_duplicates(self):
+        from api.routers.agent3_openclaw import AgentObserver
+        obs = AgentObserver()
+        obs.log_action("SEARCH", True)
+        obs.log_action("SEARCH", True)
+        obs.log_action("PDF", True)
+        assert obs.metrics["tools_used"] == ["SEARCH", "PDF"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 39. Benchmark Runner
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestBenchmarkRunner:
+    """Tests du systeme de benchmarking."""
+
+    def test_get_all_benchmarks(self):
+        from api.routers.agent3_openclaw import BenchmarkRunner
+        benchmarks = BenchmarkRunner.get_benchmarks()
+        assert len(benchmarks) >= 5
+        assert all("id" in b for b in benchmarks)
+
+    def test_get_benchmarks_by_category(self):
+        from api.routers.agent3_openclaw import BenchmarkRunner
+        tools_benchmarks = BenchmarkRunner.get_benchmarks("tools")
+        assert all(b["category"] == "tools" for b in tools_benchmarks)
+
+    def test_score_correct_response(self):
+        from api.routers.agent3_openclaw import BenchmarkRunner
+        bench = {"id": "test", "expected_contains": ["Helsinki"], "max_score": 10}
+        score = BenchmarkRunner.score_response(bench, "La capitale est Helsinki en Finlande")
+        assert score["score"] > 0
+        assert score["percentage"] > 0
+
+    def test_score_wrong_response(self):
+        from api.routers.agent3_openclaw import BenchmarkRunner
+        bench = {"id": "test", "expected_contains": ["Helsinki"], "max_score": 10}
+        score = BenchmarkRunner.score_response(bench, "Je ne sais pas")
+        assert score["score"] == 0
+
+    def test_score_action_present(self):
+        from api.routers.agent3_openclaw import BenchmarkRunner
+        bench = {"id": "test", "expected_action": "PDF", "max_score": 10}
+        actions = [{"type": "PDF", "data": {}}]
+        score = BenchmarkRunner.score_response(bench, "Voici le rapport", actions)
+        assert score["score"] > 0
+
+    def test_score_action_missing(self):
+        from api.routers.agent3_openclaw import BenchmarkRunner
+        bench = {"id": "test", "expected_action": "PDF", "max_score": 10}
+        score = BenchmarkRunner.score_response(bench, "Voici le rapport", [])
+        assert score["score"] == 0
+
+    def test_aggregate_scores(self):
+        from api.routers.agent3_openclaw import BenchmarkRunner
+        scores = [
+            {"benchmark_id": "search_factual", "score": 10, "max_score": 10},
+            {"benchmark_id": "math_basic", "score": 5, "max_score": 10},
+        ]
+        agg = BenchmarkRunner.aggregate_scores(scores)
+        assert agg["total_score"] == 15
+        assert agg["max_score"] == 20
+        assert agg["percentage"] == 75.0
+
+    def test_aggregate_empty(self):
+        from api.routers.agent3_openclaw import BenchmarkRunner
+        agg = BenchmarkRunner.aggregate_scores([])
+        assert agg["total_score"] == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 40. Personality Adapter
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPersonalityAdapter:
+    """Tests de l'adaptation de personnalite."""
+
+    def test_analyze_verbose_user(self):
+        from api.routers.agent3_openclaw import PersonalityAdapter
+        msgs = [{"role": "user", "content": "x" * 300} for _ in range(5)]
+        style = PersonalityAdapter.analyze_user_style(msgs)
+        assert style["verbosity"] == "verbose"
+
+    def test_analyze_concise_user(self):
+        from api.routers.agent3_openclaw import PersonalityAdapter
+        msgs = [{"role": "user", "content": "ok"} for _ in range(5)]
+        style = PersonalityAdapter.analyze_user_style(msgs)
+        assert style["verbosity"] == "concise"
+
+    def test_analyze_formal_user(self):
+        from api.routers.agent3_openclaw import PersonalityAdapter
+        msgs = [{"role": "user", "content": "Pourriez-vous veuillez me fournir les informations"}]
+        style = PersonalityAdapter.analyze_user_style(msgs)
+        assert style["formality"] == "formal"
+
+    def test_analyze_informal_user(self):
+        from api.routers.agent3_openclaw import PersonalityAdapter
+        msgs = [{"role": "user", "content": "yo bg jsp mdr ptdr tkt frr stp pk"}]
+        style = PersonalityAdapter.analyze_user_style(msgs)
+        assert style["formality"] == "informal"
+
+    def test_analyze_empty(self):
+        from api.routers.agent3_openclaw import PersonalityAdapter
+        style = PersonalityAdapter.analyze_user_style([])
+        assert style["verbosity"] == "normal"
+
+    def test_style_instructions_verbose(self):
+        from api.routers.agent3_openclaw import PersonalityAdapter
+        instr = PersonalityAdapter.get_style_instructions({"verbosity": "verbose"})
+        assert "detaillees" in instr.lower() or "long" in instr.lower()
+
+    def test_style_instructions_concise(self):
+        from api.routers.agent3_openclaw import PersonalityAdapter
+        instr = PersonalityAdapter.get_style_instructions({"verbosity": "concise"})
+        assert "bref" in instr.lower() or "concis" in instr.lower()
+
+    def test_style_instructions_normal(self):
+        from api.routers.agent3_openclaw import PersonalityAdapter
+        instr = PersonalityAdapter.get_style_instructions({"verbosity": "normal"})
+        assert instr == ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 41. Proactive Coach
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestProactiveCoach:
+    """Tests du coach proactif."""
+
+    def test_generate_check_in(self):
+        from api.routers.agent3_openclaw import ProactiveCoach
+        msg = ProactiveCoach.generate_message("check_in", {"nom": "Jean", "objectif_description": "CTO", "probabilite_actuelle": 45.0})
+        assert "Jean" in msg
+
+    def test_generate_encouragement(self):
+        from api.routers.agent3_openclaw import ProactiveCoach
+        msg = ProactiveCoach.generate_message("encouragement", {"nom": "Marie", "probabilite_actuelle": 72.0})
+        assert "Marie" in msg
+
+    def test_generate_warning(self):
+        from api.routers.agent3_openclaw import ProactiveCoach
+        msg = ProactiveCoach.generate_message("warning", {"nom": "Pierre", "probabilite_actuelle": 15.0})
+        assert "Pierre" in msg
+
+    def test_generate_without_profil(self):
+        from api.routers.agent3_openclaw import ProactiveCoach
+        msg = ProactiveCoach.generate_message("check_in")
+        assert isinstance(msg, str) and len(msg) > 0
+
+    def test_determine_type_good_decisions(self):
+        from api.routers.agent3_openclaw import ProactiveCoach
+        profil = {"probabilite_actuelle": 50.0}
+        decisions = [{"impact": 3.0}, {"impact": 2.0}, {"impact": 1.0}]
+        msg_type = ProactiveCoach.determine_message_type(profil, decisions)
+        assert msg_type == "encouragement"
+
+    def test_determine_type_bad_decisions(self):
+        from api.routers.agent3_openclaw import ProactiveCoach
+        profil = {"probabilite_actuelle": 50.0}
+        decisions = [{"impact": -3.0}, {"impact": -2.0}, {"impact": -1.0}]
+        msg_type = ProactiveCoach.determine_message_type(profil, decisions)
+        assert msg_type == "warning"
+
+    def test_determine_type_no_profil(self):
+        from api.routers.agent3_openclaw import ProactiveCoach
+        assert ProactiveCoach.determine_message_type(None) == "check_in"
+
+    def test_weekly_review(self):
+        from api.routers.agent3_openclaw import ProactiveCoach
+        msg = ProactiveCoach.generate_message("weekly_review", {
+            "nom": "Alex", "probabilite_actuelle": 55.0
+        }, decisions=[{"impact": 1}] * 3, sous_objectifs=[{"titre": "SO1"}])
+        assert "Alex" in msg
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 42. Multi-modal Output
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestMultiModalOutput:
+    """Tests de la gestion des sorties multi-modales."""
+
+    def test_detect_pdf(self):
+        from api.routers.agent3_openclaw import MultiModalOutput
+        assert MultiModalOutput.detect_best_format("fais-moi un rapport PDF") == "pdf"
+
+    def test_detect_image(self):
+        from api.routers.agent3_openclaw import MultiModalOutput
+        assert MultiModalOutput.detect_best_format("genere une image de chat") == "image"
+
+    def test_detect_code(self):
+        from api.routers.agent3_openclaw import MultiModalOutput
+        assert MultiModalOutput.detect_best_format("ecris un script Python") == "code"
+
+    def test_detect_table(self):
+        from api.routers.agent3_openclaw import MultiModalOutput
+        assert MultiModalOutput.detect_best_format("compare les prix en tableau") == "table"
+
+    def test_detect_text_default(self):
+        from api.routers.agent3_openclaw import MultiModalOutput
+        assert MultiModalOutput.detect_best_format("salut comment ca va") == "text"
+
+    def test_detect_calendar(self):
+        from api.routers.agent3_openclaw import MultiModalOutput
+        assert MultiModalOutput.detect_best_format("cree un rendez-vous demain") == "calendar_event"
+
+    def test_format_table(self):
+        from api.routers.agent3_openclaw import MultiModalOutput
+        result = MultiModalOutput.format_table(
+            ["Nom", "Prix"],
+            [["iPhone", "999"], ["Galaxy", "899"]]
+        )
+        assert "Nom" in result
+        assert "iPhone" in result
+        assert "---" in result
+
+    def test_format_table_empty(self):
+        from api.routers.agent3_openclaw import MultiModalOutput
+        assert MultiModalOutput.format_table([], []) == ""
+
+    def test_estimate_complexity_simple(self):
+        from api.routers.agent3_openclaw import MultiModalOutput
+        assert MultiModalOutput.estimate_output_complexity([]) == "simple"
+
+    def test_estimate_complexity_complex(self):
+        from api.routers.agent3_openclaw import MultiModalOutput
+        actions = [{"type": "SEARCH"}, {"type": "PDF"}, {"type": "EMAIL"}]
+        assert MultiModalOutput.estimate_output_complexity(actions) == "complex"
+
+    def test_estimate_complexity_moderate(self):
+        from api.routers.agent3_openclaw import MultiModalOutput
+        actions = [{"type": "SEARCH"}, {"type": "SEARCH"}, {"type": "SEARCH"}]
+        assert MultiModalOutput.estimate_output_complexity(actions) == "moderate"

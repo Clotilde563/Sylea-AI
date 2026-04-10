@@ -2285,6 +2285,1082 @@ async def _execute_action_with_reflection(
     }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# HAUTE PRIORITE — Vision, Dynamic Tools, Parallel Execution
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 4. Vision Pipeline ──────────────────────────────────────────────────────
+
+class VisionPipeline:
+    """Analyse visuelle multi-modale : screenshots, OCR, detection d'UI.
+
+    Utilise pendant Computer Use ou quand l'utilisateur envoie une image.
+    Peut enchainer : screenshot → detection → OCR → action.
+    """
+
+    @staticmethod
+    def build_vision_prompt(task: str, previous_observations: list[str] | None = None) -> str:
+        """Construit le prompt vision avec observations precedentes."""
+        obs = ""
+        if previous_observations:
+            obs = "\n\nObservations precedentes:\n" + "\n".join(
+                f"  {i+1}. {o}" for i, o in enumerate(previous_observations[-5:])
+            )
+        return (
+            f"Tache: {task}\n"
+            "Analyse l'image et decris:\n"
+            "1. Ce que tu vois a l'ecran (elements UI, texte, images)\n"
+            "2. L'etat actuel (page chargee ? erreur ? formulaire ?)\n"
+            "3. Les actions possibles (boutons, liens, champs)\n"
+            "4. La prochaine action recommandee pour accomplir la tache\n"
+            f"{obs}\n"
+            "Reponds en JSON: {\"description\": str, \"state\": str, "
+            "\"elements\": [{\"type\": str, \"text\": str, \"action\": str}], "
+            "\"next_action\": {\"type\": str, \"target\": str, \"value\": str}}"
+        )
+
+    @staticmethod
+    def parse_vision_response(text: str) -> dict:
+        """Parse la reponse d'analyse vision en donnees structurees."""
+        try:
+            m = re.search(r'\{.*\}', text, re.DOTALL)
+            if m:
+                return json.loads(m.group(0))
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        return {
+            "description": text[:500] if text else "",
+            "state": "unknown",
+            "elements": [],
+            "next_action": None,
+        }
+
+    @staticmethod
+    def should_continue(observation: dict, max_steps: int = 15, current_step: int = 0) -> bool:
+        """Determine si la boucle vision doit continuer."""
+        if current_step >= max_steps:
+            return False
+        state = (observation.get("state") or "").lower()
+        if state in ("done", "complete", "finished", "success", "termine"):
+            return False
+        if state in ("error", "blocked", "impossible"):
+            return False
+        return observation.get("next_action") is not None
+
+    @staticmethod
+    def extract_text_regions(observation: dict) -> list[str]:
+        """Extrait les textes visibles des elements detectes."""
+        texts = []
+        for el in observation.get("elements", []):
+            t = el.get("text", "").strip()
+            if t:
+                texts.append(t)
+        return texts
+
+
+# ── 5. Dynamic Tool Factory ─────────────────────────────────────────────────
+
+class DynamicToolFactory:
+    """Fabrique d'outils a la volee : l'agent ecrit un script, le valide,
+    et l'ajoute a son arsenal pour re-utilisation.
+
+    Les outils dynamiques sont des fonctions Python sandboxees.
+    """
+
+    _registry: dict[str, dict] = {}  # name -> {code, description, created_at, uses}
+
+    BLOCKED_IMPORTS = frozenset([
+        "os.system", "subprocess", "shutil.rmtree", "ctypes",
+        "importlib", "__import__", "eval(", "exec(",
+    ])
+
+    @classmethod
+    def validate_tool_code(cls, code: str) -> tuple[bool, str]:
+        """Valide la surete du code d'un outil dynamique."""
+        if not code or not code.strip():
+            return False, "Code vide"
+        for blocked in cls.BLOCKED_IMPORTS:
+            if blocked in code:
+                return False, f"Pattern interdit: {blocked}"
+        try:
+            import ast
+            ast.parse(code)
+        except SyntaxError as e:
+            return False, f"Erreur de syntaxe: {e}"
+        return True, "OK"
+
+    @classmethod
+    def register(cls, name: str, code: str, description: str = "") -> dict:
+        """Enregistre un nouvel outil dynamique apres validation."""
+        valid, msg = cls.validate_tool_code(code)
+        if not valid:
+            return {"success": False, "error": msg}
+        cls._registry[name] = {
+            "code": code,
+            "description": description or f"Outil dynamique: {name}",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "uses": 0,
+        }
+        return {"success": True, "name": name}
+
+    @classmethod
+    def get(cls, name: str) -> dict | None:
+        return cls._registry.get(name)
+
+    @classmethod
+    def list_tools(cls) -> list[dict]:
+        return [
+            {"name": n, "description": t["description"], "uses": t["uses"]}
+            for n, t in cls._registry.items()
+        ]
+
+    @classmethod
+    def execute(cls, name: str, **kwargs) -> dict:
+        """Execute un outil dynamique dans un environnement restreint."""
+        tool = cls._registry.get(name)
+        if not tool:
+            return {"success": False, "error": f"Outil '{name}' non trouve"}
+        tool["uses"] += 1
+        try:
+            local_ns: dict = {"__builtins__": {}, "args": kwargs}
+            # Ajouter les builtins surs
+            safe_builtins = {
+                "len": len, "str": str, "int": int, "float": float,
+                "list": list, "dict": dict, "tuple": tuple, "set": set,
+                "range": range, "enumerate": enumerate, "zip": zip,
+                "map": map, "filter": filter, "sorted": sorted,
+                "min": min, "max": max, "sum": sum, "abs": abs,
+                "round": round, "isinstance": isinstance, "type": type,
+                "print": lambda *a, **kw: None,  # no-op print
+                "True": True, "False": False, "None": None,
+            }
+            local_ns["__builtins__"] = safe_builtins
+            exec(tool["code"], local_ns)  # noqa: S102
+            result = local_ns.get("result", local_ns.get("output", "OK"))
+            return {"success": True, "result": result}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @classmethod
+    def unregister(cls, name: str) -> bool:
+        return cls._registry.pop(name, None) is not None
+
+    @classmethod
+    def clear(cls) -> None:
+        cls._registry.clear()
+
+
+# ── 6. Parallel Executor ────────────────────────────────────────────────────
+
+class ParallelExecutor:
+    """Execute plusieurs sous-taches en parallele et agrege les resultats.
+
+    Utilise asyncio.gather pour la concurrence, avec timeout par tache.
+    """
+
+    @staticmethod
+    async def execute_parallel(
+        tasks: list[dict],
+        executor,
+        timeout_per_task: float = 30.0,
+    ) -> list[dict]:
+        """Execute N taches en parallele.
+
+        tasks: [{"id": str, "type": str, "data": dict}, ...]
+        executor: async callable(type, data) -> {"success": bool, "result": any}
+        Retourne: [{"id": str, "success": bool, "result": any, "error": str, "duration": float}]
+        """
+        if not tasks:
+            return []
+
+        async def _run_one(task: dict) -> dict:
+            t0 = datetime.now(timezone.utc)
+            try:
+                result = await asyncio.wait_for(
+                    executor(task.get("type", ""), task.get("data", {})),
+                    timeout=timeout_per_task,
+                )
+                duration = (datetime.now(timezone.utc) - t0).total_seconds()
+                return {
+                    "id": task.get("id", "?"),
+                    "success": result.get("success", False),
+                    "result": result.get("result"),
+                    "error": result.get("error", ""),
+                    "duration": round(duration, 2),
+                }
+            except asyncio.TimeoutError:
+                duration = (datetime.now(timezone.utc) - t0).total_seconds()
+                return {
+                    "id": task.get("id", "?"),
+                    "success": False,
+                    "result": None,
+                    "error": f"Timeout apres {timeout_per_task}s",
+                    "duration": round(duration, 2),
+                }
+            except Exception as e:
+                duration = (datetime.now(timezone.utc) - t0).total_seconds()
+                return {
+                    "id": task.get("id", "?"),
+                    "success": False,
+                    "result": None,
+                    "error": str(e),
+                    "duration": round(duration, 2),
+                }
+
+        results = await asyncio.gather(*[_run_one(t) for t in tasks])
+        return list(results)
+
+    @staticmethod
+    def aggregate_results(results: list[dict]) -> dict:
+        """Agrege les resultats de taches paralleles en un resume."""
+        total = len(results)
+        succeeded = sum(1 for r in results if r.get("success"))
+        failed = total - succeeded
+        total_duration = sum(r.get("duration", 0) for r in results)
+        return {
+            "total": total,
+            "succeeded": succeeded,
+            "failed": failed,
+            "success_rate": round(succeeded / total * 100, 1) if total > 0 else 0,
+            "total_duration": round(total_duration, 2),
+            "results": results,
+        }
+
+    @staticmethod
+    def split_independent_tasks(plan: list[dict]) -> list[list[dict]]:
+        """Decoupe un plan en groupes de taches independantes (parallelisables).
+
+        Deux taches sont independantes si aucune ne depend de l'autre.
+        Retourne une liste de "vagues" : chaque vague peut etre executee en parallele.
+        """
+        if not plan:
+            return []
+
+        completed_ids: set[str] = set()
+        waves: list[list[dict]] = []
+
+        remaining = list(plan)
+        max_iterations = len(plan) + 1  # safety
+
+        for _ in range(max_iterations):
+            if not remaining:
+                break
+            wave = []
+            still_remaining = []
+            for task in remaining:
+                deps = set(task.get("depends_on", []))
+                if deps.issubset(completed_ids):
+                    wave.append(task)
+                else:
+                    still_remaining.append(task)
+            if not wave:
+                # Deadlock : ajouter tout le reste en sequence
+                for t in still_remaining:
+                    waves.append([t])
+                break
+            waves.append(wave)
+            completed_ids.update(t.get("id", "") for t in wave)
+            remaining = still_remaining
+
+        return waves
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MOYENNE PRIORITE — Context, Validation, Feedback, Observabilite
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 7. Context Manager (gestion contexte long) ──────────────────────────────
+
+class ContextManager:
+    """Gestion hierarchique du contexte pour conversations longues.
+
+    Strategie :
+    - Messages recents : gardes integralement
+    - Messages anciens : resumes automatiquement
+    - Donnees factuelles : extraites et stockees en memoire
+    """
+
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        """Estimation rapide du nombre de tokens (~4 chars/token)."""
+        return max(1, len(text) // 4)
+
+    @staticmethod
+    def summarize_messages(messages: list[dict], max_summary_tokens: int = 500) -> str:
+        """Resume une serie de messages en un paragraphe compact."""
+        if not messages:
+            return ""
+        lines = []
+        for m in messages:
+            role = m.get("role", "?")
+            content = m.get("content", "")[:200]
+            lines.append(f"[{role}] {content}")
+        full = "\n".join(lines)
+        # Tronquer au budget
+        max_chars = max_summary_tokens * 4
+        if len(full) > max_chars:
+            full = full[: max_chars - 20] + "\n[... tronque ...]"
+        return f"=== RESUME CONVERSATION ANTERIEURE ===\n{full}"
+
+    @staticmethod
+    def build_context_window(
+        messages: list[dict],
+        max_tokens: int = 8000,
+        recent_keep: int = 10,
+    ) -> tuple[list[dict], str]:
+        """Construit une fenetre de contexte optimisee.
+
+        Retourne (messages_recents, resume_anciens).
+        - Les N derniers messages sont gardes intacts
+        - Les anciens sont resumes
+        """
+        if not messages:
+            return [], ""
+
+        total_tokens = sum(
+            ContextManager.estimate_tokens(m.get("content", ""))
+            for m in messages
+        )
+
+        if total_tokens <= max_tokens:
+            return messages, ""
+
+        # Garder les recent_keep derniers, resumer le reste
+        recent = messages[-recent_keep:]
+        old = messages[:-recent_keep]
+
+        # Budget restant pour le resume
+        recent_tokens = sum(
+            ContextManager.estimate_tokens(m.get("content", ""))
+            for m in recent
+        )
+        summary_budget = max(200, max_tokens - recent_tokens)
+        summary = ContextManager.summarize_messages(old, summary_budget)
+
+        return recent, summary
+
+    @staticmethod
+    def extract_facts(messages: list[dict]) -> list[dict]:
+        """Extrait les faits importants des messages (noms, dates, chiffres)."""
+        facts = []
+        patterns = [
+            (r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b', "date"),
+            (r'\b\d+[\.,]\d+\s*[€$%]\b', "nombre"),
+            (r'\b[A-Z][a-z]+ [A-Z][a-z]+\b', "nom_propre"),
+            (r'https?://\S+', "url"),
+            (r'\b[\w.+-]+@[\w-]+\.[\w.-]+\b', "email"),
+        ]
+        for m in messages:
+            content = m.get("content", "")
+            for pattern, fact_type in patterns:
+                for match in re.finditer(pattern, content):
+                    facts.append({
+                        "type": fact_type,
+                        "value": match.group(0),
+                        "role": m.get("role", "?"),
+                    })
+        return facts
+
+
+# ── 8. Action Validator (pre-execution) ──────────────────────────────────────
+
+class ActionValidator:
+    """Validation pre-execution des actions pour eviter les erreurs couteuses.
+
+    Verifie la structure, les champs requis, et evalue le risque.
+    """
+
+    REQUIRED_FIELDS: dict[str, list[str]] = {
+        "PDF": ["title"],
+        "EMAIL": ["to", "subject", "body"],
+        "GMAIL_SEND": ["to", "subject", "body"],
+        "IMAGE": ["prompt"],
+        "CALENDAR_EVENT": ["title", "start"],
+        "FILE_CREATE": ["path", "content"],
+        "DRIVE_SAVE": ["filename", "content"],
+        "CRON": ["label", "instruction", "cron_expr"],
+        "MEMORY": ["key", "value"],
+        "X_SEARCH": ["query"],
+        "SEARCH": ["query"],
+        "COMPUTER_USE": ["prompt"],
+        "CODE": ["code"],
+    }
+
+    RISK_LEVELS: dict[str, str] = {
+        "EMAIL": "high",
+        "GMAIL_SEND": "high",
+        "FILE_CREATE": "medium",
+        "DRIVE_SAVE": "medium",
+        "CALENDAR_EVENT": "medium",
+        "CRON": "medium",
+        "COMPUTER_USE": "high",
+        "PDF": "low",
+        "IMAGE": "low",
+        "SEARCH": "low",
+        "X_SEARCH": "low",
+        "MEMORY": "low",
+        "SCREENSHOT": "low",
+    }
+
+    @classmethod
+    def validate(cls, action_type: str, action_data: dict) -> dict:
+        """Valide une action avant execution.
+
+        Retourne: {"valid": bool, "errors": [str], "warnings": [str], "risk": str}
+        """
+        errors = []
+        warnings = []
+        risk = cls.RISK_LEVELS.get(action_type, "unknown")
+
+        if not action_type:
+            errors.append("Type d'action manquant")
+        if not isinstance(action_data, dict):
+            errors.append("Donnees d'action invalides (pas un dict)")
+            return {"valid": False, "errors": errors, "warnings": warnings, "risk": risk}
+
+        # Verifier les champs requis
+        required = cls.REQUIRED_FIELDS.get(action_type, [])
+        for field in required:
+            val = action_data.get(field)
+            if val is None or (isinstance(val, str) and not val.strip()):
+                errors.append(f"Champ requis manquant: {field}")
+
+        # Validation specifique par type
+        if action_type in ("EMAIL", "GMAIL_SEND"):
+            to = action_data.get("to", "")
+            if to and "@" not in str(to):
+                errors.append(f"Adresse email invalide: {to}")
+        elif action_type == "CRON":
+            expr = action_data.get("cron_expr", "")
+            if expr and len(expr.split()) != 5:
+                errors.append(f"Expression cron invalide (attendu 5 champs): {expr}")
+        elif action_type == "FILE_CREATE":
+            path = action_data.get("path", "")
+            dangerous = ["..", "/etc/", "/root/", "C:\\Windows", "System32"]
+            if any(d in str(path) for d in dangerous):
+                warnings.append(f"Chemin potentiellement dangereux: {path}")
+
+        # Avertissements generiques
+        if risk == "high":
+            warnings.append(f"Action a haut risque ({action_type}) — verification recommandee")
+
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "warnings": warnings,
+            "risk": risk,
+        }
+
+    @classmethod
+    def validate_batch(cls, actions: list[dict]) -> dict:
+        """Valide un lot d'actions."""
+        results = []
+        all_valid = True
+        for act in actions:
+            r = cls.validate(act.get("type", ""), act.get("data", {}))
+            r["action_type"] = act.get("type", "")
+            results.append(r)
+            if not r["valid"]:
+                all_valid = False
+        return {"all_valid": all_valid, "results": results}
+
+
+# ── 9. Feedback Learner ─────────────────────────────────────────────────────
+
+class FeedbackLearner:
+    """Apprend des corrections et preferences de l'utilisateur.
+
+    Detecte quand l'utilisateur corrige l'agent et stocke le pattern
+    en memoire pour ne pas repeter l'erreur.
+    """
+
+    CORRECTION_PATTERNS = [
+        r"\bnon\b.*\b(je voulais|je veux|plutot|plut[oô]t)\b",
+        r"\bc'est pas [cç]a\b",
+        r"\bpas comme [cç]a\b",
+        r"\bje t'ai (dit|demand[eé])\b",
+        r"\brefais\b",
+        r"\brecommence\b",
+        r"\bcorrige\b",
+        r"\bfaux\b",
+        r"\berreur\b",
+        r"\bmauvais\b",
+        r"\bincorrect\b",
+    ]
+
+    @classmethod
+    def detect_correction(cls, user_message: str) -> bool:
+        """Detecte si le message utilisateur est une correction."""
+        msg = user_message.lower().strip()
+        import unicodedata
+        msg_norm = ''.join(
+            c for c in unicodedata.normalize('NFKD', msg) if not unicodedata.combining(c)
+        )
+        return any(re.search(p, msg_norm) for p in cls.CORRECTION_PATTERNS)
+
+    @classmethod
+    def extract_feedback(
+        cls,
+        user_correction: str,
+        agent_previous_response: str,
+    ) -> dict:
+        """Extrait le feedback structure d'une correction utilisateur."""
+        return {
+            "type": "correction",
+            "user_said": user_correction[:500],
+            "agent_said": agent_previous_response[:500],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "lesson": "",  # Rempli par le LLM si disponible
+        }
+
+    @classmethod
+    async def learn_from_correction(
+        cls,
+        user_correction: str,
+        agent_previous_response: str,
+        db=None,
+        user_id: str | None = None,
+        api_key: str | None = None,
+    ) -> dict:
+        """Analyse la correction et sauvegarde la lecon en memoire."""
+        feedback = cls.extract_feedback(user_correction, agent_previous_response)
+
+        # Essayer d'extraire la lecon avec LLM
+        key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        if key:
+            try:
+                import anthropic
+                client = anthropic.Anthropic(api_key=key)
+                msg = await asyncio.to_thread(
+                    lambda: client.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=200,
+                        system="Extrais en UNE phrase la lecon a retenir. Ex: 'L'utilisateur prefere X au lieu de Y'",
+                        messages=[{"role": "user", "content":
+                            f"Agent a dit: {agent_previous_response[:300]}\n"
+                            f"Utilisateur corrige: {user_correction[:300]}\n"
+                            "Lecon:"}],
+                    )
+                )
+                feedback["lesson"] = msg.content[0].text.strip()
+            except Exception:
+                feedback["lesson"] = f"Correction: {user_correction[:100]}"
+        else:
+            feedback["lesson"] = f"Correction: {user_correction[:100]}"
+
+        # Sauvegarder en memoire si DB disponible
+        if db and user_id:
+            try:
+                _save_memory(db, user_id, f"feedback_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                             feedback["lesson"], category="feedback")
+            except Exception:
+                pass
+
+        return feedback
+
+    @classmethod
+    def format_feedback_context(cls, feedbacks: list[dict], max_len: int = 800) -> str:
+        """Formatte les feedbacks pour injection dans le prompt."""
+        if not feedbacks:
+            return ""
+        lines = ["=== LECONS APPRISES (ne pas repeter ces erreurs) ==="]
+        for fb in feedbacks[-10:]:  # Garder les 10 dernieres
+            lesson = fb.get("lesson", "")
+            if lesson:
+                lines.append(f"- {lesson}")
+        text = "\n".join(lines)
+        if len(text) > max_len:
+            text = text[:max_len - 3] + "..."
+        return text
+
+
+# ── 10. Agent Observer (observabilite) ───────────────────────────────────────
+
+class AgentObserver:
+    """Trace de raisonnement structuree pour debug et transparence.
+
+    Enregistre chaque etape du raisonnement : plan, action, observation, reflexion.
+    """
+
+    def __init__(self, user_id: str = "", task_id: str = ""):
+        self.user_id = user_id
+        self.task_id = task_id or str(uuid.uuid4())[:8]
+        self.trace: list[dict] = []
+        self.start_time = datetime.now(timezone.utc)
+        self.metrics: dict = {
+            "actions_executed": 0,
+            "actions_succeeded": 0,
+            "actions_failed": 0,
+            "retries": 0,
+            "tools_used": [],
+            "tokens_estimated": 0,
+        }
+
+    def log(self, step_type: str, content: str, metadata: dict | None = None) -> None:
+        """Enregistre une etape dans la trace."""
+        self.trace.append({
+            "type": step_type,
+            "content": content[:1000],
+            "metadata": metadata or {},
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+
+    def log_action(self, action_type: str, success: bool, detail: str = "") -> None:
+        self.metrics["actions_executed"] += 1
+        if success:
+            self.metrics["actions_succeeded"] += 1
+        else:
+            self.metrics["actions_failed"] += 1
+        if action_type not in self.metrics["tools_used"]:
+            self.metrics["tools_used"].append(action_type)
+        self.log("action", f"{action_type}: {'OK' if success else 'FAIL'} {detail}",
+                 {"action_type": action_type, "success": success})
+
+    def log_thought(self, thought: str) -> None:
+        self.log("thought", thought)
+
+    def log_observation(self, observation: str) -> None:
+        self.log("observation", observation)
+
+    def log_reflection(self, reflection: str) -> None:
+        self.log("reflection", reflection)
+        self.metrics["retries"] += 1
+
+    def get_summary(self) -> dict:
+        """Resume complet de l'execution."""
+        elapsed = (datetime.now(timezone.utc) - self.start_time).total_seconds()
+        return {
+            "task_id": self.task_id,
+            "user_id": self.user_id,
+            "duration_seconds": round(elapsed, 2),
+            "steps_count": len(self.trace),
+            "metrics": dict(self.metrics),
+        }
+
+    def format_trace(self, max_steps: int = 20) -> str:
+        """Formate la trace pour affichage."""
+        if not self.trace:
+            return "Aucune trace."
+        lines = [f"=== TRACE ({self.task_id}) ==="]
+        for step in self.trace[-max_steps:]:
+            icon = {"thought": "💭", "action": "⚡", "observation": "👁", "reflection": "🔄"}.get(step["type"], "•")
+            lines.append(f"  {icon} [{step['type']}] {step['content'][:150]}")
+        summary = self.get_summary()
+        lines.append(f"--- {summary['metrics']['actions_executed']} actions, "
+                     f"{summary['metrics']['actions_succeeded']} OK, "
+                     f"{summary['duration_seconds']}s ---")
+        return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NICE-TO-HAVE — Benchmark, Personality, Proactivite, Multi-modal
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── 11. Benchmark Runner ─────────────────────────────────────────────────────
+
+class BenchmarkRunner:
+    """Suite de benchmarks pour evaluer les capacites de l'agent.
+
+    Chaque benchmark est une tache avec un resultat attendu et un score.
+    """
+
+    BENCHMARKS: list[dict] = [
+        {
+            "id": "search_factual",
+            "category": "search",
+            "prompt": "Quelle est la capitale de la Finlande?",
+            "expected_contains": ["Helsinki"],
+            "max_score": 10,
+        },
+        {
+            "id": "math_basic",
+            "category": "reasoning",
+            "prompt": "Calcule 247 * 13 + 89",
+            "expected_contains": ["3300"],
+            "max_score": 10,
+        },
+        {
+            "id": "planning_simple",
+            "category": "planning",
+            "prompt": "Je veux organiser un diner pour 8 personnes samedi soir",
+            "expected_not_contains": ["je ne peux pas"],
+            "max_score": 10,
+        },
+        {
+            "id": "pdf_generation",
+            "category": "tools",
+            "prompt": "Genere un rapport PDF sur les tendances AI",
+            "expected_action": "PDF",
+            "max_score": 10,
+        },
+        {
+            "id": "email_composition",
+            "category": "tools",
+            "prompt": "Ecris un email professionnel a jean@example.com pour proposer un partenariat",
+            "expected_action": "EMAIL",
+            "max_score": 10,
+        },
+        {
+            "id": "multi_step",
+            "category": "planning",
+            "prompt": "Cherche les 3 meilleurs restaurants italiens a Paris et fais-moi un PDF comparatif",
+            "expected_action": "PDF",
+            "max_score": 20,
+        },
+        {
+            "id": "code_generation",
+            "category": "tools",
+            "prompt": "Ecris un script Python qui calcule les nombres premiers jusqu'a 100",
+            "expected_action": "CODE",
+            "max_score": 10,
+        },
+        {
+            "id": "memory_recall",
+            "category": "memory",
+            "prompt": "Souviens-toi que j'aime le cafe noir",
+            "expected_action": "MEMORY",
+            "max_score": 10,
+        },
+    ]
+
+    @classmethod
+    def get_benchmarks(cls, category: str | None = None) -> list[dict]:
+        if category:
+            return [b for b in cls.BENCHMARKS if b["category"] == category]
+        return list(cls.BENCHMARKS)
+
+    @classmethod
+    def score_response(cls, benchmark: dict, response: str, actions: list[dict] | None = None) -> dict:
+        """Evalue la reponse d'un benchmark."""
+        score = 0
+        max_score = benchmark.get("max_score", 10)
+        details = []
+
+        # Verifier le contenu attendu
+        expected = benchmark.get("expected_contains", [])
+        for exp in expected:
+            if exp.lower() in response.lower():
+                score += max_score // max(1, len(expected))
+                details.append(f"Contient '{exp}': OK")
+            else:
+                details.append(f"Contient '{exp}': MANQUANT")
+
+        # Verifier le contenu interdit
+        not_expected = benchmark.get("expected_not_contains", [])
+        for ne in not_expected:
+            if ne.lower() in response.lower():
+                score -= max_score // 2
+                details.append(f"Ne devrait pas contenir '{ne}': ECHEC")
+            else:
+                details.append(f"Ne contient pas '{ne}': OK")
+
+        # Verifier l'action attendue
+        expected_action = benchmark.get("expected_action")
+        if expected_action and actions:
+            found = any(a.get("type") == expected_action for a in actions)
+            if found:
+                score += max_score // 2 if expected else max_score
+                details.append(f"Action {expected_action}: PRESENTE")
+            else:
+                details.append(f"Action {expected_action}: ABSENTE")
+
+        # Si pas de critere specifique, accorder le score si reponse non vide
+        if not expected and not not_expected and not expected_action:
+            if response.strip():
+                score = max_score
+                details.append("Reponse non vide: OK")
+
+        return {
+            "benchmark_id": benchmark["id"],
+            "score": max(0, min(score, max_score)),
+            "max_score": max_score,
+            "percentage": round(max(0, min(score, max_score)) / max_score * 100, 1) if max_score > 0 else 0,
+            "details": details,
+        }
+
+    @classmethod
+    def aggregate_scores(cls, scores: list[dict]) -> dict:
+        """Agrege les scores de tous les benchmarks."""
+        if not scores:
+            return {"total_score": 0, "max_score": 0, "percentage": 0, "by_category": {}}
+        total = sum(s["score"] for s in scores)
+        max_total = sum(s["max_score"] for s in scores)
+        by_category: dict[str, dict] = {}
+        for s in scores:
+            bid = s["benchmark_id"]
+            bench = next((b for b in cls.BENCHMARKS if b["id"] == bid), {})
+            cat = bench.get("category", "other")
+            if cat not in by_category:
+                by_category[cat] = {"score": 0, "max": 0}
+            by_category[cat]["score"] += s["score"]
+            by_category[cat]["max"] += s["max_score"]
+        return {
+            "total_score": total,
+            "max_score": max_total,
+            "percentage": round(total / max_total * 100, 1) if max_total > 0 else 0,
+            "by_category": by_category,
+            "count": len(scores),
+        }
+
+
+# ── 12. Personality Adapter ──────────────────────────────────────────────────
+
+class PersonalityAdapter:
+    """Adaptation avancee de la personnalite au-dela du ton progressif.
+
+    Analyse le style de l'utilisateur et s'adapte :
+    - Verbeux → reponses plus longues
+    - Laconique → ultra-court
+    - Formel → pas de slang
+    - Technique → jargon OK
+    """
+
+    @staticmethod
+    def analyze_user_style(messages: list[dict]) -> dict:
+        """Analyse le style d'ecriture de l'utilisateur sur ses messages."""
+        user_msgs = [m.get("content", "") for m in messages if m.get("role") == "user"]
+        if not user_msgs:
+            return {"verbosity": "normal", "formality": "normal", "avg_length": 0, "uses_emoji": False}
+
+        avg_len = sum(len(m) for m in user_msgs) / len(user_msgs)
+        total_text = " ".join(user_msgs)
+
+        # Verbosite
+        if avg_len > 200:
+            verbosity = "verbose"
+        elif avg_len < 30:
+            verbosity = "concise"
+        else:
+            verbosity = "normal"
+
+        # Formalite
+        informal_markers = ["lol", "mdr", "ptdr", "bg", "frr", "stp", "pk", "jsp", "tkt"]
+        formal_markers = ["cordialement", "veuillez", "je vous", "pourriez-vous", "merci de"]
+        informal_count = sum(1 for m in informal_markers if m in total_text.lower())
+        formal_count = sum(1 for m in formal_markers if m in total_text.lower())
+
+        if formal_count > informal_count:
+            formality = "formal"
+        elif informal_count > 2:
+            formality = "informal"
+        else:
+            formality = "normal"
+
+        # Emoji
+        import re as _re
+        emoji_pattern = _re.compile(
+            "[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF"
+            "\U0001F1E0-\U0001F1FF\U00002702-\U000027B0\U0001F900-\U0001F9FF]+",
+            flags=_re.UNICODE,
+        )
+        uses_emoji = bool(emoji_pattern.search(total_text))
+
+        return {
+            "verbosity": verbosity,
+            "formality": formality,
+            "avg_length": round(avg_len, 0),
+            "uses_emoji": uses_emoji,
+            "message_count": len(user_msgs),
+        }
+
+    @staticmethod
+    def get_style_instructions(style: dict) -> str:
+        """Genere les instructions de style adaptees."""
+        parts = []
+
+        verbosity = style.get("verbosity", "normal")
+        if verbosity == "verbose":
+            parts.append("L'utilisateur aime les reponses detaillees — tu peux etre plus long (5-8 phrases max).")
+        elif verbosity == "concise":
+            parts.append("L'utilisateur est bref — reponds en 1-2 phrases MAX, ultra-concis.")
+
+        formality = style.get("formality", "normal")
+        if formality == "formal":
+            parts.append("L'utilisateur est formel — adapte ton langage, pas de slang.")
+        elif formality == "informal":
+            parts.append("L'utilisateur est tres familier — tu peux etre encore plus decontracte.")
+
+        if style.get("uses_emoji"):
+            parts.append("L'utilisateur utilise des emojis — tu peux en mettre aussi.")
+
+        return " ".join(parts) if parts else ""
+
+
+# ── 13. Proactive Coach ──────────────────────────────────────────────────────
+
+class ProactiveCoach:
+    """Generation de messages proactifs (check-ins, rappels, encouragements).
+
+    Utilise les donnees du profil et des decisions pour generer des messages
+    contextuels que le scheduler peut envoyer.
+    """
+
+    TEMPLATES: dict[str, list[str]] = {
+        "check_in": [
+            "Hey {nom}, tu as avance sur ton objectif aujourd'hui?",
+            "{nom}, t'en es ou avec '{objectif}'?",
+            "Salut {nom}! Rappel : ton objectif '{objectif}' est a {proba:.0f}%. On bosse?",
+        ],
+        "encouragement": [
+            "Bien joue {nom}! Ta probabilite est montee a {proba:.0f}%. Continue!",
+            "{nom}, tes dernieres decisions sont solides. Keep going!",
+            "Belle progression {nom}! {proba:.0f}% et ca monte. Lache rien!",
+        ],
+        "warning": [
+            "{nom}, attention, ta proba a baisse a {proba:.0f}%. Faut reagir!",
+            "Hey {nom}, tes dernieres decisions ne vont pas dans le bon sens. On en parle?",
+            "{nom}, {proba:.0f}%... C'est pas la trajectoire. Qu'est-ce qui bloque?",
+        ],
+        "weekly_review": [
+            "{nom}, c'est dimanche — recap de ta semaine : {proba:.0f}%, {nb_decisions} decisions prises.",
+            "Bilan hebdo {nom} : probabilite {proba:.0f}%, {nb_sous_obj} sous-objectifs en cours.",
+        ],
+    }
+
+    @classmethod
+    def generate_message(
+        cls,
+        message_type: str,
+        profil_data: dict | None = None,
+        decisions: list | None = None,
+        sous_objectifs: list | None = None,
+    ) -> str:
+        """Genere un message proactif base sur le template et les donnees."""
+        import random
+
+        templates = cls.TEMPLATES.get(message_type, cls.TEMPLATES["check_in"])
+        template = random.choice(templates)
+
+        nom = "champion"
+        objectif = "ton objectif"
+        proba = 0.0
+        if profil_data:
+            nom = profil_data.get("nom", "champion")
+            objectif = profil_data.get("objectif_description", "ton objectif")
+            if len(objectif) > 50:
+                objectif = objectif[:47] + "..."
+            proba = profil_data.get("probabilite_actuelle", 0)
+
+        nb_decisions = len(decisions) if decisions else 0
+        nb_sous_obj = len(sous_objectifs) if sous_objectifs else 0
+
+        try:
+            return template.format(
+                nom=nom, objectif=objectif, proba=proba,
+                nb_decisions=nb_decisions, nb_sous_obj=nb_sous_obj,
+            )
+        except (KeyError, ValueError):
+            return f"Hey {nom}, on avance sur '{objectif}'?"
+
+    @classmethod
+    def determine_message_type(
+        cls,
+        profil_data: dict | None = None,
+        decisions: list | None = None,
+    ) -> str:
+        """Determine le type de message le plus adapte."""
+        if not profil_data:
+            return "check_in"
+
+        proba = profil_data.get("probabilite_actuelle", 0)
+
+        # Verifier les decisions recentes
+        if decisions and len(decisions) >= 3:
+            recent_impacts = [d.get("impact", 0) for d in decisions[:5]]
+            avg_impact = sum(recent_impacts) / len(recent_impacts)
+            if avg_impact > 1:
+                return "encouragement"
+            elif avg_impact < -1:
+                return "warning"
+
+        # Check jour de la semaine
+        if datetime.now().weekday() == 6:  # Dimanche
+            return "weekly_review"
+
+        # Par defaut, check-in
+        if proba > 50:
+            return "encouragement"
+        elif proba < 20:
+            return "warning"
+        return "check_in"
+
+
+# ── 14. Multi-modal Output ───────────────────────────────────────────────────
+
+class MultiModalOutput:
+    """Gestion des sorties multi-modales enrichies.
+
+    Centralise la logique de formatage pour differents types de sortie :
+    PDF, images, audio, fichiers, tableaux, etc.
+    """
+
+    SUPPORTED_FORMATS = [
+        "text", "pdf", "image", "audio", "code", "table",
+        "file", "chart", "link", "calendar_event",
+    ]
+
+    @staticmethod
+    def detect_best_format(user_message: str, actions: list[dict] | None = None) -> str:
+        """Determine le meilleur format de sortie pour la demande."""
+        msg = user_message.lower()
+
+        if any(w in msg for w in ["pdf", "rapport", "document", "dossier"]):
+            return "pdf"
+        if any(w in msg for w in ["image", "photo", "illustration", "dessine", "genere une image"]):
+            return "image"
+        if any(w in msg for w in ["tableau", "compare", "liste", "classement", "top"]):
+            return "table"
+        if any(w in msg for w in ["code", "script", "programme", "fonction"]):
+            return "code"
+        if any(w in msg for w in ["fichier", "sauvegarde", "cree un fichier"]):
+            return "file"
+        if any(w in msg for w in ["graphique", "courbe", "chart", "diagramme"]):
+            return "chart"
+        if any(w in msg for w in ["lien", "url", "site"]):
+            return "link"
+        if any(w in msg for w in ["evenement", "rendez-vous", "rdv", "reunion", "calendrier"]):
+            return "calendar_event"
+        if any(w in msg for w in ["audio", "voix", "lis-moi", "ecouter"]):
+            return "audio"
+        return "text"
+
+    @staticmethod
+    def format_table(headers: list[str], rows: list[list]) -> str:
+        """Formatte un tableau en texte aligne."""
+        if not headers or not rows:
+            return ""
+        # Calculer les largeurs
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                if i < len(widths):
+                    widths[i] = max(widths[i], len(str(cell)))
+
+        # Header
+        header_line = " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+        separator = "-+-".join("-" * w for w in widths)
+        lines = [header_line, separator]
+        for row in rows:
+            line = " | ".join(str(cell).ljust(widths[i]) if i < len(widths) else str(cell)
+                             for i, cell in enumerate(row))
+            lines.append(line)
+        return "\n".join(lines)
+
+    @staticmethod
+    def estimate_output_complexity(actions: list[dict]) -> str:
+        """Estime la complexite de la sortie."""
+        if not actions:
+            return "simple"
+        action_types = set(a.get("type", "") for a in actions)
+        if len(action_types) >= 3:
+            return "complex"
+        if any(t in action_types for t in ("PDF", "COMPUTER_USE", "SPAWN_AGENT")):
+            return "complex"
+        if len(actions) > 2:
+            return "moderate"
+        return "simple"
+
+
 # ── SSE Streaming endpoint ──────────────────────────────────────────────────
 
 from fastapi.responses import StreamingResponse
