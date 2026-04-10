@@ -1751,3 +1751,474 @@ class TestToneInstructions:
         # Les deux doivent rester neutres/polis
         assert "neutre" in tone_bad.lower() or "poli" in tone_bad.lower()
         assert "neutre" in tone_good.lower() or "poli" in tone_good.lower()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 26. Working Memory (Scratchpad)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestWorkingMemory:
+    """Tests du scratchpad / memoire de travail en RAM."""
+
+    def setup_method(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        WorkingMemory._store.clear()
+        WorkingMemory._history.clear()
+
+    def test_set_and_get(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        WorkingMemory.set("u1", "key1", "value1")
+        assert WorkingMemory.get("u1", "key1") == "value1"
+
+    def test_get_default(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        assert WorkingMemory.get("u1", "missing") is None
+        assert WorkingMemory.get("u1", "missing", "fallback") == "fallback"
+
+    def test_append(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        WorkingMemory.append("u1", "list_key", "a")
+        WorkingMemory.append("u1", "list_key", "b")
+        result = WorkingMemory.get("u1", "list_key")
+        assert result == ["a", "b"]
+
+    def test_append_creates_list(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        WorkingMemory.set("u1", "x", "not_a_list")
+        WorkingMemory.append("u1", "x", "item")
+        assert WorkingMemory.get("u1", "x") == ["item"]
+
+    def test_all_returns_copy(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        WorkingMemory.set("u1", "a", 1)
+        WorkingMemory.set("u1", "b", 2)
+        data = WorkingMemory.all("u1")
+        assert data == {"a": 1, "b": 2}
+        # Modifying the copy doesn't affect store
+        data["c"] = 3
+        assert WorkingMemory.get("u1", "c") is None
+
+    def test_clear(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        WorkingMemory.set("u1", "k", "v")
+        WorkingMemory.clear("u1")
+        assert WorkingMemory.all("u1") == {}
+        assert WorkingMemory.history("u1") == []
+
+    def test_user_isolation(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        WorkingMemory.set("u1", "key", "val1")
+        WorkingMemory.set("u2", "key", "val2")
+        assert WorkingMemory.get("u1", "key") == "val1"
+        assert WorkingMemory.get("u2", "key") == "val2"
+
+    def test_session_isolation(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        WorkingMemory.set("u1", "key", "s1", session_id="sess1")
+        WorkingMemory.set("u1", "key", "s2", session_id="sess2")
+        assert WorkingMemory.get("u1", "key", session_id="sess1") == "s1"
+        assert WorkingMemory.get("u1", "key", session_id="sess2") == "s2"
+
+    def test_summarize_empty(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        assert WorkingMemory.summarize("u1") == ""
+
+    def test_summarize_with_data(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        WorkingMemory.set("u1", "search_results", "AI trends 2025")
+        WorkingMemory.set("u1", "last_pdf", "/api/agent3/pdf/report.pdf")
+        summary = WorkingMemory.summarize("u1")
+        assert "MEMOIRE DE TRAVAIL" in summary
+        assert "search_results" in summary
+        assert "last_pdf" in summary
+
+    def test_summarize_truncation(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        WorkingMemory.set("u1", "big", "x" * 500)
+        summary = WorkingMemory.summarize("u1", max_len=100)
+        assert len(summary) <= 100
+        assert summary.endswith("...")
+
+    def test_history(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        WorkingMemory.set("u1", "a", 1)
+        WorkingMemory.append("u1", "b", 2)
+        hist = WorkingMemory.history("u1")
+        assert len(hist) == 2
+        assert hist[0]["action"] == "set"
+        assert hist[1]["action"] == "append"
+
+    def test_size(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        assert WorkingMemory.size("u1") == 0
+        WorkingMemory.set("u1", "a", 1)
+        WorkingMemory.set("u1", "b", 2)
+        assert WorkingMemory.size("u1") == 2
+
+    def test_overwrite_value(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        WorkingMemory.set("u1", "k", "old")
+        WorkingMemory.set("u1", "k", "new")
+        assert WorkingMemory.get("u1", "k") == "new"
+
+    def test_complex_values(self):
+        from api.routers.agent3_openclaw import WorkingMemory
+        WorkingMemory.set("u1", "data", {"nested": [1, 2], "text": "hello"})
+        result = WorkingMemory.get("u1", "data")
+        assert result["nested"] == [1, 2]
+        assert result["text"] == "hello"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 27. Heuristic Planner (enrichi)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestHeuristicPlan:
+    """Tests du planificateur heuristique enrichi."""
+
+    def test_simple_message_has_steps(self):
+        from api.routers.agent3_openclaw import _heuristic_plan
+        plan = _heuristic_plan("salut comment ca va")
+        assert isinstance(plan, list)
+        assert len(plan) >= 1
+        for step in plan:
+            assert "id" in step
+            assert "label" in step
+            assert "depends_on" in step
+
+    def test_search_task_has_web_search_hint(self):
+        from api.routers.agent3_openclaw import _heuristic_plan
+        plan = _heuristic_plan("cherche les tendances AI 2025")
+        hints = [s.get("tool_hint") for s in plan if s.get("tool_hint")]
+        assert "web_search" in hints
+
+    def test_pdf_task_has_pdf_hint(self):
+        from api.routers.agent3_openclaw import _heuristic_plan
+        plan = _heuristic_plan("fais-moi un rapport PDF sur le marketing digital")
+        hints = [s.get("tool_hint") for s in plan if s.get("tool_hint")]
+        assert "ACTION:PDF" in hints
+
+    def test_email_task_has_email_hint(self):
+        from api.routers.agent3_openclaw import _heuristic_plan
+        plan = _heuristic_plan("envoie un email a mon boss")
+        hints = [s.get("tool_hint") for s in plan if s.get("tool_hint")]
+        assert "ACTION:EMAIL" in hints
+
+    def test_code_task_has_code_hint(self):
+        from api.routers.agent3_openclaw import _heuristic_plan
+        plan = _heuristic_plan("ecris un script Python pour trier des fichiers")
+        hints = [s.get("tool_hint") for s in plan if s.get("tool_hint")]
+        assert "code_sandbox" in hints
+
+    def test_browse_task_has_browser_hint(self):
+        from api.routers.agent3_openclaw import _heuristic_plan
+        plan = _heuristic_plan("va sur le site linkedin et extraire les infos")
+        hints = [s.get("tool_hint") for s in plan if s.get("tool_hint")]
+        assert "browser" in hints
+
+    def test_depends_on_chain(self):
+        """Les etapes doivent dependre de la precedente."""
+        from api.routers.agent3_openclaw import _heuristic_plan
+        plan = _heuristic_plan("cherche des infos et fais un rapport pdf")
+        # Verifier que le chain est correct
+        for i in range(1, len(plan)):
+            assert plan[i]["depends_on"] == [plan[i - 1]["id"]]
+
+    def test_all_steps_have_status(self):
+        from api.routers.agent3_openclaw import _heuristic_plan
+        plan = _heuristic_plan("analyse le marche et fais un rapport")
+        for step in plan:
+            assert step["status"] == "pending"
+
+    def test_complex_task_has_many_steps(self):
+        from api.routers.agent3_openclaw import _heuristic_plan
+        plan = _heuristic_plan("cherche les concurrents, analyse les prix, fais un rapport PDF avec synthese")
+        assert len(plan) >= 4  # understand + search + analyze + pdf + respond
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 28. LLM Planner (fallback sans API)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestLLMPlanner:
+    """Tests du planificateur LLM (tombe en fallback heuristique sans API key)."""
+
+    def test_fallback_without_api_key(self):
+        """Sans ANTHROPIC_API_KEY, retourne le plan heuristique."""
+        import asyncio
+        from api.routers.agent3_openclaw import _llm_plan_task
+        old_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            plan = asyncio.get_event_loop().run_until_complete(
+                _llm_plan_task("cherche les tendances AI")
+            )
+            assert isinstance(plan, list)
+            assert len(plan) >= 1
+            for step in plan:
+                assert "id" in step
+                assert "depends_on" in step
+        finally:
+            if old_key:
+                os.environ["ANTHROPIC_API_KEY"] = old_key
+
+    def test_fallback_with_invalid_key(self):
+        """Avec une fausse cle, le LLM echoue → fallback heuristique."""
+        import asyncio
+        from api.routers.agent3_openclaw import _llm_plan_task
+        plan = asyncio.get_event_loop().run_until_complete(
+            _llm_plan_task("cherche les tendances AI", api_key="sk-fake-invalid")
+        )
+        assert isinstance(plan, list)
+        assert len(plan) >= 1
+
+    def test_context_is_accepted(self):
+        """Verifier que le contexte est passe sans erreur."""
+        import asyncio
+        from api.routers.agent3_openclaw import _llm_plan_task
+        old_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            plan = asyncio.get_event_loop().run_until_complete(
+                _llm_plan_task("fais un truc", context="Utilisateur: Jean, Dev, Paris")
+            )
+            assert isinstance(plan, list)
+        finally:
+            if old_key:
+                os.environ["ANTHROPIC_API_KEY"] = old_key
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 29. Self-reflection (ReAct)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestSelfReflection:
+    """Tests de la reflexion / auto-correction sur echec."""
+
+    def test_auth_error_is_not_retryable(self):
+        """Les erreurs d'autorisation ne doivent pas etre retentees."""
+        import asyncio
+        from api.routers.agent3_openclaw import _reflect_on_failure
+        old_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            result = asyncio.get_event_loop().run_until_complete(
+                _reflect_on_failure("EMAIL", {"to": "a@b.com"}, "403 Forbidden")
+            )
+            assert result["should_retry"] is False
+        finally:
+            if old_key:
+                os.environ["ANTHROPIC_API_KEY"] = old_key
+
+    def test_timeout_is_retryable(self):
+        """Les erreurs reseau temporaires doivent etre retentees."""
+        import asyncio
+        from api.routers.agent3_openclaw import _reflect_on_failure
+        result = asyncio.get_event_loop().run_until_complete(
+            _reflect_on_failure("SEARCH", {"query": "AI"}, "Connection timeout after 30s")
+        )
+        assert result["should_retry"] is True
+        assert result["corrected_action"] is not None
+        assert result["corrected_action"]["type"] == "SEARCH"
+
+    def test_connection_refused_is_retryable(self):
+        import asyncio
+        from api.routers.agent3_openclaw import _reflect_on_failure
+        result = asyncio.get_event_loop().run_until_complete(
+            _reflect_on_failure("PDF", {}, "Connection refused")
+        )
+        assert result["should_retry"] is True
+
+    def test_unauthorized_is_not_retryable(self):
+        import asyncio
+        from api.routers.agent3_openclaw import _reflect_on_failure
+        result = asyncio.get_event_loop().run_until_complete(
+            _reflect_on_failure("CALENDAR_EVENT", {}, "unauthorized: invalid token")
+        )
+        assert result["should_retry"] is False
+
+    def test_quota_exceeded_is_not_retryable(self):
+        import asyncio
+        from api.routers.agent3_openclaw import _reflect_on_failure
+        result = asyncio.get_event_loop().run_until_complete(
+            _reflect_on_failure("IMAGE", {}, "Quota exceeded for DALL-E 3")
+        )
+        assert result["should_retry"] is False
+
+    def test_unknown_error_without_api(self):
+        """Sans API, une erreur inconnue retourne should_retry=False."""
+        import asyncio
+        from api.routers.agent3_openclaw import _reflect_on_failure
+        old_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            result = asyncio.get_event_loop().run_until_complete(
+                _reflect_on_failure("PDF", {"title": "Test"}, "Some weird error happened")
+            )
+            assert isinstance(result["should_retry"], bool)
+            assert "reason" in result
+        finally:
+            if old_key:
+                os.environ["ANTHROPIC_API_KEY"] = old_key
+
+    def test_result_has_all_fields(self):
+        """Le resultat de reflection doit toujours avoir les 4 champs."""
+        import asyncio
+        from api.routers.agent3_openclaw import _reflect_on_failure
+        result = asyncio.get_event_loop().run_until_complete(
+            _reflect_on_failure("SEARCH", {}, "timeout")
+        )
+        assert "should_retry" in result
+        assert "corrected_action" in result
+        assert "alternative_approach" in result
+        assert "reason" in result
+
+    def test_502_is_retryable(self):
+        import asyncio
+        from api.routers.agent3_openclaw import _reflect_on_failure
+        result = asyncio.get_event_loop().run_until_complete(
+            _reflect_on_failure("PDF", {}, "HTTP Error 502: Bad Gateway")
+        )
+        assert result["should_retry"] is True
+
+    def test_401_is_not_retryable(self):
+        import asyncio
+        from api.routers.agent3_openclaw import _reflect_on_failure
+        result = asyncio.get_event_loop().run_until_complete(
+            _reflect_on_failure("EMAIL", {}, "HTTP 401 Unauthorized")
+        )
+        assert result["should_retry"] is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 30. Execute with reflection (ReAct loop)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestExecuteWithReflection:
+    """Tests de la boucle ReAct complete (execute → reflect → retry)."""
+
+    def test_success_on_first_attempt(self):
+        import asyncio
+        from api.routers.agent3_openclaw import _execute_action_with_reflection
+
+        async def executor(action_type, action_data):
+            return {"success": True, "result": "ok", "error": ""}
+
+        result = asyncio.get_event_loop().run_until_complete(
+            _execute_action_with_reflection("SEARCH", {"query": "AI"}, executor)
+        )
+        assert result["success"] is True
+        assert result["attempts"] == 1
+        assert result["reflections"] == []
+
+    def test_fails_after_max_retries(self):
+        import asyncio
+        from api.routers.agent3_openclaw import _execute_action_with_reflection
+
+        call_count = 0
+        async def failing_executor(action_type, action_data):
+            nonlocal call_count
+            call_count += 1
+            return {"success": False, "result": None, "error": "always fails"}
+
+        old_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            result = asyncio.get_event_loop().run_until_complete(
+                _execute_action_with_reflection("SEARCH", {}, failing_executor, max_retries=2)
+            )
+            assert result["success"] is False
+            assert result["attempts"] >= 1
+        finally:
+            if old_key:
+                os.environ["ANTHROPIC_API_KEY"] = old_key
+
+    def test_retry_on_transient_error(self):
+        import asyncio
+        from api.routers.agent3_openclaw import _execute_action_with_reflection
+
+        attempts = 0
+        async def flaky_executor(action_type, action_data):
+            nonlocal attempts
+            attempts += 1
+            if attempts < 2:
+                return {"success": False, "result": None, "error": "Connection timeout"}
+            return {"success": True, "result": "ok", "error": ""}
+
+        result = asyncio.get_event_loop().run_until_complete(
+            _execute_action_with_reflection("SEARCH", {"query": "test"}, flaky_executor, max_retries=3)
+        )
+        assert result["success"] is True
+        assert result["attempts"] == 2
+        assert len(result["reflections"]) == 1
+
+    def test_no_retry_on_auth_error(self):
+        import asyncio
+        from api.routers.agent3_openclaw import _execute_action_with_reflection
+
+        async def auth_failing_executor(action_type, action_data):
+            return {"success": False, "result": None, "error": "403 Forbidden access denied"}
+
+        result = asyncio.get_event_loop().run_until_complete(
+            _execute_action_with_reflection("EMAIL", {}, auth_failing_executor, max_retries=3)
+        )
+        assert result["success"] is False
+        assert result["attempts"] == 1  # No retry
+        assert len(result["reflections"]) == 1
+        assert result["reflections"][0]["should_retry"] is False
+
+    def test_executor_exception_is_caught(self):
+        import asyncio
+        from api.routers.agent3_openclaw import _execute_action_with_reflection
+
+        async def crashing_executor(action_type, action_data):
+            raise RuntimeError("executor crashed")
+
+        old_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            result = asyncio.get_event_loop().run_until_complete(
+                _execute_action_with_reflection("PDF", {}, crashing_executor, max_retries=0)
+            )
+            assert result["success"] is False
+            assert "executor crashed" in result["error"]
+        finally:
+            if old_key:
+                os.environ["ANTHROPIC_API_KEY"] = old_key
+
+    def test_reflections_are_recorded(self):
+        import asyncio
+        from api.routers.agent3_openclaw import _execute_action_with_reflection
+
+        attempt = 0
+        async def flaky(action_type, action_data):
+            nonlocal attempt
+            attempt += 1
+            if attempt <= 2:
+                return {"success": False, "result": None, "error": "Connection reset"}
+            return {"success": True, "result": "done", "error": ""}
+
+        result = asyncio.get_event_loop().run_until_complete(
+            _execute_action_with_reflection("SEARCH", {}, flaky, max_retries=3)
+        )
+        assert result["success"] is True
+        assert len(result["reflections"]) == 2
+        for r in result["reflections"]:
+            assert r["should_retry"] is True
+            assert r["reason"] != ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 31. Prompt builder avec scratchpad
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPromptWithScratchpad:
+    """Verifie que le scratchpad est injecte dans le prompt."""
+
+    def test_prompt_without_scratchpad(self):
+        from api.routers.agent3_openclaw import _build_agent3_prompt
+        prompt = _build_agent3_prompt(None, [], [])
+        assert "MEMOIRE DE TRAVAIL" not in prompt
+
+    def test_prompt_with_scratchpad(self):
+        from api.routers.agent3_openclaw import _build_agent3_prompt
+        prompt = _build_agent3_prompt(
+            None, [], [],
+            scratchpad_context="=== MEMOIRE DE TRAVAIL ===\n- search_results: AI trends"
+        )
+        assert "MEMOIRE DE TRAVAIL" in prompt
+        assert "search_results" in prompt

@@ -1324,6 +1324,7 @@ def _build_agent3_prompt(
     user_preferences: dict | None = None,
     familiarity: int = 3,
     decision_score: int | None = None,
+    scratchpad_context: str = "",
 ) -> str:
     if profil_data:
         profil_info = f"""
@@ -1703,6 +1704,7 @@ Tu proposes proactivement des actions qui le rapprochent de son objectif.
 {so_str}
 {device_context}
 {memory_context}
+{scratchpad_context}
 {files_context}
 """
 
@@ -1914,6 +1916,375 @@ def _decompose_task(user_message: str) -> list[dict]:
     return steps
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# INTELLIGENCE DE BASE — Planner LLM, Scratchpad, Self-reflection (ReAct)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class WorkingMemory:
+    """Memoire de travail (scratchpad) stockant les resultats intermediaires
+    d'une tache multi-etapes. Isolee par (user_id, session_id).
+
+    Contrairement a la memoire long-terme (agent3_memory), le scratchpad est
+    purement en RAM, vit le temps d'une conversation, et sert a chainer des
+    actions sans re-executer les outils.
+    """
+
+    _store: dict[str, dict] = {}
+    _history: dict[str, list[dict]] = {}
+
+    @classmethod
+    def _key(cls, user_id: str, session_id: str = "default") -> str:
+        return f"{user_id or 'anon'}::{session_id}"
+
+    @classmethod
+    def set(cls, user_id: str, key: str, value, session_id: str = "default") -> None:
+        k = cls._key(user_id, session_id)
+        cls._store.setdefault(k, {})[key] = value
+        cls._history.setdefault(k, []).append({
+            "action": "set", "key": key,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+
+    @classmethod
+    def get(cls, user_id: str, key: str, default=None, session_id: str = "default"):
+        k = cls._key(user_id, session_id)
+        return cls._store.get(k, {}).get(key, default)
+
+    @classmethod
+    def append(cls, user_id: str, key: str, value, session_id: str = "default") -> None:
+        k = cls._key(user_id, session_id)
+        store = cls._store.setdefault(k, {})
+        if key not in store or not isinstance(store[key], list):
+            store[key] = []
+        store[key].append(value)
+        cls._history.setdefault(k, []).append({
+            "action": "append", "key": key,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+
+    @classmethod
+    def all(cls, user_id: str, session_id: str = "default") -> dict:
+        k = cls._key(user_id, session_id)
+        return dict(cls._store.get(k, {}))
+
+    @classmethod
+    def summarize(cls, user_id: str, session_id: str = "default", max_len: int = 2000) -> str:
+        """Formatte le scratchpad pour injection dans un prompt systeme."""
+        data = cls.all(user_id, session_id)
+        if not data:
+            return ""
+        lines = ["=== MEMOIRE DE TRAVAIL (resultats intermediaires) ==="]
+        for k, v in data.items():
+            try:
+                s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+            except Exception:
+                s = str(v)
+            if len(s) > 300:
+                s = s[:297] + "..."
+            lines.append(f"- {k}: {s}")
+        text = "\n".join(lines)
+        if len(text) > max_len:
+            text = text[: max_len - 3] + "..."
+        return text
+
+    @classmethod
+    def clear(cls, user_id: str, session_id: str = "default") -> None:
+        k = cls._key(user_id, session_id)
+        cls._store.pop(k, None)
+        cls._history.pop(k, None)
+
+    @classmethod
+    def history(cls, user_id: str, session_id: str = "default") -> list[dict]:
+        k = cls._key(user_id, session_id)
+        return list(cls._history.get(k, []))
+
+    @classmethod
+    def size(cls, user_id: str, session_id: str = "default") -> int:
+        return len(cls.all(user_id, session_id))
+
+
+def _heuristic_plan(user_message: str) -> list[dict]:
+    """Plan enrichi base sur _decompose_task (fallback rapide sans LLM)."""
+    base = _decompose_task(user_message)
+    enriched = []
+    prev_id = None
+    tool_map = {
+        "search": "web_search",
+        "browse": "browser",
+        "analyze": None,
+        "generate_pdf": "ACTION:PDF",
+        "generate_email": "ACTION:EMAIL",
+        "generate_code": "code_sandbox",
+    }
+    for step in base:
+        sid = step.get("id", "")
+        enriched.append({
+            "id": sid,
+            "label": step.get("label", ""),
+            "status": "pending",
+            "detail": step.get("detail", ""),
+            "depends_on": [prev_id] if prev_id else [],
+            "tool_hint": tool_map.get(sid),
+            "expected_output": "",
+        })
+        prev_id = sid
+    return enriched
+
+
+async def _llm_plan_task(
+    user_message: str,
+    context: str = "",
+    api_key: str | None = None,
+    model: str = "claude-sonnet-4-20250514",
+) -> list[dict]:
+    """Planifie une tache multi-etapes avec un appel LLM dedie.
+
+    Retourne une liste de steps riches (depends_on, tool_hint, expected_output).
+    Fallback automatique sur _heuristic_plan si l'API est indisponible.
+    """
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return _heuristic_plan(user_message)
+
+    system = (
+        "Tu es un planner expert. Tu recois une demande utilisateur et tu produis "
+        "un plan d'execution JSON minimal et pragmatique.\n"
+        "Regles:\n"
+        "- Chaque etape : id (snake_case), label (court), detail, depends_on (ids), "
+        "tool_hint (nom d'outil ou null), expected_output\n"
+        "- 1 a 8 etapes MAX, pas de blabla\n"
+        "- Outils dispo : web_search, browser, code_sandbox, ACTION:PDF, ACTION:EMAIL, "
+        "ACTION:IMAGE, ACTION:FILE_CREATE, ACTION:CALENDAR_EVENT, memory, reflection\n"
+        "- Reponds UNIQUEMENT avec un JSON array. Aucun texte avant ou apres."
+    )
+    prompt = f"Demande: {user_message}\n\nContexte: {context[:500] if context else '(aucun)'}\n\nPlan JSON:"
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=key)
+        msg = await asyncio.to_thread(
+            lambda: client.messages.create(
+                model=model,
+                max_tokens=1500,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        )
+        text = msg.content[0].text.strip()
+        m = re.search(r'\[.*\]', text, re.DOTALL)
+        if not m:
+            return _heuristic_plan(user_message)
+        plan = json.loads(m.group(0))
+        if not isinstance(plan, list) or not plan:
+            return _heuristic_plan(user_message)
+        normalized = []
+        for i, step in enumerate(plan):
+            if not isinstance(step, dict):
+                continue
+            normalized.append({
+                "id": str(step.get("id") or f"step_{i}"),
+                "label": str(step.get("label") or f"Etape {i+1}"),
+                "status": "pending",
+                "detail": str(step.get("detail") or ""),
+                "depends_on": step.get("depends_on") if isinstance(step.get("depends_on"), list) else [],
+                "tool_hint": step.get("tool_hint"),
+                "expected_output": str(step.get("expected_output") or ""),
+            })
+        if not normalized:
+            return _heuristic_plan(user_message)
+        return normalized
+    except Exception as e:
+        logger.warning(f"LLM planner failed: {e}")
+        return _heuristic_plan(user_message)
+
+
+async def _reflect_on_failure(
+    action_type: str,
+    action_data: dict,
+    error_msg: str,
+    context: str = "",
+    api_key: str | None = None,
+    model: str = "claude-sonnet-4-20250514",
+) -> dict:
+    """Analyse un echec d'action et propose une correction ou un abandon.
+
+    Pipeline:
+      1. Heuristiques rapides (auth, reseau, quota) — gratuit
+      2. Si ambigu, appel LLM pour analyser
+      3. Sans API, retour best-effort
+
+    Retourne: {
+        "should_retry": bool,
+        "corrected_action": {type, data} | None,
+        "alternative_approach": str | None,
+        "reason": str,
+    }
+    """
+    err_lower = (error_msg or "").lower()
+
+    # Erreurs non-recuperables (permissions, quotas, interdits)
+    non_recoverable = [
+        "not authorized", "unauthorized", "forbidden", "permission denied",
+        "access denied", "quota exceeded", "billing", "invalid api key",
+        "authentication failed", "401", "403",
+    ]
+    if any(k in err_lower for k in non_recoverable):
+        return {
+            "should_retry": False,
+            "corrected_action": None,
+            "alternative_approach": None,
+            "reason": f"Erreur non recuperable: {error_msg[:80]}",
+        }
+
+    # Erreurs reseau temporaires → retry avec la meme action
+    transient = ["timeout", "timed out", "connection reset", "connection refused",
+                 "network", "temporarily unavailable", "service unavailable",
+                 "502", "503", "504", "econnreset"]
+    if any(k in err_lower for k in transient):
+        return {
+            "should_retry": True,
+            "corrected_action": {"type": action_type, "data": action_data},
+            "alternative_approach": None,
+            "reason": "Erreur reseau temporaire, nouvelle tentative",
+        }
+
+    # Sinon, essayer le LLM pour une analyse plus fine
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return {
+            "should_retry": False,
+            "corrected_action": None,
+            "alternative_approach": None,
+            "reason": f"Pas d'API pour reflection: {error_msg[:80]}",
+        }
+
+    system = (
+        "Tu es un debugger d'actions d'agent. Tu recois une action qui a echoue et "
+        "tu proposes une correction.\n"
+        "Reponds UNIQUEMENT avec un JSON:\n"
+        '{"should_retry": bool, "corrected_action": {"type": str, "data": {...}} ou null, '
+        '"alternative_approach": str ou null, "reason": str}\n'
+        "Si irrecuperable: should_retry=false.\n"
+        "Si correction possible: should_retry=true avec corrected_action."
+    )
+    prompt = (
+        f"Action echouee:\n"
+        f"Type: {action_type}\n"
+        f"Data: {json.dumps(action_data, ensure_ascii=False)[:500]}\n"
+        f"Erreur: {error_msg[:500]}\n"
+        f"Contexte: {context[:300]}\n\nReponse JSON:"
+    )
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=key)
+        msg = await asyncio.to_thread(
+            lambda: client.messages.create(
+                model=model,
+                max_tokens=600,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        )
+        text = msg.content[0].text.strip()
+        m = re.search(r'\{.*\}', text, re.DOTALL)
+        if not m:
+            return {
+                "should_retry": False,
+                "corrected_action": None,
+                "alternative_approach": None,
+                "reason": "Reflection LLM sans JSON exploitable",
+            }
+        result = json.loads(m.group(0))
+        return {
+            "should_retry": bool(result.get("should_retry", False)),
+            "corrected_action": result.get("corrected_action"),
+            "alternative_approach": result.get("alternative_approach"),
+            "reason": str(result.get("reason", "")),
+        }
+    except Exception as e:
+        logger.warning(f"Reflection LLM failed: {e}")
+        return {
+            "should_retry": False,
+            "corrected_action": None,
+            "alternative_approach": None,
+            "reason": f"Reflection indisponible: {e}",
+        }
+
+
+async def _execute_action_with_reflection(
+    action_type: str,
+    action_data: dict,
+    executor,
+    max_retries: int = 2,
+    context: str = "",
+    api_key: str | None = None,
+) -> dict:
+    """Execute une action avec boucle ReAct : en cas d'echec, reflechit et retente.
+
+    executor: callable async(action_type, action_data) -> dict
+              Doit retourner {"success": bool, "result": any, "error": str}
+    Retourne: {"success": bool, "result": any, "error": str, "attempts": int, "reflections": [...]}
+    """
+    attempts = 0
+    reflections: list[dict] = []
+    current_type = action_type
+    current_data = dict(action_data)
+
+    while attempts <= max_retries:
+        attempts += 1
+        try:
+            result = await executor(current_type, current_data)
+        except Exception as e:
+            result = {"success": False, "error": str(e), "result": None}
+
+        if result.get("success"):
+            return {
+                "success": True,
+                "result": result.get("result"),
+                "error": "",
+                "attempts": attempts,
+                "reflections": reflections,
+            }
+
+        error_msg = str(result.get("error") or "Echec inconnu")
+        if attempts > max_retries:
+            return {
+                "success": False,
+                "result": None,
+                "error": error_msg,
+                "attempts": attempts,
+                "reflections": reflections,
+            }
+
+        reflection = await _reflect_on_failure(
+            current_type, current_data, error_msg, context=context, api_key=api_key,
+        )
+        reflections.append(reflection)
+
+        if not reflection.get("should_retry"):
+            return {
+                "success": False,
+                "result": None,
+                "error": error_msg,
+                "attempts": attempts,
+                "reflections": reflections,
+            }
+
+        corrected = reflection.get("corrected_action") or {}
+        if isinstance(corrected, dict) and corrected.get("type"):
+            current_type = corrected["type"]
+            current_data = corrected.get("data") or current_data
+
+    return {
+        "success": False,
+        "result": None,
+        "error": "Max retries depasses",
+        "attempts": attempts,
+        "reflections": reflections,
+    }
+
+
 # ── SSE Streaming endpoint ──────────────────────────────────────────────────
 
 from fastapi.responses import StreamingResponse
@@ -2070,7 +2441,13 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
                     return
                 # Si le fast path echoue, on continue avec le pipeline normal
 
-            steps = _decompose_task(user_msg)
+            # Planification intelligente : LLM planner avec fallback heuristique
+            # (rapide : heuristique seule, sans appel LLM, pour ne pas doubler la latence)
+            try:
+                steps = _heuristic_plan(user_msg)
+            except Exception as _plan_err:
+                logger.warning(f"Planner failed: {_plan_err}")
+                steps = _decompose_task(user_msg)
             yield _sse_event("steps", {"steps": steps})
             # Notifier le desktop
             asyncio.create_task(_ws_notify(user_id, "steps", {"steps": steps}))
@@ -2247,11 +2624,15 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
                 _dec_score = int(((_dp - _dn) / _dt) * 100) if _dt > 0 else 0
             yield _sse_event("log", {"text": f"Familiarite : niveau {_familiarity}/3", "type": "info"})
 
+            # Injecter le scratchpad (memoire de travail) si non vide
+            _scratchpad_ctx = WorkingMemory.summarize(user_id or "anon") if user_id else ""
+
             system_prompt = _build_agent3_prompt(
                 profil_data, decisions, sous_objectifs, collected_info, device_ctx,
                 full_context=full_ctx, memory_context=memory_ctx, files_context=files_ctx,
                 user_preferences=_user_prefs,
                 familiarity=_familiarity, decision_score=_dec_score,
+                scratchpad_context=_scratchpad_ctx,
             )
 
             if user_id:
@@ -3153,6 +3534,29 @@ REGLES ABSOLUES :
                         actions[_chain_idx + 1]["_chained"] = True
                         yield _sse_event("log", {"text": f"Chainage : {actions[_chain_idx]['type']} -> {_chain_next}", "type": "info"})
 
+            # ── 8b. Scratchpad : sauvegarder les resultats utiles ──
+            if user_id:
+                try:
+                    for _act in actions:
+                        _at = _act.get("type", "")
+                        _ad = _act.get("data", {}) or {}
+                        # Ne stocker que les types qui produisent des donnees reutilisables
+                        if _at in ("X_SEARCH", "SEARCH", "WEBPAGE", "SKILL_SEARCH"):
+                            _scratch_val = _ad.get("results") or _ad.get("summary") or _ad.get("content")
+                            if _scratch_val:
+                                WorkingMemory.append(user_id, f"{_at.lower()}_results", {
+                                    "query": _ad.get("query") or _ad.get("url", ""),
+                                    "value": _scratch_val,
+                                })
+                        elif _at == "PDF" and _ad.get("pdf_url"):
+                            WorkingMemory.set(user_id, "last_pdf", _ad["pdf_url"])
+                        elif _at == "IMAGE" and _ad.get("image_url"):
+                            WorkingMemory.set(user_id, "last_image", _ad["image_url"])
+                        elif _at == "FILE_CREATE" and _ad.get("path"):
+                            WorkingMemory.append(user_id, "files_created", _ad["path"])
+                except Exception as _sp_err:
+                    logger.debug(f"Scratchpad save failed: {_sp_err}")
+
             clean_message = _clean_agent_response(agent_response)
 
             if not clean_message and actions:
@@ -3446,11 +3850,14 @@ async def agent3_chat(
         _dt2 = len(decisions)
         _dec_score_2 = int(((_dp2 - _dn2) / _dt2) * 100) if _dt2 > 0 else 0
 
+    _scratchpad_ctx_2 = WorkingMemory.summarize(user_id or "anon") if user_id else ""
+
     system_prompt = _build_agent3_prompt(
         profil_data, decisions, sous_objectifs, collected_info, device_ctx,
         full_context=full_ctx, memory_context=memory_ctx, files_context=files_ctx,
         user_preferences=_user_prefs,
         familiarity=_fam_2, decision_score=_dec_score_2,
+        scratchpad_context=_scratchpad_ctx_2,
     )
 
     # ── 3. Construire l'historique de chat ────────────────────────────────
