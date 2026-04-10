@@ -3422,6 +3422,32 @@ async def agent3_chat_stream(
                 if last.get("role") == "user":
                     user_msg = last.get("content", "")
 
+            # ── 0a. AgentObserver : trace de raisonnement ──
+            _observer = AgentObserver(user_id=user_id or "anon")
+            _observer.log_thought(f"Demande recue: {user_msg[:150]}")
+
+            # ── 0b. FeedbackLearner : detecter les corrections ──
+            _feedback_ctx = ""
+            if user_id and user_msg and FeedbackLearner.detect_correction(user_msg):
+                yield _sse_event("log", {"text": "Correction detectee — apprentissage...", "type": "info"})
+                try:
+                    # Charger le dernier message agent pour comparer
+                    _prev_msgs = _load_agent3_messages(db, user_id, limit=2)
+                    _prev_agent = next((m["content"] for m in reversed(_prev_msgs) if m["role"] == "agent"), "")
+                    _fb = await FeedbackLearner.learn_from_correction(user_msg, _prev_agent, db=db, user_id=user_id)
+                    if _fb.get("lesson"):
+                        yield _sse_event("log", {"text": f"Lecon apprise : {_fb['lesson'][:80]}", "type": "success"})
+                except Exception as _fb_err:
+                    logger.debug(f"FeedbackLearner failed: {_fb_err}")
+
+            # Charger les feedbacks precedents pour le contexte
+            if user_id:
+                try:
+                    _fb_memories = [m for m in _load_memories(db, user_id, limit=50) if m.get("category") == "feedback"]
+                    _feedback_ctx = FeedbackLearner.format_feedback_context(_fb_memories)
+                except Exception:
+                    pass
+
             # ── FAST PATH: messages simples sans outils ──
             _simple_patterns = [
                 "salut", "hey", "hello", "bonjour", "bonsoir", "yo", "coucou",
@@ -3524,6 +3550,18 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
             except Exception as _plan_err:
                 logger.warning(f"Planner failed: {_plan_err}")
                 steps = _decompose_task(user_msg)
+
+            # ParallelExecutor : identifier les vagues parallelisables
+            _waves = ParallelExecutor.split_independent_tasks(steps)
+            if len(_waves) > 1:
+                _observer.log_thought(f"Plan decompose en {len(_waves)} vagues parallelisables ({len(steps)} etapes)")
+                for _wi, _wave in enumerate(_waves):
+                    for _step in _wave:
+                        _step["wave"] = _wi
+            elif _waves:
+                for _step in _waves[0]:
+                    _step["wave"] = 0
+
             yield _sse_event("steps", {"steps": steps})
             # Notifier le desktop
             asyncio.create_task(_ws_notify(user_id, "steps", {"steps": steps}))
@@ -3711,6 +3749,7 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
                 scratchpad_context=_scratchpad_ctx,
             )
 
+            # ── PersonalityAdapter : adapter le style au user ──
             if user_id:
                 db_messages = _load_agent3_messages(db, user_id, limit=20)
                 chat_messages = [
@@ -3725,6 +3764,30 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
                 chat_messages = data.messages[-20:]
 
             user_msg_type = data.messages[-1].get("type", "text") if data.messages else "text"
+
+            # ── PersonalityAdapter + FeedbackLearner : enrichir le prompt ──
+            try:
+                _user_style = PersonalityAdapter.analyze_user_style(chat_messages)
+                _style_instr = PersonalityAdapter.get_style_instructions(_user_style)
+                if _style_instr:
+                    system_prompt += f"\n\n=== ADAPTATION DE STYLE ===\n{_style_instr}"
+                if _feedback_ctx:
+                    system_prompt += f"\n\n{_feedback_ctx}"
+            except Exception as _pa_err:
+                logger.debug(f"PersonalityAdapter failed: {_pa_err}")
+
+            # ── ContextManager : fenetre de contexte intelligente ──
+            try:
+                chat_messages, _ctx_summary = ContextManager.build_context_window(
+                    chat_messages, max_tokens=8000, recent_keep=12,
+                )
+                if _ctx_summary:
+                    system_prompt += f"\n\n{_ctx_summary}"
+            except Exception as _cm_err:
+                logger.debug(f"ContextManager failed: {_cm_err}")
+
+            # ── MultiModalOutput : detecter le format optimal ──
+            _best_format = MultiModalOutput.detect_best_format(user_msg)
 
             # ── 4b. Pre-interception : detecter les recherches X/Twitter ──
             # OpenClaw n'a pas le tool x_search, on le gere directement
@@ -4138,11 +4201,23 @@ REGLES ABSOLUES :
                     _save_agent3_message(db, user_id, "user", last_user["content"], user_msg_type, audio_data=data.audio_data or "")
 
             # ── 8. Parser les actions (toutes, y compris chainées) ──
+            _observer.log_observation(f"Reponse agent recue ({len(agent_response)} chars)")
             actions = []
             for match in re.finditer(r'\[ACTION:(\w+)\](.*?)\[/ACTION\]', agent_response, re.DOTALL):
                 action_type = match.group(1)
                 try:
                     action_data = json.loads(match.group(2))
+
+                    # ── ActionValidator : validation pre-execution ──
+                    _validation = ActionValidator.validate(action_type, action_data)
+                    if not _validation["valid"]:
+                        _observer.log_action(action_type, False, f"Validation echouee: {_validation['errors']}")
+                        yield _sse_event("log", {"text": f"Action {action_type} invalide: {', '.join(_validation['errors'][:2])}", "type": "warning"})
+                        actions.append({"type": action_type, "data": {**action_data, "_validation_errors": _validation["errors"]}, "_skipped": True})
+                        continue
+                    if _validation["warnings"]:
+                        for _w in _validation["warnings"][:2]:
+                            yield _sse_event("log", {"text": f"Avertissement: {_w}", "type": "warning"})
 
                     # PDF
                     if action_type == "PDF":
@@ -4537,12 +4612,17 @@ REGLES ABSOLUES :
                                     action_data["error"] = "ANTHROPIC_API_KEY non configuree"
                                     yield _sse_event("log", {"text": "Computer Use impossible : cle API manquante", "type": "error"})
                                 else:
+                                    # VisionPipeline : construire le prompt vision enrichi
+                                    _cu_vision_prompt = VisionPipeline.build_vision_prompt(_cu_prompt)
+                                    action_data["vision_prompt"] = _cu_vision_prompt
+                                    action_data["vision_max_steps"] = 15
+
                                     _cu_session = get_session(user_id or "default", _cu_api_key)
                                     action_data["started"] = True
                                     action_data["session_id"] = user_id or "default"
                                     # The actual Computer Use session runs asynchronously
                                     # The frontend will receive this action and start listening for SSE events
-                                    yield _sse_event("log", {"text": "Session Computer Use demarree", "type": "success"})
+                                    yield _sse_event("log", {"text": "Session Computer Use demarree (vision active)", "type": "success"})
                             except Exception as _cu_err:
                                 action_data["error"] = str(_cu_err)[:100]
                                 yield _sse_event("log", {"text": f"Erreur Computer Use : {_cu_err}", "type": "error"})
@@ -4593,11 +4673,41 @@ REGLES ABSOLUES :
                             action_data["error"] = str(e)[:100]
                             yield _sse_event("log", {"text": f"Erreur Drive : {str(e)[:60]}", "type": "error"})
 
+                    # DYNAMIC_TOOL — executer un outil dynamique cree par l'agent
+                    elif action_type == "DYNAMIC_TOOL":
+                        _dt_action = action_data.get("action", "execute")  # register/execute/list
+                        if _dt_action == "register":
+                            _dt_name = action_data.get("name", "")
+                            _dt_code = action_data.get("code", "")
+                            _dt_desc = action_data.get("description", "")
+                            if _dt_name and _dt_code:
+                                _dt_result = DynamicToolFactory.register(_dt_name, _dt_code, _dt_desc)
+                                action_data["register_result"] = _dt_result
+                                if _dt_result.get("success"):
+                                    yield _sse_event("log", {"text": f"Outil dynamique '{_dt_name}' enregistre", "type": "success"})
+                                else:
+                                    yield _sse_event("log", {"text": f"Erreur enregistrement outil: {_dt_result.get('error')}", "type": "error"})
+                        elif _dt_action == "execute":
+                            _dt_name = action_data.get("name", "")
+                            _dt_args = action_data.get("args", {})
+                            if _dt_name:
+                                _dt_result = DynamicToolFactory.execute(_dt_name, **_dt_args)
+                                action_data["exec_result"] = _dt_result
+                                if _dt_result.get("success"):
+                                    yield _sse_event("log", {"text": f"Outil '{_dt_name}' execute avec succes", "type": "success"})
+                                else:
+                                    yield _sse_event("log", {"text": f"Erreur outil '{_dt_name}': {_dt_result.get('error')}", "type": "error"})
+                        elif _dt_action == "list":
+                            action_data["tools"] = DynamicToolFactory.list_tools()
+
+                    _has_error = bool(action_data.get("error") or action_data.get("pdf_error"))
+                    _observer.log_action(action_type, not _has_error)
                     actions.append({"type": action_type, "data": action_data})
                 except json.JSONDecodeError as e:
+                    _observer.log_action(action_type, False, f"JSON invalide: {e}")
                     actions.append({"type": "ERROR", "data": {"message": f"Action {action_type} mal formee", "retryable": True}})
-                except Exception:
-                    pass
+                except Exception as _act_err:
+                    _observer.log_action(action_type, False, str(_act_err)[:80])
 
             # ── 8a. Action chaining: feed result of action N into action N+1 ──
             if len(actions) > 1:
@@ -4757,13 +4867,22 @@ Ses decisions recentes montrent un score de comportement de {_behavior_score}/10
                     logger.warning(traceback.format_exc())
 
             # ── 14. Envoyer le resultat final ──
+            _obs_summary = _observer.get_summary()
             yield _sse_event("result", {
                 "message": clean_message if clean_message else "C'est fait.",
-                "actions": actions if actions else None,
+                "actions": [a for a in actions if not a.get("_skipped")] if actions else None,
                 "tools_used": tools_used if tools_used else None,
                 "openclaw_model": oc_response.model if not oc_response.error else "fallback-claude",
                 "routed_agent": routed_agent_id if routed_agent_id != "default" else None,
                 "loop_stats": loop_detector.get_stats() if loop_detector.total_calls > 0 else None,
+                "observer": {
+                    "duration": _obs_summary["duration_seconds"],
+                    "actions_count": _obs_summary["metrics"]["actions_executed"],
+                    "success_rate": round(
+                        _obs_summary["metrics"]["actions_succeeded"] / max(1, _obs_summary["metrics"]["actions_executed"]) * 100, 1
+                    ),
+                    "best_format": _best_format,
+                } if _obs_summary["metrics"]["actions_executed"] > 0 else None,
             })
 
         except Exception as e:
@@ -4955,6 +5074,55 @@ async def agent3_chat(
         last_input = data.messages[-1]
         user_msg_type = last_input.get("type", "text")
 
+    # ── 3b. Modules d'intelligence ────────────────────────────────────────
+    _observer_ns = AgentObserver(user_id=user_id or "anon")
+    _observer_ns.log_thought(f"Demande recue (non-streaming): {last_user_msg_content[:150]}")
+
+    # FeedbackLearner : detecter corrections
+    if user_id and last_user_msg_content and FeedbackLearner.detect_correction(last_user_msg_content):
+        try:
+            _prev_msgs_ns = _load_agent3_messages(db, user_id, limit=2)
+            _prev_agent_ns = ""
+            for _pm in reversed(_prev_msgs_ns):
+                if _pm.get("role") == "agent":
+                    _prev_agent_ns = _pm.get("content", "")
+                    break
+            if _prev_agent_ns:
+                _fb_ns = await FeedbackLearner.learn_from_correction(last_user_msg_content, _prev_agent_ns, db=db, user_id=user_id)
+                _observer_ns.log_observation(f"Correction detectee: {_fb_ns.get('lesson', '')[:80]}")
+        except Exception as _fb_err:
+            logger.debug(f"FeedbackLearner non-streaming error: {_fb_err}")
+
+    # Charger les feedbacks precedents
+    _feedback_ctx_ns = ""
+    if user_id:
+        try:
+            _fb_mems = _search_memories(db, user_id, "feedback correction lesson", top_k=5)
+            if _fb_mems:
+                _feedback_ctx_ns = FeedbackLearner.format_feedback_context(
+                    [{"key": m.key, "value": m.value} for m in _fb_mems]
+                )
+        except Exception:
+            pass
+
+    # PersonalityAdapter : adapter le style
+    _user_style_ns = PersonalityAdapter.analyze_user_style(chat_messages)
+    _style_instr_ns = PersonalityAdapter.get_style_instructions(_user_style_ns)
+    if _style_instr_ns:
+        system_prompt += f"\n\n=== ADAPTATION DE STYLE ===\n{_style_instr_ns}"
+    if _feedback_ctx_ns:
+        system_prompt += f"\n\n{_feedback_ctx_ns}"
+
+    # ContextManager : fenetre de contexte intelligente
+    chat_messages, _ctx_summary_ns = ContextManager.build_context_window(
+        chat_messages, max_tokens=8000, recent_keep=12
+    )
+    if _ctx_summary_ns:
+        system_prompt += f"\n\nRESUME DU CONTEXTE PRECEDENT:\n{_ctx_summary_ns}"
+
+    # MultiModalOutput : detecter le meilleur format
+    _best_format_ns = MultiModalOutput.detect_best_format(last_user_msg_content)
+
     # ── 4. Multi-agent routing + Session pruning ────────────────────────
     session_key = f"sylea-agent3-{user_id}" if user_id else None
 
@@ -5012,11 +5180,19 @@ async def agent3_chat(
             )
 
     # ── 7. Parser les actions (toutes, y compris chainées) ────────────────
+    _observer_ns.log_observation(f"Reponse agent recue ({len(agent_response)} chars)")
     actions = []
     for match in re.finditer(r'\[ACTION:(\w+)\](.*?)\[/ACTION\]', agent_response, re.DOTALL):
         action_type = match.group(1)
         try:
             action_data = json.loads(match.group(2))
+
+            # ActionValidator : validation pre-execution
+            _val_ns = ActionValidator.validate(action_type, action_data)
+            if not _val_ns["valid"]:
+                _observer_ns.log_action(action_type, False, f"Validation echouee: {_val_ns['errors']}")
+                actions.append({"type": action_type, "data": {**action_data, "_validation_errors": _val_ns["errors"]}, "_skipped": True})
+                continue
 
             # PDF
             if action_type == "PDF":
@@ -5309,6 +5485,25 @@ async def agent3_chat(
                     action_data["saved"] = False
                     action_data["error"] = str(e)[:100]
 
+            # DYNAMIC_TOOL — outils dynamiques
+            elif action_type == "DYNAMIC_TOOL":
+                _dt_act = action_data.get("action", "execute")
+                if _dt_act == "register":
+                    _dt_nm = action_data.get("name", "")
+                    _dt_cd = action_data.get("code", "")
+                    _dt_dc = action_data.get("description", "")
+                    if _dt_nm and _dt_cd:
+                        action_data["register_result"] = DynamicToolFactory.register(_dt_nm, _dt_cd, _dt_dc)
+                elif _dt_act == "execute":
+                    _dt_nm = action_data.get("name", "")
+                    _dt_ag = action_data.get("args", {})
+                    if _dt_nm:
+                        action_data["exec_result"] = DynamicToolFactory.execute(_dt_nm, **_dt_ag)
+                elif _dt_act == "list":
+                    action_data["tools"] = DynamicToolFactory.list_tools()
+
+            _has_err_ns = bool(action_data.get("error") or action_data.get("pdf_error"))
+            _observer_ns.log_action(action_type, not _has_err_ns)
             actions.append({"type": action_type, "data": action_data})
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse action JSON for {action_type}: {e}")
@@ -5630,23 +5825,132 @@ async def generate_proactive_message(
         return {"message": None}
 
     profil = repo.charger(auth_user_id=user_id)
-    prompt = f"""Tu es l'Agent Sylea 3, l'agent d'elite de {profil.nom}.
-Message proactif court (1-2 phrases). Propose une tache complexe et concrete que tu peux realiser
-avec tes outils (recherche web, navigation, analyse, automatisation).
-Objectif : {profil.objectif.description if profil.objectif else 'non defini'}
-Tutoiement, naturel, confiant. Montre que tu es capable de tout faire."""
+    profil_data = {
+        "nom": profil.nom,
+        "objectif_description": profil.objectif.description if profil.objectif else "non defini",
+        "probabilite_actuelle": profil.probabilite_actuelle,
+    }
 
-    oc_response = await openclaw_chat(
-        messages=[{"role": "user", "content": prompt}],
-        model="openclaw/default",
-    )
+    # Charger decisions recentes
+    dec_repo = DecisionRepository(db)
+    try:
+        decisions_raw = dec_repo.lister_pour_utilisateur(user_id, 10, auth_user_id=user_id)
+        decisions = [{"impact": d.impact_probabilite} for d in (decisions_raw or [])[:10]]
+    except Exception:
+        decisions = []
 
-    if oc_response.error:
-        return {"message": None}
+    sous_objectifs = []
+    try:
+        cursor = db.conn.execute(
+            "SELECT titre, progression FROM sous_objectifs WHERE user_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1)",
+            (user_id,),
+        )
+        sous_objectifs = [{"titre": r[0], "progression": r[1]} for r in cursor.fetchall()]
+    except Exception:
+        pass
 
-    agent_text = _clean_agent_response(oc_response.content.strip()) or oc_response.content.strip()
+    # ProactiveCoach : determiner le type de message + generer
+    msg_type = ProactiveCoach.determine_message_type(profil_data, decisions)
+    agent_text = ProactiveCoach.generate_message(msg_type, profil_data, decisions, sous_objectifs)
+
+    # Essayer d'enrichir avec Claude pour un message plus naturel
+    try:
+        _mem_count = 0
+        try:
+            _mc = db.conn.execute("SELECT COUNT(*) FROM agent3_memory WHERE auth_user_id = ?", (user_id,)).fetchone()
+            _mem_count = _mc[0] if _mc else 0
+        except Exception:
+            pass
+        _fam = _compute_familiarity_level(db, user_id, profil_data, decisions, _mem_count)
+        _tone = _get_tone_instructions(_fam)
+        _proactive_sys = f"""Tu es l'Agent Sylea 3. {_tone}
+Message proactif court (1-2 phrases). Inspire-toi de ceci mais reformule naturellement : "{agent_text}"
+Propose une action concrete que tu peux realiser. Tutoiement, confiant."""
+        _enriched = await _fallback_claude_chat(_proactive_sys, [{"role": "user", "content": "Genere le message proactif."}])
+        if _enriched and len(_enriched) > 10:
+            agent_text = _enriched
+    except Exception:
+        pass  # Garder le template de base
+
     _save_agent3_message(db, user_id, "agent", agent_text, "text")
-    return {"message": agent_text}
+    return {"message": agent_text, "type": msg_type}
+
+
+# ── Benchmark Runner ──────────────────────────────────────────────────────────
+
+@router.post("/benchmark")
+async def run_benchmarks(
+    data: dict | None = None,
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Lance les benchmarks de l'Agent 3 et retourne les scores."""
+    benchmarks = BenchmarkRunner.get_benchmarks()
+    if data and data.get("ids"):
+        # Filtrer par IDs demandes
+        _ids = set(data["ids"])
+        benchmarks = [b for b in benchmarks if b["id"] in _ids]
+
+    results = []
+    for bench in benchmarks:
+        # Simuler une reponse de test (en vrai on appelerait Claude)
+        _test_response = f"Reponse de test pour benchmark: {bench['id']}"
+        score = BenchmarkRunner.score_response(bench, _test_response)
+        results.append({
+            "id": bench["id"],
+            "name": bench["name"],
+            "category": bench["category"],
+            "score": score,
+        })
+
+    aggregate = BenchmarkRunner.aggregate_scores(results)
+    return {
+        "benchmarks": results,
+        "aggregate": aggregate,
+        "total": len(results),
+    }
+
+
+# ── Dynamic Tools Management ─────────────────────────────────────────────────
+
+@router.get("/dynamic-tools")
+async def list_dynamic_tools(
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Liste les outils dynamiques enregistres."""
+    return {"tools": DynamicToolFactory.list_tools()}
+
+
+@router.post("/dynamic-tools")
+async def manage_dynamic_tool(
+    data: dict,
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Enregistrer ou executer un outil dynamique."""
+    action = data.get("action", "register")
+    if action == "register":
+        name = data.get("name", "")
+        code = data.get("code", "")
+        desc = data.get("description", "")
+        if not name or not code:
+            raise HTTPException(status_code=400, detail="name et code requis")
+        result = DynamicToolFactory.register(name, code, desc)
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Erreur"))
+        return result
+    elif action == "execute":
+        name = data.get("name", "")
+        args = data.get("args", {})
+        if not name:
+            raise HTTPException(status_code=400, detail="name requis")
+        result = DynamicToolFactory.execute(name, **args)
+        return result
+    elif action == "delete":
+        name = data.get("name", "")
+        if DynamicToolFactory.unregister(name):
+            return {"success": True}
+        raise HTTPException(status_code=404, detail=f"Outil '{name}' non trouve")
+    else:
+        raise HTTPException(status_code=400, detail=f"Action inconnue: {action}")
 
 
 # ── Code Execution (sandbox) ──────────────────────────────────────────────────
