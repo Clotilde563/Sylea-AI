@@ -301,8 +301,9 @@ async def oauth_google(data: OAuthIn, db=Depends(get_db)):
 
 @router.get("/oauth/google/url")
 async def google_oauth_url(redirect_uri: str = "", state: str = "login"):
-    """Return the Google OAuth consent URL with Calendar+Gmail+Drive scopes.
-    state='login' pour inscription/connexion, state='integration' pour connecter les services."""
+    """Return the Google OAuth consent URL.
+    state='login' → scopes basiques (openid/email/profile) — pas de verification Google requise.
+    state='integration' → scopes etendus (Calendar/Gmail/Drive) — pour connecter les services."""
     client_id = os.environ.get("GOOGLE_CLIENT_ID")
     if not client_id:
         raise HTTPException(status_code=501, detail="Google OAuth non configure")
@@ -310,16 +311,21 @@ async def google_oauth_url(redirect_uri: str = "", state: str = "login"):
     if not redirect_uri:
         redirect_uri = os.environ.get("GOOGLE_REDIRECT_URI", "http://localhost:5173/auth/callback")
 
-    scopes = " ".join([
-        "openid",
-        "email",
-        "profile",
-        "https://www.googleapis.com/auth/calendar.readonly",
-        "https://www.googleapis.com/auth/calendar.events",
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.send",
-        "https://www.googleapis.com/auth/drive.readonly",
-    ])
+    # Login = scopes basiques uniquement (pas besoin de verification Google)
+    # Integration = scopes etendus (Calendar, Gmail, Drive)
+    if state == "integration":
+        scope_list = [
+            "openid", "email", "profile",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ]
+    else:
+        scope_list = ["openid", "email", "profile"]
+
+    scopes = " ".join(scope_list)
 
     import urllib.parse
     params = urllib.parse.urlencode({
@@ -329,6 +335,7 @@ async def google_oauth_url(redirect_uri: str = "", state: str = "login"):
         "scope": scopes,
         "access_type": "offline",
         "prompt": "consent",
+        "state": state,
     })
 
     return {"url": f"https://accounts.google.com/o/oauth2/v2/auth?{params}"}

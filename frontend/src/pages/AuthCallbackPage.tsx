@@ -4,7 +4,7 @@
 //   2. Login GitHub (?code=...&state=github_login) → crée/connecte le compte
 //   3. Connexion intégration (?code=...&state=integration) → ajoute Calendar/Gmail/Drive
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '../auth/authStore'
 import { api } from '../api/client'
@@ -18,7 +18,13 @@ export default function AuthCallbackPage() {
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState('Connexion en cours...')
 
+  // Guard against React Strict Mode double-invoke (code is single-use)
+  const processed = useRef(false)
+
   useEffect(() => {
+    if (processed.current) return
+    processed.current = true
+
     const code = searchParams.get('code')
     const state = searchParams.get('state') || 'login'
 
@@ -43,7 +49,7 @@ export default function AuthCallbackPage() {
       // Flow 2: login/register with GitHub
       setStatus('Connexion a votre compte GitHub...')
       handleGithubCallback(code)
-        .then(() => navigate('/dashboard'))
+        .then(() => navigate('/'))
         .catch((e: any) => {
           setError(e.message || 'Erreur de connexion GitHub')
         })
@@ -51,7 +57,7 @@ export default function AuthCallbackPage() {
       // Flow 1: login/register with Google
       setStatus('Connexion a votre compte Google...')
       handleGoogleCallback(code)
-        .then(() => navigate('/dashboard'))
+        .then(() => navigate('/'))
         .catch((e: any) => {
           setError(e.message || 'Erreur de connexion Google')
         })

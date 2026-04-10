@@ -128,6 +128,14 @@ export function DashboardPage() {
     } catch {}
   }
 
+  const prob = profil?.probabilite_actuelle ?? 0
+  const probCalculeeVal = profil?.objectif?.probabilite_calculee ?? 0
+
+  const { probTemps, probGauge, duree } = useMemo(() => {
+    const probTemps = Math.max(0.1, probCalculeeVal + prob)
+    return { probTemps, probGauge: probTemps, duree: dureeFromProb(probTemps) }
+  }, [probCalculeeVal, prob])
+
   if (!profil) {
     return (
       <div className="loading-center">
@@ -136,14 +144,6 @@ export function DashboardPage() {
       </div>
     )
   }
-
-  const prob = profil.probabilite_actuelle
-  const probCalculeeVal = profil.objectif?.probabilite_calculee ?? 0
-
-  const { probTemps, probGauge, duree } = useMemo(() => {
-    const probTemps = Math.max(0.1, probCalculeeVal + prob)
-    return { probTemps, probGauge: probTemps, duree: dureeFromProb(probTemps) }
-  }, [probCalculeeVal, prob])
 
   const rawDesc = profil.objectif?.description || ''
   const objectifDesc = (rawDesc.split('\n\n--- Contexte personnalisé ---\n')[0].trim()) || t('dashboard.aucun_objectif')
