@@ -25,6 +25,12 @@ import { CookieBanner }     from './components/CookieBanner'
 import PrivacyPolicyPage    from './pages/PrivacyPolicyPage'
 import TermsPage            from './pages/TermsPage'
 import HelpPage             from './pages/HelpPage'
+import WorkspacePage        from './pages/WorkspacePage'
+import ScenariosPage        from './pages/ScenariosPage'
+import CoachingPage         from './pages/CoachingPage'
+import IntegrationsPage     from './pages/IntegrationsPage'
+import NetworkPage          from './pages/NetworkPage'
+import AuthCallbackPage     from './pages/AuthCallbackPage'
 
 // ── Application ───────────────────────────────────────────────────────────────
 
@@ -47,6 +53,7 @@ function AppContent() {
       <Routes>
         {/* Routes publiques */}
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/auth/callback" element={<AuthCallbackPage />} />
         <Route path="/privacy" element={<PrivacyPolicyPage />} />
         <Route path="/terms" element={<TermsPage />} />
         <Route path="/help" element={<HelpPage />} />
@@ -72,6 +79,11 @@ function AppContent() {
                     <Route path="/bilan"        element={<BilanPage />} />
                     <Route path="/parametres"   element={<ParametresPage />} />
                     <Route path="/agents"       element={<AgentsPage />} />
+                    <Route path="/workspace"    element={<WorkspacePage />} />
+                    <Route path="/scenarios"    element={<ScenariosPage />} />
+                    <Route path="/coaching"     element={<CoachingPage />} />
+                    <Route path="/integrations" element={<IntegrationsPage />} />
+                    <Route path="/network"      element={<NetworkPage />} />
                     <Route path="*"             element={<Navigate to="/" replace />} />
                   </Routes>
                 </main>

@@ -1,6 +1,8 @@
 """WebSocket manager for real-time communication with desktop app."""
 from __future__ import annotations
 
+import uuid
+
 from fastapi import WebSocket
 
 
@@ -35,6 +37,23 @@ class ConnectionManager:
 
     def is_connected(self, user_id: str) -> bool:
         return user_id in self.active_connections and len(self.active_connections[user_id]) > 0
+
+    async def request_file_read(self, user_id: str, path: str, timeout: float = 10.0) -> dict:
+        """Demande au desktop de lire un fichier et attend la reponse."""
+        if not self.is_connected(user_id):
+            return {"success": False, "error": "Desktop non connecte"}
+
+        request_id = str(uuid.uuid4())
+        # Envoyer la requete
+        await self.send_to_user(user_id, {
+            "type": "file_read_request",
+            "path": path,
+            "request_id": request_id,
+        })
+        # Note: la reponse sera traitee cote client (Tauri) et renvoyee
+        # via un POST /api/agent3/file-response ou un autre message WS.
+        # Pour l'instant on retourne un flag "requested"
+        return {"success": True, "requested": True, "request_id": request_id}
 
 
 # Global instance

@@ -115,6 +115,30 @@ class Agent3CronOut(BaseModel):
     created_at: str
 
 
+class CheckContextIn(BaseModel):
+    type: str  # "dilemme" or "evenement"
+    question: str
+    options: list[str] | None = None
+    contexte_appareil: dict | None = None
+
+class CheckContextOut(BaseModel):
+    needs_context: bool
+    agent_question: str | None = None
+    choices: list[str] | None = None
+
+class SaveContextIn(BaseModel):
+    context_text: str
+    related_to: str
+    type: str = "dilemme"
+    question: str = ""
+    options: list[str] | None = None
+
+class SaveContextOut(BaseModel):
+    ok: bool
+    sufficient: bool
+    feedback: str | None = None
+
+
 # ── DB schema init ──────────────────────────────────────────────────────────
 
 def _ensure_agent3_tables(db: DatabaseManager):
@@ -327,6 +351,13 @@ def _send_email_smtp(db, user_id: str, to: str, subject: str, body: str, html: b
         return {"ok": False, "error": f"Erreur SMTP: {str(e)[:100]}"}
     except Exception as e:
         return {"ok": False, "error": f"Erreur envoi: {str(e)[:100]}"}
+
+
+def _email_fallback_url(to: str, subject: str, body: str) -> dict:
+    """Fallback : genere une URL Gmail pre-remplie (comme Agent 2)."""
+    from urllib.parse import quote
+    url = f"https://mail.google.com/mail/?view=cm&fs=1&to={quote(to)}&su={quote(subject)}&body={quote(body[:2000])}"
+    return {"ok": True, "fallback": True, "gmail_url": url, "message": f"Lien Gmail pre-rempli genere pour {to}"}
 
 
 async def _analyze_image_with_vision(image_path: str, user_prompt: str = "") -> str:
@@ -2001,6 +2032,217 @@ class WorkingMemory:
     @classmethod
     def size(cls, user_id: str, session_id: str = "default") -> int:
         return len(cls.all(user_id, session_id))
+
+
+class MemoryCompressor:
+    """Compresse et priorise les memoires pour eviter la saturation du contexte.
+
+    - Resume les lecons similaires
+    - Pondere par frequence d'utilisation et recence
+    - Ne garde que les top-N pertinentes par categorie
+    """
+
+    @staticmethod
+    def compress_memories(memories: list[dict], max_per_category: int = 5) -> list[dict]:
+        """Compresse les memoires par categorie, garde les plus pertinentes."""
+        from collections import defaultdict
+        by_cat: dict[str, list[dict]] = defaultdict(list)
+        for m in memories:
+            cat = m.get("category", "general")
+            by_cat[cat].append(m)
+
+        compressed = []
+        for cat, mems in by_cat.items():
+            # Trier par score de pertinence (recence + usage)
+            scored = []
+            now = datetime.now(timezone.utc)
+            for m in mems:
+                recency_score = 1.0
+                try:
+                    updated = m.get("updated_at", "")
+                    if updated:
+                        dt = datetime.fromisoformat(updated.replace('Z', '+00:00'))
+                        days_old = (now - dt).total_seconds() / 86400
+                        recency_score = max(0.1, 1.0 - (days_old / 90))  # Decay over 90 days
+                except Exception:
+                    pass
+                usage_score = min(2.0, m.get("uses", 1) * 0.3)
+                total = recency_score + usage_score
+                scored.append((total, m))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            compressed.extend(m for _, m in scored[:max_per_category])
+        return compressed
+
+    @staticmethod
+    async def summarize_lessons(lessons: list[dict], api_key: str | None = None) -> str:
+        """Resume N lecons en regles condensees via LLM."""
+        if not lessons or len(lessons) < 3:
+            return ""
+        if not api_key:
+            # Fallback heuristique : concatener les valeurs
+            return " | ".join(m.get("value", "")[:80] for m in lessons[:10])
+
+        lessons_text = "\n".join(f"- {m.get('value', '')}" for m in lessons[:20])
+        prompt = f"""Resume ces lecons apprises en 3-5 regles condensees (1 ligne chacune).
+Garde UNIQUEMENT l'essentiel, elimine les doublons :
+
+{lessons_text}
+
+Reponds UNIQUEMENT avec les regles, une par ligne, sans numerotation."""
+
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            msg = await asyncio.to_thread(
+                lambda: client.messages.create(
+                    model="claude-haiku-4-5-20251001", max_tokens=300,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+            )
+            return msg.content[0].text.strip()
+        except Exception:
+            return " | ".join(m.get("value", "")[:80] for m in lessons[:10])
+
+    @staticmethod
+    def build_optimized_context(db, user_id: str, query: str = "", max_tokens: int = 1500) -> str:
+        """Construit un contexte memoire optimise : pertinent + compresse."""
+        try:
+            _ensure_agent3_tables(db)
+            all_mems = db.conn.execute(
+                "SELECT key, value, category, updated_at FROM agent3_memory WHERE auth_user_id = ? ORDER BY updated_at DESC LIMIT 100",
+                (user_id,),
+            ).fetchall()
+            if not all_mems:
+                return ""
+
+            mems = [{"key": r[0], "value": r[1], "category": r[2], "updated_at": r[3]} for r in all_mems]
+            compressed = MemoryCompressor.compress_memories(mems, max_per_category=5)
+
+            # Formater
+            lines = []
+            for m in compressed:
+                line = f"[{m.get('category', 'general')}] {m['key']}: {m['value'][:150]}"
+                lines.append(line)
+
+            result = "\n".join(lines)
+            # Tronquer si trop long (estimation ~4 chars/token)
+            if len(result) > max_tokens * 4:
+                result = result[:max_tokens * 4] + "\n..."
+            return result
+        except Exception:
+            return ""
+
+
+class BehavioralProfile:
+    """Profil comportemental persistant : resume les preferences et patterns de l'utilisateur.
+
+    Stocke dans agent3_preferences sous la cle 'behavioral_profile'.
+    Se met a jour automatiquement apres chaque session significative.
+    """
+
+    @staticmethod
+    def load(db, user_id: str) -> dict:
+        """Charge le profil comportemental depuis la DB."""
+        try:
+            row = db.conn.execute(
+                "SELECT preferences_json FROM agent3_preferences WHERE auth_user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row:
+                prefs = json.loads(row[0])
+                return prefs.get("behavioral_profile", {})
+        except Exception:
+            pass
+        return {}
+
+    @staticmethod
+    def save(db, user_id: str, profile: dict):
+        """Sauvegarde le profil comportemental dans la DB."""
+        try:
+            row = db.conn.execute(
+                "SELECT preferences_json FROM agent3_preferences WHERE auth_user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row:
+                prefs = json.loads(row[0])
+                prefs["behavioral_profile"] = profile
+                db.conn.execute(
+                    "UPDATE agent3_preferences SET preferences_json = ? WHERE auth_user_id = ?",
+                    (json.dumps(prefs, ensure_ascii=False), user_id),
+                )
+            else:
+                prefs = {"behavioral_profile": profile}
+                db.conn.execute(
+                    "INSERT INTO agent3_preferences (auth_user_id, preferences_json) VALUES (?, ?)",
+                    (user_id, json.dumps(prefs, ensure_ascii=False)),
+                )
+            db.conn.commit()
+        except Exception as e:
+            logger.debug(f"BehavioralProfile save error: {e}")
+
+    @staticmethod
+    async def update_from_session(db, user_id: str, messages: list[dict], api_key: str | None = None):
+        """Met a jour le profil apres une session significative (>= 4 messages)."""
+        user_msgs = [m for m in messages if m.get("role") == "user"]
+        if len(user_msgs) < 4:
+            return  # Pas assez de messages pour apprendre
+
+        current = BehavioralProfile.load(db, user_id)
+
+        # Analyse heuristique (sans LLM)
+        total_words = sum(len(m.get("content", "").split()) for m in user_msgs)
+        avg_words = total_words / max(1, len(user_msgs))
+
+        # Detecter les patterns
+        emoji_count = sum(1 for m in user_msgs for c in m.get("content", "") if ord(c) > 0x1F600)
+        formal_markers = sum(1 for m in user_msgs if any(w in m.get("content", "").lower() for w in ["merci", "s'il vous", "cordialement", "pourriez"]))
+        informal_markers = sum(1 for m in user_msgs if any(w in m.get("content", "").lower() for w in ["mdr", "lol", "ptdr", "genre", "oklm"]))
+
+        # Mettre a jour le profil
+        sessions = current.get("sessions_analyzed", 0) + 1
+        current["sessions_analyzed"] = sessions
+        current["avg_message_length"] = round(
+            (current.get("avg_message_length", avg_words) * (sessions - 1) + avg_words) / sessions, 1
+        )
+        current["uses_emojis"] = emoji_count > 0 or current.get("uses_emojis", False)
+
+        formality = current.get("formality_score", 50)
+        if formal_markers > informal_markers:
+            formality = min(100, formality + 5)
+        elif informal_markers > formal_markers:
+            formality = max(0, formality - 5)
+        current["formality_score"] = formality
+
+        current["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+        # Sauvegarder
+        BehavioralProfile.save(db, user_id, current)
+
+    @staticmethod
+    def get_instructions(profile: dict) -> str:
+        """Genere des instructions systeme basees sur le profil."""
+        if not profile or profile.get("sessions_analyzed", 0) < 2:
+            return ""
+
+        parts = []
+        avg_len = profile.get("avg_message_length", 0)
+        if avg_len > 30:
+            parts.append("L'utilisateur ecrit des messages longs — tu peux repondre en detail.")
+        elif avg_len < 10:
+            parts.append("L'utilisateur est concis — sois bref et direct.")
+
+        formality = profile.get("formality_score", 50)
+        if formality > 70:
+            parts.append("L'utilisateur est plutot formel — adapte ton langage.")
+        elif formality < 30:
+            parts.append("L'utilisateur est tres informel — sois decontracte.")
+
+        if profile.get("uses_emojis"):
+            parts.append("L'utilisateur utilise des emojis — tu peux en utiliser aussi.")
+
+        if not parts:
+            return ""
+        return "PROFIL COMPORTEMENTAL APPRIS:\n" + "\n".join(f"- {p}" for p in parts)
 
 
 def _heuristic_plan(user_message: str) -> list[dict]:
@@ -4505,7 +4747,7 @@ REGLES ABSOLUES :
                         else:
                             yield _sse_event("log", {"text": f"Fichier cree sur le PC : {fc_filename}", "type": "success"})
 
-                    # EMAIL — envoyer un email via SMTP
+                    # EMAIL — envoyer un email via SMTP (avec triple fallback)
                     elif action_type == "EMAIL":
                         _email_to = action_data.get("to", "")
                         _email_subject = action_data.get("subject", "")
@@ -4513,14 +4755,48 @@ REGLES ABSOLUES :
                         _email_html = action_data.get("html", False)
                         if user_id and _email_to:
                             yield _sse_event("log", {"text": f"Envoi email a {_email_to}...", "type": "tool"})
+                            # 1. Essayer SMTP
                             _send_result = _send_email_smtp(db, user_id, _email_to, _email_subject, _email_body, html=_email_html)
-                            action_data["sent"] = _send_result.get("ok", False)
-                            action_data["send_error"] = _send_result.get("error")
                             if _send_result.get("ok"):
+                                action_data["sent"] = True
+                                action_data["method"] = "smtp"
                                 action_data["message"] = _send_result.get("message", "Email envoye")
-                                yield _sse_event("log", {"text": f"Email envoye a {_email_to}", "type": "success"})
+                                yield _sse_event("log", {"text": f"Email envoye (SMTP) a {_email_to}", "type": "success"})
                             else:
-                                yield _sse_event("log", {"text": f"Echec envoi email : {_send_result.get('error', 'Erreur inconnue')}", "type": "error"})
+                                # 2. Fallback Gmail API
+                                _gmail_ok = False
+                                try:
+                                    from api.routers.integrations import _get_integration
+                                    _integ = _get_integration(db, user_id, "gmail")
+                                    _gt = _integ.get("access_token", "") if _integ else ""
+                                    if _gt and len(_gt) > 20:
+                                        import httpx, base64
+                                        from email.mime.text import MIMEText as _MT
+                                        _m = _MT(_email_body, "plain", "utf-8")
+                                        _m["To"] = _email_to
+                                        _m["Subject"] = _email_subject
+                                        _raw = base64.urlsafe_b64encode(_m.as_bytes()).decode("utf-8")
+                                        _gr = httpx.post(
+                                            "https://www.googleapis.com/gmail/v1/users/me/messages/send",
+                                            headers={"Authorization": f"Bearer {_gt}", "Content-Type": "application/json"},
+                                            json={"raw": _raw}, timeout=10,
+                                        )
+                                        if _gr.status_code == 200:
+                                            action_data["sent"] = True
+                                            action_data["method"] = "gmail_api"
+                                            action_data["message"] = f"Email envoye via Gmail API a {_email_to}"
+                                            yield _sse_event("log", {"text": f"Email envoye (Gmail API) a {_email_to}", "type": "success"})
+                                            _gmail_ok = True
+                                except Exception:
+                                    pass
+                                # 3. Fallback Gmail URL
+                                if not _gmail_ok:
+                                    _url_result = _email_fallback_url(_email_to, _email_subject, _email_body)
+                                    action_data["sent"] = False
+                                    action_data["method"] = "gmail_url"
+                                    action_data["gmail_url"] = _url_result["gmail_url"]
+                                    action_data["message"] = "SMTP/Gmail API indisponibles. Lien Gmail pre-rempli genere."
+                                    yield _sse_event("log", {"text": "Fallback : lien Gmail pre-rempli genere", "type": "warning"})
                         else:
                             action_data["sent"] = False
                             action_data["send_error"] = "Destinataire manquant ou utilisateur non authentifie"
@@ -4672,6 +4948,133 @@ REGLES ABSOLUES :
                             action_data["saved"] = False
                             action_data["error"] = str(e)[:100]
                             yield _sse_event("log", {"text": f"Erreur Drive : {str(e)[:60]}", "type": "error"})
+
+                    # CALENDAR_LIST — lire les evenements Google Calendar
+                    elif action_type == "CALENDAR_LIST" and user_id:
+                        try:
+                            from api.routers.integrations import _get_integration
+                            integ = _get_integration(db, user_id, "google_calendar")
+                            _cal_token = integ.get("access_token", "") if integ else ""
+                            if _cal_token and len(_cal_token) > 20:
+                                import httpx
+                                _time_min = action_data.get("time_min", datetime.now(timezone.utc).isoformat())
+                                _time_max = action_data.get("time_max", "")
+                                _params = f"timeMin={_time_min}&singleEvents=true&orderBy=startTime&maxResults=20"
+                                if _time_max:
+                                    _params += f"&timeMax={_time_max}"
+                                yield _sse_event("log", {"text": "Lecture du calendrier Google...", "type": "tool"})
+                                _cal_resp = httpx.get(
+                                    f"https://www.googleapis.com/calendar/v3/calendars/primary/events?{_params}",
+                                    headers={"Authorization": f"Bearer {_cal_token}"},
+                                    timeout=10,
+                                )
+                                if _cal_resp.status_code == 200:
+                                    _events = _cal_resp.json().get("items", [])
+                                    action_data["events"] = [
+                                        {"title": e.get("summary", ""), "start": e.get("start", {}).get("dateTime", e.get("start", {}).get("date", "")),
+                                         "end": e.get("end", {}).get("dateTime", e.get("end", {}).get("date", "")),
+                                         "description": e.get("description", "")[:200], "location": e.get("location", "")}
+                                        for e in _events[:20]
+                                    ]
+                                    action_data["count"] = len(action_data["events"])
+                                    yield _sse_event("log", {"text": f"Calendrier : {len(action_data['events'])} evenements trouves", "type": "success"})
+                                else:
+                                    action_data["error"] = f"Erreur Calendar API: {_cal_resp.status_code}"
+                                    yield _sse_event("log", {"text": f"Erreur Calendar: {_cal_resp.status_code}", "type": "error"})
+                            else:
+                                action_data["error"] = "Google Calendar non connecte"
+                                yield _sse_event("log", {"text": "Google Calendar non connecte", "type": "warning"})
+                        except Exception as e:
+                            action_data["error"] = str(e)[:100]
+
+                    # GMAIL_READ — lire les emails Gmail
+                    elif action_type == "GMAIL_READ" and user_id:
+                        try:
+                            from api.routers.integrations import _get_integration
+                            integ = _get_integration(db, user_id, "gmail")
+                            _gmail_token = integ.get("access_token", "") if integ else ""
+                            if _gmail_token and len(_gmail_token) > 20:
+                                import httpx
+                                _query = action_data.get("query", "is:unread")
+                                _max = min(action_data.get("max_results", 10), 20)
+                                yield _sse_event("log", {"text": f"Lecture Gmail : {_query[:50]}...", "type": "tool"})
+                                _list_resp = httpx.get(
+                                    f"https://www.googleapis.com/gmail/v1/users/me/messages?q={_query}&maxResults={_max}",
+                                    headers={"Authorization": f"Bearer {_gmail_token}"},
+                                    timeout=10,
+                                )
+                                if _list_resp.status_code == 200:
+                                    _msg_ids = [m["id"] for m in _list_resp.json().get("messages", [])[:_max]]
+                                    _emails = []
+                                    for _mid in _msg_ids[:10]:
+                                        _det = httpx.get(
+                                            f"https://www.googleapis.com/gmail/v1/users/me/messages/{_mid}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date",
+                                            headers={"Authorization": f"Bearer {_gmail_token}"},
+                                            timeout=5,
+                                        )
+                                        if _det.status_code == 200:
+                                            _headers = {h["name"]: h["value"] for h in _det.json().get("payload", {}).get("headers", [])}
+                                            _emails.append({
+                                                "id": _mid, "subject": _headers.get("Subject", ""),
+                                                "from": _headers.get("From", ""), "date": _headers.get("Date", ""),
+                                                "snippet": _det.json().get("snippet", "")[:200],
+                                            })
+                                    action_data["emails"] = _emails
+                                    action_data["count"] = len(_emails)
+                                    yield _sse_event("log", {"text": f"Gmail : {len(_emails)} emails trouves", "type": "success"})
+                                else:
+                                    action_data["error"] = f"Erreur Gmail API: {_list_resp.status_code}"
+                                    yield _sse_event("log", {"text": f"Erreur Gmail: {_list_resp.status_code}", "type": "error"})
+                            else:
+                                action_data["error"] = "Gmail non connecte"
+                                yield _sse_event("log", {"text": "Gmail non connecte", "type": "warning"})
+                        except Exception as e:
+                            action_data["error"] = str(e)[:100]
+
+                    # FILE_READ — lire un fichier local via WebSocket desktop
+                    elif action_type == "FILE_READ":
+                        _fr_path = action_data.get("path", "")
+                        if _fr_path and user_id:
+                            yield _sse_event("log", {"text": f"Lecture fichier : {_fr_path[-60:]}...", "type": "tool"})
+                            # Verifier si desktop est connecte
+                            _desktop_ok = False
+                            try:
+                                from api.websocket import ws_manager
+                                _desktop_ok = ws_manager.is_connected(user_id)
+                            except Exception:
+                                pass
+                            if _desktop_ok:
+                                # Envoyer requete de lecture au desktop via WebSocket
+                                try:
+                                    await ws_manager.send_to_user(user_id, {
+                                        "type": "file_read_request",
+                                        "path": _fr_path,
+                                        "request_id": str(uuid.uuid4()),
+                                    })
+                                    action_data["requested"] = True
+                                    action_data["method"] = "desktop_websocket"
+                                    yield _sse_event("log", {"text": "Requete de lecture envoyee au desktop", "type": "success"})
+                                except Exception as _fr_err:
+                                    action_data["error"] = str(_fr_err)[:100]
+                            else:
+                                # Fallback : essayer de lire via le serveur (fichiers workspace uniquement)
+                                try:
+                                    _ws_base = Path(__file__).resolve().parent.parent.parent / "data" / "workspace"
+                                    _fr_resolved = Path(_fr_path).resolve()
+                                    if str(_fr_resolved).startswith(str(_ws_base)):
+                                        if _fr_resolved.exists() and _fr_resolved.is_file():
+                                            _content = _fr_resolved.read_text(encoding="utf-8", errors="replace")[:50000]
+                                            action_data["content"] = _content
+                                            action_data["method"] = "server_workspace"
+                                            yield _sse_event("log", {"text": f"Fichier lu (workspace serveur): {len(_content)} chars", "type": "success"})
+                                        else:
+                                            action_data["error"] = "Fichier non trouve"
+                                    else:
+                                        action_data["error"] = "Desktop non connecte. Impossible de lire les fichiers locaux."
+                                        action_data["method"] = "unavailable"
+                                        yield _sse_event("log", {"text": "Desktop non connecte — lecture fichier impossible", "type": "warning"})
+                                except Exception as _fr_err:
+                                    action_data["error"] = str(_fr_err)[:100]
 
                     # DYNAMIC_TOOL — executer un outil dynamique cree par l'agent
                     elif action_type == "DYNAMIC_TOOL":
@@ -5363,7 +5766,7 @@ async def agent3_chat(
                         logger.error(f"FILE_CREATE fallback error: {fc_err}")
                         action_data["fallback_error"] = str(fc_err)
 
-            # EMAIL — envoyer un email via SMTP
+            # EMAIL — envoyer un email via SMTP (avec triple fallback)
             elif action_type == "EMAIL":
                 _email_to = action_data.get("to", "")
                 _email_subject = action_data.get("subject", "")
@@ -5371,10 +5774,41 @@ async def agent3_chat(
                 _email_html = action_data.get("html", False)
                 if user_id and _email_to:
                     _send_result = _send_email_smtp(db, user_id, _email_to, _email_subject, _email_body, html=_email_html)
-                    action_data["sent"] = _send_result.get("ok", False)
-                    action_data["send_error"] = _send_result.get("error")
                     if _send_result.get("ok"):
+                        action_data["sent"] = True
+                        action_data["method"] = "smtp"
                         action_data["message"] = _send_result.get("message", "Email envoye")
+                    else:
+                        _gmail_ok = False
+                        try:
+                            from api.routers.integrations import _get_integration
+                            _integ = _get_integration(db, user_id, "gmail")
+                            _gt = _integ.get("access_token", "") if _integ else ""
+                            if _gt and len(_gt) > 20:
+                                import httpx, base64
+                                from email.mime.text import MIMEText as _MT
+                                _m = _MT(_email_body, "plain", "utf-8")
+                                _m["To"] = _email_to
+                                _m["Subject"] = _email_subject
+                                _raw = base64.urlsafe_b64encode(_m.as_bytes()).decode("utf-8")
+                                _gr = httpx.post(
+                                    "https://www.googleapis.com/gmail/v1/users/me/messages/send",
+                                    headers={"Authorization": f"Bearer {_gt}", "Content-Type": "application/json"},
+                                    json={"raw": _raw}, timeout=10,
+                                )
+                                if _gr.status_code == 200:
+                                    action_data["sent"] = True
+                                    action_data["method"] = "gmail_api"
+                                    action_data["message"] = f"Email envoye via Gmail API a {_email_to}"
+                                    _gmail_ok = True
+                        except Exception:
+                            pass
+                        if not _gmail_ok:
+                            _url_result = _email_fallback_url(_email_to, _email_subject, _email_body)
+                            action_data["sent"] = False
+                            action_data["method"] = "gmail_url"
+                            action_data["gmail_url"] = _url_result["gmail_url"]
+                            action_data["message"] = "Lien Gmail pre-rempli genere."
                 else:
                     action_data["sent"] = False
                     action_data["send_error"] = "Destinataire manquant ou utilisateur non authentifie"
@@ -5484,6 +5918,119 @@ async def agent3_chat(
                 except Exception as e:
                     action_data["saved"] = False
                     action_data["error"] = str(e)[:100]
+
+            # CALENDAR_LIST — lire les evenements Google Calendar
+            elif action_type == "CALENDAR_LIST" and user_id:
+                try:
+                    from api.routers.integrations import _get_integration
+                    integ = _get_integration(db, user_id, "google_calendar")
+                    _cal_token = integ.get("access_token", "") if integ else ""
+                    if _cal_token and len(_cal_token) > 20:
+                        import httpx
+                        _time_min = action_data.get("time_min", datetime.now(timezone.utc).isoformat())
+                        _time_max = action_data.get("time_max", "")
+                        _params = f"timeMin={_time_min}&singleEvents=true&orderBy=startTime&maxResults=20"
+                        if _time_max:
+                            _params += f"&timeMax={_time_max}"
+                        _cal_resp = httpx.get(
+                            f"https://www.googleapis.com/calendar/v3/calendars/primary/events?{_params}",
+                            headers={"Authorization": f"Bearer {_cal_token}"},
+                            timeout=10,
+                        )
+                        if _cal_resp.status_code == 200:
+                            _events = _cal_resp.json().get("items", [])
+                            action_data["events"] = [
+                                {"title": e.get("summary", ""), "start": e.get("start", {}).get("dateTime", e.get("start", {}).get("date", "")),
+                                 "end": e.get("end", {}).get("dateTime", e.get("end", {}).get("date", "")),
+                                 "description": e.get("description", "")[:200], "location": e.get("location", "")}
+                                for e in _events[:20]
+                            ]
+                            action_data["count"] = len(action_data["events"])
+                        else:
+                            action_data["error"] = f"Erreur Calendar API: {_cal_resp.status_code}"
+                    else:
+                        action_data["error"] = "Google Calendar non connecte"
+                except Exception as e:
+                    action_data["error"] = str(e)[:100]
+
+            # GMAIL_READ — lire les emails Gmail
+            elif action_type == "GMAIL_READ" and user_id:
+                try:
+                    from api.routers.integrations import _get_integration
+                    integ = _get_integration(db, user_id, "gmail")
+                    _gmail_token = integ.get("access_token", "") if integ else ""
+                    if _gmail_token and len(_gmail_token) > 20:
+                        import httpx
+                        _query = action_data.get("query", "is:unread")
+                        _max = min(action_data.get("max_results", 10), 20)
+                        _list_resp = httpx.get(
+                            f"https://www.googleapis.com/gmail/v1/users/me/messages?q={_query}&maxResults={_max}",
+                            headers={"Authorization": f"Bearer {_gmail_token}"},
+                            timeout=10,
+                        )
+                        if _list_resp.status_code == 200:
+                            _msg_ids = [m["id"] for m in _list_resp.json().get("messages", [])[:_max]]
+                            _emails = []
+                            for _mid in _msg_ids[:10]:
+                                _det = httpx.get(
+                                    f"https://www.googleapis.com/gmail/v1/users/me/messages/{_mid}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date",
+                                    headers={"Authorization": f"Bearer {_gmail_token}"},
+                                    timeout=5,
+                                )
+                                if _det.status_code == 200:
+                                    _headers = {h["name"]: h["value"] for h in _det.json().get("payload", {}).get("headers", [])}
+                                    _emails.append({
+                                        "id": _mid, "subject": _headers.get("Subject", ""),
+                                        "from": _headers.get("From", ""), "date": _headers.get("Date", ""),
+                                        "snippet": _det.json().get("snippet", "")[:200],
+                                    })
+                            action_data["emails"] = _emails
+                            action_data["count"] = len(_emails)
+                        else:
+                            action_data["error"] = f"Erreur Gmail API: {_list_resp.status_code}"
+                    else:
+                        action_data["error"] = "Gmail non connecte"
+                except Exception as e:
+                    action_data["error"] = str(e)[:100]
+
+            # FILE_READ — lire un fichier local via WebSocket desktop
+            elif action_type == "FILE_READ":
+                _fr_path = action_data.get("path", "")
+                if _fr_path and user_id:
+                    _desktop_ok = False
+                    try:
+                        from api.websocket import ws_manager
+                        _desktop_ok = ws_manager.is_connected(user_id)
+                    except Exception:
+                        pass
+                    if _desktop_ok:
+                        try:
+                            import asyncio as _aio
+                            _aio.get_event_loop().create_task(ws_manager.send_to_user(user_id, {
+                                "type": "file_read_request",
+                                "path": _fr_path,
+                                "request_id": str(uuid.uuid4()),
+                            }))
+                            action_data["requested"] = True
+                            action_data["method"] = "desktop_websocket"
+                        except Exception as _fr_err:
+                            action_data["error"] = str(_fr_err)[:100]
+                    else:
+                        try:
+                            _ws_base = Path(__file__).resolve().parent.parent.parent / "data" / "workspace"
+                            _fr_resolved = Path(_fr_path).resolve()
+                            if str(_fr_resolved).startswith(str(_ws_base)):
+                                if _fr_resolved.exists() and _fr_resolved.is_file():
+                                    _content = _fr_resolved.read_text(encoding="utf-8", errors="replace")[:50000]
+                                    action_data["content"] = _content
+                                    action_data["method"] = "server_workspace"
+                                else:
+                                    action_data["error"] = "Fichier non trouve"
+                            else:
+                                action_data["error"] = "Desktop non connecte. Impossible de lire les fichiers locaux."
+                                action_data["method"] = "unavailable"
+                        except Exception as _fr_err:
+                            action_data["error"] = str(_fr_err)[:100]
 
             # DYNAMIC_TOOL — outils dynamiques
             elif action_type == "DYNAMIC_TOOL":
@@ -5951,6 +6498,172 @@ async def manage_dynamic_tool(
         raise HTTPException(status_code=404, detail=f"Outil '{name}' non trouve")
     else:
         raise HTTPException(status_code=400, detail=f"Action inconnue: {action}")
+
+
+# ── Check Context (ported from Agent 1) ──────────────────────────────────────
+
+@router.post("/check-context", response_model=CheckContextOut)
+async def check_context_agent3(
+    data: CheckContextIn,
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Verifie si le contexte est suffisant pour analyser un dilemme/evenement."""
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return CheckContextOut(needs_context=False)
+
+    repo = ProfilRepository(db)
+    profil_data: dict = {}
+    collected_info = ""
+    if user_id and repo.existe(auth_user_id=user_id):
+        profil = repo.charger(auth_user_id=user_id)
+        profil_data = {
+            "nom": profil.nom, "age": profil.age,
+            "profession": profil.profession, "ville": profil.ville,
+            "situation_familiale": profil.situation_familiale,
+            "objectif": profil.objectif.description if profil.objectif else None,
+        }
+        try:
+            rows = db.conn.execute(
+                "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 30",
+                (user_id,),
+            ).fetchall()
+            if rows:
+                collected_info = "\n".join(f"{r[0]}: {r[1]}" for r in rows)
+        except Exception:
+            pass
+        # Load memories for Agent 3
+        try:
+            _ensure_agent3_tables(db)
+            mem_rows = db.conn.execute(
+                "SELECT key, value FROM agent3_memory WHERE auth_user_id = ? ORDER BY updated_at DESC LIMIT 20",
+                (user_id,),
+            ).fetchall()
+            if mem_rows:
+                collected_info += "\n\nMEMOIRES AGENT 3:\n" + "\n".join(f"{r[0]}: {r[1]}" for r in mem_rows)
+        except Exception:
+            pass
+        # Load recent messages
+        try:
+            msg_rows = db.conn.execute(
+                "SELECT role, content FROM agent3_messages WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT 20",
+                (user_id,),
+            ).fetchall()
+            if msg_rows:
+                collected_info += "\n\nCONVERSATION RECENTE:\n" + "\n".join(
+                    f"{'User' if r[0]=='user' else 'Agent'}: {r[1][:150]}" for r in reversed(msg_rows)
+                )
+        except Exception:
+            pass
+
+    options_text = f"\nOptions: {' | '.join(data.options)}" if data.options else ""
+
+    prompt = f"""Analyse cette demande et determine si tu as ASSEZ de contexte pour faire une analyse pertinente.
+
+TYPE: {data.type}
+DEMANDE: {data.question}{options_text}
+
+PROFIL UTILISATEUR:
+{json.dumps(profil_data, ensure_ascii=False)}
+
+INFORMATIONS CONNUES:
+{collected_info or "Aucune"}
+
+QUESTION: As-tu assez de contexte pour analyser cette demande ?
+
+REGLE : Si des personnes/situations mentionnees dans la DEMANDE apparaissent DEJA dans les INFORMATIONS, reponds needs_context: false.
+
+Reponds UNIQUEMENT en JSON:
+{{"needs_context": true/false, "question": "ta question si besoin (1 phrase, tutoiement)", "choices": ["choix1", "choix2"] ou null}}
+
+REGLES QCM :
+- Propose un QCM quand les reponses sont des CATEGORIES CONNUES (type de financement, relation, montant, domaine, temporalite)
+- PAS de QCM pour decrire une personne/situation (reponse libre)
+- Max 5 choix, inclure "Autre" si pertinent
+- Si pas besoin de contexte, question et choices = null."""
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=key)
+        msg = await asyncio.to_thread(
+            lambda: client.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=200,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        )
+        text = msg.content[0].text.strip()
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            result = json.loads(match.group())
+            return CheckContextOut(
+                needs_context=result.get("needs_context", False),
+                agent_question=result.get("question"),
+                choices=result.get("choices"),
+            )
+    except Exception:
+        pass
+    return CheckContextOut(needs_context=False)
+
+
+@router.post("/save-context", response_model=SaveContextOut)
+async def save_context_agent3(
+    data: SaveContextIn,
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Sauvegarde le contexte utilisateur et verifie s'il est suffisant."""
+    if user_id:
+        try:
+            db.conn.execute(
+                "INSERT INTO agent_collected_info (user_id, field, value, collected_at) VALUES (?, ?, ?, datetime('now'))",
+                (user_id, f"contexte_{data.related_to[:50]}", data.context_text),
+            )
+            db.conn.commit()
+        except Exception:
+            pass
+
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return SaveContextOut(ok=True, sufficient=True)
+
+    collected_info = ""
+    if user_id:
+        try:
+            rows = db.conn.execute(
+                "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 20",
+                (user_id,),
+            ).fetchall()
+            collected_info = "\n".join(f"{r[0]}: {r[1]}" for r in rows)
+        except Exception:
+            pass
+
+    options_text = f"\nOptions: {' | '.join(data.options)}" if data.options else ""
+    prompt = f"""L'utilisateur a repondu a une question de contexte.
+
+DEMANDE ORIGINALE: {data.question}{options_text}
+REPONSE: {data.context_text}
+
+REGLES : Sois TOLERANT. Une reponse courte mais claire = suffisant. En cas de doute, SUFFISANT.
+Reponds en JSON: {{"sufficient": true/false, "feedback": "explication courte" ou null}}"""
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=key)
+        msg = await asyncio.to_thread(
+            lambda: client.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=100,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        )
+        text = msg.content[0].text.strip()
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            result = json.loads(match.group())
+            return SaveContextOut(ok=True, sufficient=result.get("sufficient", True), feedback=result.get("feedback"))
+    except Exception:
+        pass
+    return SaveContextOut(ok=True, sufficient=True)
 
 
 # ── Code Execution (sandbox) ──────────────────────────────────────────────────

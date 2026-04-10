@@ -25,6 +25,51 @@ function AgentRedLogo({ size = 120 }: { size?: number }) {
   )
 }
 
+function AgentBlueLogo({ size = 120 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 380 380" style={{ overflow: 'visible' }}>
+      <defs>
+        <linearGradient id="call-blue-g" x1="0%" y1="100%" x2="100%" y2="0%">
+          <stop offset="0%">
+            <animate attributeName="stop-color" values="#1e3a5f;#d4a017;#1e3a5f" dur="3s" repeatCount="indefinite" />
+          </stop>
+          <stop offset="35%">
+            <animate attributeName="stop-color" values="#2563eb;#fbbf24;#2563eb" dur="3s" repeatCount="indefinite" />
+          </stop>
+          <stop offset="65%">
+            <animate attributeName="stop-color" values="#d4a017;#2563eb;#d4a017" dur="3s" repeatCount="indefinite" />
+          </stop>
+          <stop offset="100%">
+            <animate attributeName="stop-color" values="#fbbf24;#1e3a5f;#fbbf24" dur="3s" repeatCount="indefinite" />
+          </stop>
+        </linearGradient>
+        <linearGradient id="call-blue-shine" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%">
+            <animate attributeName="stop-color" values="rgba(255,230,200,0.6);rgba(200,220,255,0.3);rgba(255,230,200,0.6)" dur="3s" repeatCount="indefinite" />
+          </stop>
+          <stop offset="100%">
+            <animate attributeName="stop-color" values="rgba(200,220,255,0.3);rgba(255,230,200,0.6);rgba(200,220,255,0.3)" dur="3s" repeatCount="indefinite" />
+          </stop>
+        </linearGradient>
+        <filter id="call-blue-blur"><feGaussianBlur stdDeviation="20" /></filter>
+        <linearGradient id="call-blue-glow" x1="0%" y1="100%" x2="100%" y2="0%">
+          <stop offset="0%">
+            <animate attributeName="stop-color" values="#1e3a5f;#d4a017;#1e3a5f" dur="3s" repeatCount="indefinite" />
+          </stop>
+          <stop offset="100%">
+            <animate attributeName="stop-color" values="#2563eb;#fbbf24;#2563eb" dur="3s" repeatCount="indefinite" />
+          </stop>
+        </linearGradient>
+      </defs>
+      <path d={S_PATH} stroke="url(#call-blue-glow)" strokeWidth="90" fill="none" strokeLinecap="round" style={{ filter: 'url(#call-blue-blur)', opacity: 0.22 }} />
+      <path d={S_PATH} stroke="rgba(2,4,16,0.98)" strokeWidth="58" fill="none" strokeLinecap="round" />
+      <path d={S_PATH} stroke="url(#call-blue-g)" strokeWidth="46" fill="none" strokeLinecap="round" />
+      <path d={S_PATH} stroke="#050810" strokeWidth="18" fill="none" strokeLinecap="butt" />
+      <path d={S_PATH} stroke="url(#call-blue-shine)" strokeWidth="2.5" fill="none" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 interface VoiceCallProps {
   onEndCall: () => void
   onMessage: (userText: string, agentText: string) => void
@@ -37,6 +82,7 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
   const [callDuration, setCallDuration] = useState(0)
   const [isSpeaking, setIsSpeaking] = useState<'user' | 'agent' | 'idle'>('idle')
   const [transcript, setTranscript] = useState('')
+  const [interimTranscript, setInterimTranscript] = useState('')
   const [isMuted, setIsMuted] = useState(false)
   const [speakerOn, setSpeakerOn] = useState(true)
   const [fadeIn, setFadeIn] = useState(true)  // Show immediately
@@ -148,7 +194,7 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
     }
   }, [chatEndpoint, onMessage, speakerOn])
 
-  // Start speech recognition
+  // Start speech recognition (continuous mode with silence detection)
   const startRecognition = useCallback(() => {
     if (!activeRef.current || isMuted) return
 
@@ -159,29 +205,74 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
     if (recognitionRef.current) {
       try { recognitionRef.current.abort() } catch { /* */ }
     }
+    if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null }
+    finalTranscriptRef.current = ''
+    setInterimTranscript('')
 
     const recognition = new SR()
     recognition.lang = 'fr-FR'
-    recognition.continuous = false  // Single phrase mode — more reliable
-    recognition.interimResults = false  // Only final results
+    recognition.continuous = true
+    recognition.interimResults = true
 
-    console.log('[VoiceCall] Creating recognition instance...')
+    console.log('[VoiceCall] Creating continuous recognition instance...')
 
     recognition.onstart = () => {
-      console.log('[VoiceCall] Recognition STARTED — speak now')
+      console.log('[VoiceCall] Recognition STARTED (continuous) — speak now')
       setStatus('Parle maintenant...')
       setIsSpeaking('idle')
     }
 
     recognition.onresult = (event: any) => {
       if (!activeRef.current) return
-      const text = event.results[0][0].transcript.trim()
-      console.log('[VoiceCall] Got result:', text)
-      if (text) {
-        setTranscript(text)
+
+      let finalText = ''
+      let interimText = ''
+
+      for (let i = 0; i < event.results.length; i++) {
+        const result = event.results[i]
+        if (result.isFinal) {
+          finalText += result[0].transcript
+        } else {
+          interimText += result[0].transcript
+        }
+      }
+
+      // Update the accumulated final transcript
+      if (finalText) {
+        finalTranscriptRef.current = finalText.trim()
+        setTranscript(finalTranscriptRef.current)
         setIsSpeaking('user')
-        // Send to agent immediately
-        sendToAgent(text)
+      }
+
+      // Show interim results
+      setInterimTranscript(interimText.trim())
+      if (interimText.trim()) {
+        setIsSpeaking('user')
+      }
+
+      console.log('[VoiceCall] final:', finalTranscriptRef.current, '| interim:', interimText.trim())
+
+      // Reset silence timer — user is still speaking
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current)
+
+      const hasContent = finalTranscriptRef.current || interimText.trim()
+      if (hasContent) {
+        silenceTimerRef.current = setTimeout(() => {
+          if (!activeRef.current) return
+          const textToSend = finalTranscriptRef.current || interimText.trim()
+          if (textToSend) {
+            console.log('[VoiceCall] Silence timeout — sending:', textToSend)
+            // Stop recognition before sending to agent
+            if (recognitionRef.current) {
+              try { recognitionRef.current.abort() } catch { /* */ }
+              recognitionRef.current = null
+            }
+            setInterimTranscript('')
+            setTranscript(textToSend)
+            finalTranscriptRef.current = ''
+            sendToAgentRef.current(textToSend)
+          }
+        }, 1500)
       }
     }
 
@@ -194,7 +285,7 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
           setTimeout(() => { if (activeRef.current) startRecognitionRef.current() }, 300)
         }
       } else if (event.error === 'aborted') {
-        // Intentionally stopped
+        // Intentionally stopped — do nothing
       } else if (event.error === 'not-allowed') {
         setStatus('Permission micro refusee')
       } else {
@@ -206,20 +297,30 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
 
     recognition.onend = () => {
       console.log('[VoiceCall] Recognition ended')
-      // In single-phrase mode, recognition ends after each result
-      // Only restart if we're not in agent-speaking mode
-      // sendToAgent will restart after agent finishes
+      // Auto-restart if the call is still active and we're not in agent-speaking mode
+      // (browser may auto-stop continuous recognition after a while)
+      if (activeRef.current && !silenceTimerRef.current) {
+        // Only restart if we didn't just trigger a silence timeout (which means sendToAgent is handling it)
+        const speaking = document.querySelector('[data-voice-speaking]')?.getAttribute('data-voice-speaking')
+        // Use a small delay to avoid rapid restart loops
+        setTimeout(() => {
+          if (activeRef.current && recognitionRef.current === null) {
+            console.log('[VoiceCall] Auto-restarting recognition after browser stop')
+            startRecognitionRef.current()
+          }
+        }, 300)
+      }
     }
 
     recognitionRef.current = recognition
     try {
       recognition.start()
-      console.log('[VoiceCall] recognition.start() called')
+      console.log('[VoiceCall] recognition.start() called (continuous)')
     } catch (e) {
       console.log('[VoiceCall] Start error:', e)
       setTimeout(() => { if (activeRef.current) startRecognitionRef.current() }, 1000)
     }
-  }, [isMuted, sendToAgent])
+  }, [isMuted])
 
   // Use refs to avoid stale closures
   const startRecognitionRef = useRef(startRecognition)
@@ -322,7 +423,9 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
     if (isMuted && recognitionRef.current) {
       try { recognitionRef.current.abort() } catch { /* */ }
       recognitionRef.current = null
+      if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null }
       setTranscript('')
+      setInterimTranscript('')
       finalTranscriptRef.current = ''
       setStatus('Micro coupe')
     } else if (!isMuted && callStarted && isSpeaking !== 'agent') {
@@ -330,28 +433,50 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
     }
   }, [isMuted, callStarted, isSpeaking, startRecognition])
 
-  const speakingColor = isSpeaking === 'user' ? '#60a5fa' : isSpeaking === 'agent' ? agentColor : 'rgba(255,255,255,0.3)'
+  const isBlue = agentColor.includes('2563eb')
+  const speakingColor = isSpeaking === 'user' ? '#60a5fa' : isSpeaking === 'agent' ? (isBlue ? '#d4a017' : agentColor) : 'rgba(255,255,255,0.3)'
 
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 9999,
-      background: 'radial-gradient(ellipse at center, rgba(20,0,0,0.98), #050510)',
+      background: isBlue
+        ? 'radial-gradient(ellipse at center, rgba(5,5,25,0.98), #050510)'
+        : 'radial-gradient(ellipse at center, rgba(20,0,0,0.98), #050510)',
       display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
       opacity: fadeIn ? 1 : 0, transition: 'opacity 0.5s ease',
     }}>
       <style>{`
         @keyframes vc-pulse { 0%,100% { transform: scale(1); opacity: 0.7; } 50% { transform: scale(1.15); opacity: 1; } }
+        @keyframes vc-blue-title {
+          0% { color: #2563eb; text-shadow: 0 0 20px rgba(37,99,235,0.4); }
+          50% { color: #fbbf24; text-shadow: 0 0 20px rgba(251,191,36,0.4); }
+          100% { color: #2563eb; text-shadow: 0 0 20px rgba(37,99,235,0.4); }
+        }
+        @keyframes vc-blue-glow {
+          0% { background: radial-gradient(circle, rgba(37,99,235,0.12), transparent 70%); }
+          50% { background: radial-gradient(circle, rgba(212,160,23,0.12), transparent 70%); }
+          100% { background: radial-gradient(circle, rgba(37,99,235,0.12), transparent 70%); }
+        }
       `}</style>
 
       {/* Glow */}
       <div style={{
         position: 'absolute', top: '20%', width: 300, height: 300, borderRadius: '50%',
-        background: `radial-gradient(circle, ${agentColor}22, transparent 70%)`,
+        background: isBlue
+          ? 'radial-gradient(circle, rgba(37,99,235,0.12), transparent 70%)'
+          : `radial-gradient(circle, ${agentColor}22, transparent 70%)`,
         filter: 'blur(60px)', pointerEvents: 'none',
+        animation: isBlue ? 'vc-blue-glow 3s ease-in-out infinite' : 'none',
       }} />
 
-      <AgentRedLogo size={140} />
-      <h2 style={{ color: agentColor, fontSize: '1.4rem', fontWeight: 700, margin: '1.5rem 0 0.5rem' }}>{agentName}</h2>
+      {isBlue ? <AgentBlueLogo size={140} /> : <AgentRedLogo size={140} />}
+      <h2 style={{
+        fontSize: '1.4rem', fontWeight: 700, margin: '1.5rem 0 0.5rem',
+        ...(isBlue
+          ? { animation: 'vc-blue-title 3s ease-in-out infinite' }
+          : { color: agentColor }
+        ),
+      }}>{agentName}</h2>
       <p style={{ fontSize: '2rem', fontWeight: 300, color: 'rgba(255,255,255,0.7)', margin: '0 0 1rem', letterSpacing: '0.1em' }}>
         {callStarted ? formatDuration(callDuration) : '00:00'}
       </p>
@@ -363,12 +488,24 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
       {!callStarted && (
         <button onClick={handleStartCall} style={{
           padding: '1rem 2.5rem', borderRadius: '999px',
-          background: `linear-gradient(135deg, ${agentColor}, ${agentColor}cc)`,
+          background: isBlue
+            ? 'linear-gradient(90deg, #1e3a5f, #2563eb, #d4a017, #fbbf24, #2563eb, #1e3a5f)'
+            : `linear-gradient(135deg, ${agentColor}, ${agentColor}cc)`,
+          backgroundSize: isBlue ? '300% 100%' : 'auto',
           border: 'none', color: 'white', fontSize: '1.1rem', fontWeight: 700,
           cursor: 'pointer', marginBottom: '2rem',
-          boxShadow: `0 0 30px ${agentColor}66`,
-          animation: 'vc-pulse 2s ease-in-out infinite',
+          boxShadow: isBlue
+            ? '0 0 30px rgba(37,99,235,0.4), 0 0 60px rgba(212,160,23,0.15)'
+            : `0 0 30px ${agentColor}66`,
+          animation: isBlue ? 'vc-pulse 2s ease-in-out infinite, vc-btn-flow 3s ease-in-out infinite' : 'vc-pulse 2s ease-in-out infinite',
         }}>
+          <style>{`
+            @keyframes vc-btn-flow {
+              0% { background-position: 0% 50%; }
+              50% { background-position: 100% 50%; }
+              100% { background-position: 0% 50%; }
+            }
+          `}</style>
           🎙️ Commencer l'appel
         </button>
       )}
@@ -377,27 +514,40 @@ const VoiceCall: React.FC<VoiceCallProps> = ({ onEndCall, onMessage, agentColor,
       {callStarted && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1.5rem' }}>
           <div style={{ display: 'flex', gap: 6 }}>
-            {[0, 1, 2].map(i => (
-              <div key={i} style={{
-                width: 10, height: 10, borderRadius: '50%', background: speakingColor,
-                animation: isSpeaking !== 'idle' ? `vc-pulse 1.2s ease-in-out ${i * 0.2}s infinite` : 'none',
-                opacity: isSpeaking === 'idle' ? 0.3 : 1,
-              }} />
-            ))}
+            {[0, 1, 2].map(i => {
+              const dotColors = isBlue && isSpeaking === 'agent'
+                ? ['#2563eb', '#d4a017', '#fbbf24']
+                : [speakingColor, speakingColor, speakingColor]
+              return (
+                <div key={i} style={{
+                  width: 10, height: 10, borderRadius: '50%', background: dotColors[i],
+                  animation: isSpeaking !== 'idle' ? `vc-pulse 1.2s ease-in-out ${i * 0.2}s infinite` : 'none',
+                  opacity: isSpeaking === 'idle' ? 0.3 : 1,
+                  boxShadow: isBlue && isSpeaking === 'agent' ? `0 0 8px ${dotColors[i]}88` : 'none',
+                }} />
+              )
+            })}
           </div>
         </div>
       )}
 
       {/* Transcript */}
-      {transcript && isSpeaking === 'user' && (
+      {(transcript || interimTranscript) && isSpeaking === 'user' && (
         <div style={{
           maxWidth: 400, padding: '0.75rem 1.25rem', borderRadius: 12,
           background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
           marginBottom: '2rem',
         }}>
-          <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.85rem', margin: 0, fontStyle: 'italic' }}>
-            {transcript}
-          </p>
+          {transcript && (
+            <span style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.85rem' }}>
+              {transcript}
+            </span>
+          )}
+          {interimTranscript && (
+            <span style={{ color: 'rgba(255,255,255,0.35)', fontSize: '0.85rem', fontStyle: 'italic' }}>
+              {transcript ? ' ' : ''}{interimTranscript}
+            </span>
+          )}
         </div>
       )}
 

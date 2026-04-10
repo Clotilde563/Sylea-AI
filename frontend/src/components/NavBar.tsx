@@ -55,7 +55,7 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
   // Masquer tous les liens tant que le profil n'est pas créé
   const links = profil ? [
     { to: '/', label: t('nav.dashboard') },
-    { to: '/dilemme', label: t('nav.analyser') },
+    { to: '/network', label: 'Réseau Syléa' },
     { to: '/statistiques', label: t('nav.statistiques') },
   ] : []
 
@@ -201,7 +201,30 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
                 </div>
               </button>
 
-              {/* Onglet 3: Modifier / Créer mon profil */}
+              {/* Onglet 4: Coaching */}
+              <button
+                onClick={() => { setDropdownOpen(false); navigate('/coaching') }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '0.6rem',
+                  width: '100%', padding: '0.75rem 1rem',
+                  background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
+                  color: 'var(--text-secondary)', fontSize: '0.82rem',
+                  cursor: 'pointer', textAlign: 'left',
+                  transition: 'background 0.15s',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+                </svg>
+                <div>
+                  <div style={{ fontWeight: 500, color: 'var(--text-primary)' }}>Coaching Vocal</div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Sessions hebdo, bilans et récaps</div>
+                </div>
+              </button>
+
+              {/* Onglet 7: Modifier / Créer mon profil */}
               <button
                 onClick={() => {
                   setDropdownOpen(false)

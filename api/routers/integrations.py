@@ -1165,3 +1165,200 @@ async def outlook_inbox(db=Depends(get_db), user=Depends(require_auth)):
 
     # Mock — reuse gmail mock as placeholder
     return {"emails": _MOCK_GMAIL_INBOX, "source": "mock"}
+
+
+# ── Notion Integration ────────────────────────────────────────────────────────
+
+@router.post("/notion/connect")
+async def connect_notion(data: dict, db=Depends(get_db), user=Depends(require_auth)):
+    """Connecte Notion via token d'integration."""
+    token = data.get("token", "")
+    if not token:
+        raise HTTPException(status_code=400, detail="Token Notion requis")
+
+    _ensure_integrations_tables(db)
+    user_id = user["id"]
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Verifier le token
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://api.notion.com/v1/users/me",
+                headers={"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28"},
+            )
+            if resp.status_code != 200:
+                raise HTTPException(status_code=401, detail="Token Notion invalide")
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="Impossible de joindre l'API Notion")
+
+    conn = _get_conn(db)
+    existing = _get_integration(db, user_id, "notion")
+    if existing:
+        conn.execute(
+            "UPDATE user_integrations SET access_token = ?, status = 'connected', updated_at = ? WHERE auth_user_id = ? AND provider = ?",
+            (token, now, user_id, "notion"),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO user_integrations (id, auth_user_id, provider, access_token, status, connected_at, updated_at) VALUES (?, ?, 'notion', ?, 'connected', ?, ?)",
+            (str(uuid.uuid4()), user_id, token, now, now),
+        )
+    conn.commit()
+    return {"connected": True, "provider": "notion"}
+
+
+@router.post("/notion/search")
+async def notion_search(data: dict, db=Depends(get_db), user=Depends(require_auth)):
+    """Recherche dans les pages Notion de l'utilisateur."""
+    user_id = user["id"]
+    integ = _get_integration(db, user_id, "notion")
+    if not integ or integ.get("status") != "connected":
+        raise HTTPException(status_code=403, detail="Notion non connecte")
+
+    query = data.get("query", "")
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            "https://api.notion.com/v1/search",
+            headers={"Authorization": f"Bearer {integ['access_token']}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
+            json={"query": query, "page_size": 10},
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail="Erreur API Notion")
+        results = resp.json().get("results", [])
+        return {
+            "results": [
+                {"id": r.get("id"), "title": _extract_notion_title(r), "url": r.get("url", ""), "type": r.get("object", "")}
+                for r in results[:10]
+            ]
+        }
+
+
+def _extract_notion_title(page: dict) -> str:
+    """Extrait le titre d'une page Notion."""
+    props = page.get("properties", {})
+    for key in ["title", "Name", "Nom"]:
+        if key in props:
+            title_arr = props[key].get("title", [])
+            if title_arr:
+                return title_arr[0].get("plain_text", "Sans titre")
+    return "Sans titre"
+
+
+# ── Slack Integration ─────────────────────────────────────────────────────────
+
+@router.post("/slack/connect")
+async def connect_slack(data: dict, db=Depends(get_db), user=Depends(require_auth)):
+    """Connecte Slack via webhook URL."""
+    webhook_url = data.get("webhook_url", "")
+    if not webhook_url or "hooks.slack.com" not in webhook_url:
+        raise HTTPException(status_code=400, detail="URL de webhook Slack invalide")
+
+    _ensure_integrations_tables(db)
+    user_id = user["id"]
+    now = datetime.now(timezone.utc).isoformat()
+
+    conn = _get_conn(db)
+    existing = _get_integration(db, user_id, "slack")
+    if existing:
+        conn.execute(
+            "UPDATE user_integrations SET access_token = ?, status = 'connected', updated_at = ? WHERE auth_user_id = ? AND provider = ?",
+            (webhook_url, now, user_id, "slack"),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO user_integrations (id, auth_user_id, provider, access_token, status, connected_at, updated_at) VALUES (?, ?, 'slack', ?, 'connected', ?, ?)",
+            (str(uuid.uuid4()), user_id, webhook_url, now, now),
+        )
+    conn.commit()
+    return {"connected": True, "provider": "slack"}
+
+
+@router.post("/slack/send")
+async def slack_send(data: dict, db=Depends(get_db), user=Depends(require_auth)):
+    """Envoie un message Slack via webhook."""
+    user_id = user["id"]
+    integ = _get_integration(db, user_id, "slack")
+    if not integ or integ.get("status") != "connected":
+        raise HTTPException(status_code=403, detail="Slack non connecte")
+
+    message = data.get("message", "")
+    channel = data.get("channel", "")
+    if not message:
+        raise HTTPException(status_code=400, detail="Message requis")
+
+    payload = {"text": message}
+    if channel:
+        payload["channel"] = channel
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(integ["access_token"], json=payload)
+        if resp.status_code == 200:
+            return {"sent": True}
+        raise HTTPException(status_code=resp.status_code, detail="Erreur envoi Slack")
+
+
+# ── GitHub Integration ────────────────────────────────────────────────────────
+
+@router.post("/github/connect")
+async def connect_github(data: dict, db=Depends(get_db), user=Depends(require_auth)):
+    """Connecte GitHub via personal access token."""
+    token = data.get("token", "")
+    if not token:
+        raise HTTPException(status_code=400, detail="Token GitHub requis")
+
+    _ensure_integrations_tables(db)
+    user_id = user["id"]
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Verifier le token
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            "https://api.github.com/user",
+            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=401, detail="Token GitHub invalide")
+        github_user = resp.json().get("login", "")
+
+    conn = _get_conn(db)
+    existing = _get_integration(db, user_id, "github")
+    metadata = json.dumps({"github_username": github_user})
+    if existing:
+        conn.execute(
+            "UPDATE user_integrations SET access_token = ?, metadata_json = ?, status = 'connected', updated_at = ? WHERE auth_user_id = ? AND provider = ?",
+            (token, metadata, now, user_id, "github"),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO user_integrations (id, auth_user_id, provider, access_token, metadata_json, status, connected_at, updated_at) VALUES (?, ?, 'github', ?, ?, 'connected', ?, ?)",
+            (str(uuid.uuid4()), user_id, token, metadata, now, now),
+        )
+    conn.commit()
+    return {"connected": True, "provider": "github", "username": github_user}
+
+
+@router.get("/github/repos")
+async def github_list_repos(db=Depends(get_db), user=Depends(require_auth)):
+    """Liste les repos GitHub de l'utilisateur."""
+    user_id = user["id"]
+    integ = _get_integration(db, user_id, "github")
+    if not integ or integ.get("status") != "connected":
+        raise HTTPException(status_code=403, detail="GitHub non connecte")
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            "https://api.github.com/user/repos?sort=updated&per_page=20",
+            headers={"Authorization": f"token {integ['access_token']}", "Accept": "application/vnd.github.v3+json"},
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail="Erreur API GitHub")
+        repos = resp.json()
+        return {
+            "repos": [
+                {"name": r["name"], "full_name": r["full_name"], "url": r["html_url"],
+                 "description": r.get("description", ""), "language": r.get("language", ""),
+                 "stars": r.get("stargazers_count", 0), "updated_at": r.get("updated_at", "")}
+                for r in repos[:20]
+            ]
+        }

@@ -324,6 +324,19 @@ export const api = {
       body: JSON.stringify({ code, redirect_uri: redirectUri }),
     }),
 
+  // GitHub OAuth
+  authGithubUrl: (redirectUri?: string): Promise<{ url: string }> => {
+    const params = new URLSearchParams()
+    if (redirectUri) params.set('redirect_uri', redirectUri)
+    return request(`/auth/oauth/github/url?${params.toString()}`)
+  },
+
+  authOAuthGithub: (code: string, redirectUri: string): Promise<{ access_token: string }> =>
+    request('/auth/oauth/github', {
+      method: 'POST',
+      body: JSON.stringify({ code, redirect_uri: redirectUri }),
+    }),
+
   // ── Agent assistant (Agent Sylea 2) ──────────────────────────────────
 
   agent2Chat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string }> =>

@@ -2,7 +2,7 @@
 
 import { create } from 'zustand'
 import { useStore } from '../store/useStore'
-import { API_BASE } from '../api/client'
+import { api, API_BASE } from '../api/client'
 
 interface AuthUser {
   id: string
@@ -19,6 +19,10 @@ interface AuthState {
   login: (email: string, password: string) => Promise<void>
   register: (email: string, password: string) => Promise<{ requires_verification?: boolean }>
   verifyCode: (email: string, code: string) => Promise<void>
+  googleLogin: () => Promise<void>
+  handleGoogleCallback: (code: string) => Promise<void>
+  githubLogin: () => Promise<void>
+  handleGithubCallback: (code: string) => Promise<void>
   logout: () => void
   loadToken: () => void
   clearError: () => void
@@ -84,6 +88,80 @@ export const useAuthStore = create<AuthState>((set) => ({
       return {}
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Erreur d'inscription"
+      set({ loading: false, error: msg })
+      throw e
+    }
+  },
+
+  googleLogin: async () => {
+    set({ loading: true, error: null })
+    try {
+      const redirectUri = `${window.location.origin}/auth/callback`
+      const { url } = await api.authGoogleUrl(redirectUri)
+      window.location.href = url
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Erreur Google OAuth'
+      set({ loading: false, error: msg })
+    }
+  },
+
+  githubLogin: async () => {
+    set({ loading: true, error: null })
+    try {
+      const redirectUri = `${window.location.origin}/auth/callback`
+      const { url } = await api.authGithubUrl(redirectUri)
+      window.location.href = url
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Erreur GitHub OAuth'
+      set({ loading: false, error: msg })
+    }
+  },
+
+  handleGithubCallback: async (code: string) => {
+    set({ loading: true, error: null })
+    try {
+      const redirectUri = `${window.location.origin}/auth/callback`
+      const data = await api.authOAuthGithub(code, redirectUri)
+      const token = data.access_token
+
+      // Get user info
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      }
+      const meResp = await fetch(`${API_BASE}/api/auth/me`, { headers })
+      const user = meResp.ok ? await meResp.json() : { id: '', email: '', provider: 'github' }
+
+      localStorage.setItem(AUTH_TOKEN_KEY, token)
+      localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user))
+      set({ token, user, loading: false, error: null })
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Erreur callback GitHub'
+      set({ loading: false, error: msg })
+      throw e
+    }
+  },
+
+  handleGoogleCallback: async (code: string) => {
+    set({ loading: true, error: null })
+    try {
+      const redirectUri = `${window.location.origin}/auth/callback`
+      const data = await api.authOAuthGoogle(code, redirectUri)
+      const token = data.access_token
+
+      // Get user info
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      }
+      const meResp = await fetch(`${API_BASE}/api/auth/me`, { headers })
+      const user = meResp.ok ? await meResp.json() : { id: '', email: '', provider: 'google' }
+
+      localStorage.setItem(AUTH_TOKEN_KEY, token)
+      localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user))
+      set({ token, user, loading: false, error: null })
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Erreur callback Google'
       set({ loading: false, error: msg })
       throw e
     }

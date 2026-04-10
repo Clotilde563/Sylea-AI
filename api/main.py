@@ -41,6 +41,8 @@ from api.routers.workspace import router as workspace_router
 from api.routers.scenarios import router as scenarios_router
 from api.auth.router import router as auth_router
 from api.routers.integrations import router as integrations_router
+from api.routers.notifications import router as notifications_router
+from api.routers.shared_workspaces import router as shared_workspaces_router
 from api.schemas import HealthOut
 
 
@@ -116,6 +118,8 @@ app.include_router(auth_router)
 app.include_router(workspace_router)
 app.include_router(scenarios_router)
 app.include_router(integrations_router)
+app.include_router(notifications_router)
+app.include_router(shared_workspaces_router)
 
 
 # ── Routes utilitaires ────────────────────────────────────────────────────────

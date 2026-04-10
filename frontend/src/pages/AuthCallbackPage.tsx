@@ -1,7 +1,8 @@
-// Page de callback OAuth — traite le code d'autorisation Google
-// Supporte 2 flows :
+// Page de callback OAuth — traite le code d'autorisation Google / GitHub
+// Supporte 3 flows :
 //   1. Login Google (?code=...&state=login) → crée/connecte le compte
-//   2. Connexion intégration (?code=...&state=integration) → ajoute Calendar/Gmail/Drive
+//   2. Login GitHub (?code=...&state=github_login) → crée/connecte le compte
+//   3. Connexion intégration (?code=...&state=integration) → ajoute Calendar/Gmail/Drive
 
 import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
@@ -12,6 +13,7 @@ export default function AuthCallbackPage() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
   const handleGoogleCallback = useAuthStore((s) => s.handleGoogleCallback)
+  const handleGithubCallback = useAuthStore((s) => s.handleGithubCallback)
   const token = useAuthStore((s) => s.token)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState('Connexion en cours...')
@@ -26,7 +28,7 @@ export default function AuthCallbackPage() {
     }
 
     if (state === 'integration' && token) {
-      // Flow 2: user is already logged in, just connecting Google integrations
+      // Flow 3: user is already logged in, just connecting Google integrations
       setStatus('Connexion de Google Calendar, Gmail et Drive...')
       const redirectUri = `${window.location.origin}/auth/callback`
       api.connectGoogleOAuth(code, redirectUri)
@@ -37,9 +39,17 @@ export default function AuthCallbackPage() {
         .catch((e: any) => {
           setError(e.message || 'Erreur connexion Google')
         })
+    } else if (state === 'github_login') {
+      // Flow 2: login/register with GitHub
+      setStatus('Connexion a votre compte GitHub...')
+      handleGithubCallback(code)
+        .then(() => navigate('/dashboard'))
+        .catch((e: any) => {
+          setError(e.message || 'Erreur de connexion GitHub')
+        })
     } else {
       // Flow 1: login/register with Google
-      setStatus('Connexion a votre compte...')
+      setStatus('Connexion a votre compte Google...')
       handleGoogleCallback(code)
         .then(() => navigate('/dashboard'))
         .catch((e: any) => {

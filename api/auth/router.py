@@ -334,6 +334,29 @@ async def google_oauth_url(redirect_uri: str = "", state: str = "login"):
     return {"url": f"https://accounts.google.com/o/oauth2/v2/auth?{params}"}
 
 
+# ── OAuth GitHub URL ──────────────────────────────────────────────────────────
+
+@router.get("/oauth/github/url")
+async def github_oauth_url(redirect_uri: str = ""):
+    """Return the GitHub OAuth authorization URL."""
+    client_id = os.environ.get("GITHUB_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(status_code=501, detail="GitHub OAuth non configure")
+
+    if not redirect_uri:
+        redirect_uri = os.environ.get("GITHUB_REDIRECT_URI", "http://localhost:5173/auth/callback")
+
+    import urllib.parse
+    params = urllib.parse.urlencode({
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": "read:user user:email",
+        "state": "github_login",
+    })
+
+    return {"url": f"https://github.com/login/oauth/authorize?{params}"}
+
+
 # ── OAuth GitHub ──────────────────────────────────────────────────────────────
 
 @router.post("/oauth/github", response_model=TokenOut)

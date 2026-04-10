@@ -34,15 +34,36 @@ export function ProtectedRoute() {
   }, [token])
 
   // Charger le profil globalement dès qu'on a un token (quelle que soit la page)
+  // Retry logic: si l'API est injoignable, on retente 3 fois avant d'abandonner
   useEffect(() => {
     if (token && !profilLoadedRef.current) {
       profilLoadedRef.current = true
-      api.getProfil()
-        .then(p => useStore.getState().setProfil(p))
-        .catch(() => {
-          // Pas de profil = nouvel utilisateur, c'est normal
-          useStore.getState().setProfil(null)
-        })
+
+      const loadProfil = async (retries = 3) => {
+        for (let i = 0; i < retries; i++) {
+          try {
+            const p = await api.getProfil()
+            useStore.getState().setProfil(p)
+            return
+          } catch (err: any) {
+            const status = err?.response?.status
+            if (status === 404) {
+              // 404 = pas de profil, nouvel utilisateur → c'est normal
+              useStore.getState().setProfil(null)
+              return
+            }
+            // Erreur réseau ou serveur → retenter après délai
+            if (i < retries - 1) {
+              await new Promise(r => setTimeout(r, 2000 * (i + 1)))
+            }
+          }
+        }
+        // Après 3 tentatives échouées, on laisse profil tel quel
+        // (ne pas mettre null si c'est un problème réseau)
+        console.warn('[ProtectedRoute] Impossible de charger le profil après 3 tentatives')
+      }
+
+      loadProfil()
     }
   }, [token])
 
