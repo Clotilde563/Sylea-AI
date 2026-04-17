@@ -12,6 +12,7 @@ Lancement :
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -22,6 +23,12 @@ from fastapi.responses import JSONResponse
 # Assurer l'encodage UTF-8 sur Windows
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+# Playwright (BrowserAgent) necessite ProactorEventLoop sur Windows
+# pour pouvoir spawner son process node.js via asyncio.subprocess_exec.
+# Sans ca : NotImplementedError dans _make_subprocess_transport.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # Charger .env si présent
 try:
@@ -63,9 +70,16 @@ def _init_agent3_tables():
 
 _init_agent3_tables()
 
-# Start background cron scheduler
-from api.scheduler import scheduler as cron_scheduler
-cron_scheduler.start()
+# Start background cron scheduler — opt-in via env var pour eviter les fuites
+# de cout quand personne n'utilise l'app. Defaut OFF (protege contre les
+# appels Anthropic silencieux toutes les 60s).
+_scheduler_enabled = os.environ.get("SYLEA_SCHEDULER_ENABLED", "false").strip().lower()
+if _scheduler_enabled in ("1", "true", "yes", "on"):
+    from api.scheduler import scheduler as cron_scheduler
+    cron_scheduler.start()
+    print("[main] Scheduler cron ACTIVE (SYLEA_SCHEDULER_ENABLED=true)")
+else:
+    print("[main] Scheduler cron INACTIF (set SYLEA_SCHEDULER_ENABLED=true pour activer)")
 
 
 # ── Application ────────────────────────────────────────────────────────────────

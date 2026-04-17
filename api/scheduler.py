@@ -77,12 +77,23 @@ def _field_matches(field: str, value: int, valid_range: tuple) -> bool:
 
 
 class SyleaScheduler:
-    """Background scheduler that checks cron jobs every 60 seconds."""
+    """Background scheduler that checks cron jobs every 60 seconds.
+
+    Cost-safety :
+      - Fallback model : Haiku 4.5 (66% moins cher que Sonnet). Override via env
+        SYLEA_SCHEDULER_MODEL.
+      - Budget quotidien max : defaut $0.50 / 24h (env SYLEA_SCHEDULER_DAILY_CAP_USD).
+        Au-dela, le scheduler refuse les nouveaux appels LLM jusqu'au lendemain.
+      - max_tokens reduit a 300 (au lieu de 500).
+    """
 
     def __init__(self):
         self._thread: threading.Thread | None = None
         self._running = False
         self._last_check: dict[str, str] = {}  # cron_id -> last execution minute
+        # Compteur de cout quotidien (reset a minuit). Fuite-guard.
+        self._spent_today_usd: float = 0.0
+        self._spent_day_key: str = ""  # "YYYY-MM-DD"
 
     def start(self):
         """Start the scheduler in a background daemon thread."""
@@ -151,11 +162,56 @@ class SyleaScheduler:
         finally:
             db.disconnect()
 
+    def _daily_budget_check(self) -> tuple[bool, float, float]:
+        """Return (allowed, spent_today, daily_cap). Reset compteur a minuit."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._spent_day_key != today:
+            self._spent_day_key = today
+            self._spent_today_usd = 0.0
+        try:
+            cap = float(os.environ.get("SYLEA_SCHEDULER_DAILY_CAP_USD", "0.50"))
+        except Exception:
+            cap = 0.50
+        return (self._spent_today_usd < cap), self._spent_today_usd, cap
+
     def _execute_cron(self, db, cron_id: str, user_id: str, instruction: str):
-        """Execute a single cron job and store the result."""
+        """Execute a single cron job and store the result.
+
+        Cost-safety :
+          - Budget quotidien max (defaut $0.50) : au-dela, skip et enregistre
+            un message d'attente jusqu'au lendemain.
+          - Modele par defaut : Haiku 4.5 ($1/$5 /MTok) au lieu de Sonnet-4 ($3/$15).
+          - max_tokens 300.
+        """
+        # Circuit breaker budget quotidien
+        allowed, spent, cap = self._daily_budget_check()
+        if not allowed:
+            result_text = (
+                f"[Cron skip — budget quotidien ${cap:.2f} atteint "
+                f"(${spent:.4f} depenses). Reprend demain.]"
+            )
+            try:
+                db.conn.execute(
+                    "UPDATE agent3_cron SET last_run = ?, last_result = ? WHERE id = ?",
+                    (datetime.now().isoformat(), result_text, cron_id),
+                )
+                db.conn.commit()
+            except Exception:
+                pass
+            return
+
+        model = os.environ.get("SYLEA_SCHEDULER_MODEL", "claude-haiku-4-5-20250929")
+        max_tok = 300
+        # Tarifs Haiku 4.5 par defaut
+        in_rate = 1.0 / 1_000_000.0
+        out_rate = 5.0 / 1_000_000.0
+        if "sonnet" in model:
+            in_rate = 3.0 / 1_000_000.0
+            out_rate = 15.0 / 1_000_000.0
+
         result_text = ""
         try:
-            # Try OpenClaw first
+            # Try OpenClaw first (gratuit/local-routed si configure)
             try:
                 from api.openclaw_bridge import openclaw_chat
                 session_key = f"sylea-cron-{cron_id}"
@@ -165,7 +221,7 @@ class SyleaScheduler:
                 else:
                     result_text = "[Execution OK — pas de reponse]"
             except Exception:
-                # Fallback: call Claude API directly
+                # Fallback: call Claude API directly (Haiku 4.5 par defaut)
                 api_key = os.environ.get("ANTHROPIC_API_KEY", "")
                 if api_key:
                     import httpx
@@ -177,8 +233,8 @@ class SyleaScheduler:
                             "content-type": "application/json",
                         },
                         json={
-                            "model": "claude-sonnet-4-20250514",
-                            "max_tokens": 500,
+                            "model": model,
+                            "max_tokens": max_tok,
                             "messages": [{"role": "user", "content": instruction}],
                         },
                         timeout=30,
@@ -186,6 +242,15 @@ class SyleaScheduler:
                     if resp.status_code == 200:
                         data = resp.json()
                         result_text = data.get("content", [{}])[0].get("text", "OK")[:2000]
+                        # Comptabilise le cout de cet appel dans le quota quotidien
+                        usage = data.get("usage", {}) or {}
+                        in_toks = int(usage.get("input_tokens", 0) or 0)
+                        out_toks = int(usage.get("output_tokens", 0) or 0)
+                        self._spent_today_usd += in_toks * in_rate + out_toks * out_rate
+                        print(
+                            f"[Scheduler] cron {cron_id} cost=${in_toks * in_rate + out_toks * out_rate:.5f} "
+                            f"spent_today=${self._spent_today_usd:.4f}/${cap:.2f}"
+                        )
                     else:
                         result_text = f"[Erreur API: {resp.status_code}]"
                 else:
