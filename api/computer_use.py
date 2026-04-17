@@ -13,7 +13,6 @@ Refactored with Claude Code patterns:
   - Image lifecycle management: keep only last N screenshots in conversation
 """
 
-import anthropic
 import base64
 import io
 import math
@@ -24,15 +23,26 @@ import asyncio
 import json
 import logging
 import random
-from PIL import Image
 from typing import Optional, Callable, AsyncGenerator
 
 logger = logging.getLogger("sylea.computer_use")
 
-# pyautogui n'est dispo qu'en environnement desktop (Windows/Mac/Linux avec X).
-# Sur les serveurs headless (Railway, conteneurs), l'import echoue. On rend
-# l'import optionnel pour permettre au module de se charger sans crash ;
-# toute fonction qui utilise pyautogui levera un RuntimeError explicite.
+# ─────────────────────────────────────────────────────────────────────────────
+# Imports desktop-only rendus optionnels pour permettre au module de se charger
+# sur les serveurs headless (Railway, conteneurs sans display). Toutes les
+# fonctions qui necessitent ces libs appellent _require_desktop() pour lever
+# une erreur explicite plutot que de crasher le boot du serveur API.
+# ─────────────────────────────────────────────────────────────────────────────
+_DESKTOP_ERRORS: list[str] = []
+
+try:
+    import anthropic  # type: ignore
+    _ANTHROPIC_AVAILABLE = True
+except Exception as _e:
+    anthropic = None  # type: ignore
+    _ANTHROPIC_AVAILABLE = False
+    _DESKTOP_ERRORS.append(f"anthropic: {_e}")
+
 try:
     import pyautogui  # type: ignore
     _PYAUTOGUI_AVAILABLE = True
@@ -40,12 +50,25 @@ try:
     # But we have our own safety system
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE = 0.1
-except Exception as _pyautogui_err:
+except Exception as _e:
     pyautogui = None  # type: ignore
     _PYAUTOGUI_AVAILABLE = False
+    _DESKTOP_ERRORS.append(f"pyautogui: {_e}")
+
+try:
+    from PIL import Image  # type: ignore
+    _PIL_AVAILABLE = True
+except Exception as _e:
+    Image = None  # type: ignore
+    _PIL_AVAILABLE = False
+    _DESKTOP_ERRORS.append(f"PIL: {_e}")
+
+_COMPUTER_USE_AVAILABLE = _ANTHROPIC_AVAILABLE and _PYAUTOGUI_AVAILABLE and _PIL_AVAILABLE
+
+if not _COMPUTER_USE_AVAILABLE:
     logger.info(
-        f"pyautogui indisponible ({_pyautogui_err}) — Computer Use desactive "
-        "dans cet environnement (server headless)."
+        f"Computer Use desactive dans cet environnement (server headless probable). "
+        f"Imports manquants : {_DESKTOP_ERRORS}"
     )
 
 
@@ -55,6 +78,16 @@ def _require_pyautogui() -> None:
         raise RuntimeError(
             "Computer Use necessite pyautogui (environnement desktop). "
             "Installe pyautogui + execute l'agent depuis ta machine locale."
+        )
+
+
+def _require_desktop() -> None:
+    """Leve une erreur si l'environnement n'a pas tous les imports desktop."""
+    if not _COMPUTER_USE_AVAILABLE:
+        raise RuntimeError(
+            f"Computer Use indisponible sur cet environnement. "
+            f"Imports manquants : {_DESKTOP_ERRORS}. "
+            "Execute l'agent depuis une machine avec display (desktop)."
         )
 
 # --- Configuration ---
