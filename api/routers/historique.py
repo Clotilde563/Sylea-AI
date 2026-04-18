@@ -50,6 +50,11 @@ def _decision_to_out(d: Decision) -> DecisionOut:
     # Récupérer l'ID et l'impact du sous-objectif
     so_id = getattr(d, 'sous_objectif_id', None) or None
     so_impact = getattr(d, 'impact_sous_objectif', 0.0) or 0.0
+    # Compute impact_net from temps fields (use is not None, not truthiness, since 0.0 is valid)
+    if d.temps_gagne_apres is not None and d.temps_gagne_avant is not None and (d.temps_gagne_apres != 0.0 or d.temps_gagne_avant != 0.0):
+        impact_net = d.temps_gagne_apres - d.temps_gagne_avant
+    else:
+        impact_net = 0.0  # Old decisions without time data: no time impact
     return DecisionOut(
         id=d.id,
         user_id=d.user_id,
@@ -61,13 +66,12 @@ def _decision_to_out(d: Decision) -> DecisionOut:
         action_agent=_action_to_out(d.action_agent) if d.action_agent else None,
         cree_le=d.cree_le.isoformat(),
         option_choisie_description=chosen.description if chosen else None,
-        impact_net=(
-            (d.probabilite_apres - d.probabilite_avant)
-            if d.probabilite_apres is not None else None
-        ),
+        impact_net=impact_net,
         sous_objectif_impacte=so_id,
         sous_objectif_id=so_id,
         impact_sous_objectif=so_impact if so_impact else None,
+        temps_gagne_avant=d.temps_gagne_avant,
+        temps_gagne_apres=d.temps_gagne_apres,
     )
 
 
@@ -164,10 +168,14 @@ async def supprimer_decision(
     if decision is None:
         raise HTTPException(status_code=404, detail="Décision introuvable.")
 
-    # 2. Calculer l'impact_net
+    # 2. Calculer l'impact_net (probabilite + temps)
     impact_net = 0.0
     if decision.probabilite_apres is not None and decision.probabilite_avant is not None:
         impact_net = decision.probabilite_apres - decision.probabilite_avant
+
+    impact_temps = 0.0
+    if decision.temps_gagne_apres is not None and decision.temps_gagne_avant is not None:
+        impact_temps = decision.temps_gagne_apres - decision.temps_gagne_avant
 
     # 2b. Reverser la progression du sous-objectif si la décision en impactait un
     if decision.sous_objectif_id and decision.impact_sous_objectif:
@@ -190,15 +198,14 @@ async def supprimer_decision(
     # 3. Supprimer la décision
     decision_repo.supprimer_par_id(decision_id, profil.id)
 
-    # 4. Recalculer probabilite_actuelle depuis TOUS les impacts restants
-    remaining = decision_repo.lister_pour_utilisateur(profil.id, limite=10000)
-    new_prob = sum(
-        (d.probabilite_apres or 0) - (d.probabilite_avant or 0)
-        for d in remaining
-    )
-    new_prob = max(PROB_MIN, min(PROB_MAX, new_prob))
+    # 4. Reverser l'impact probabilité de la décision supprimée
+    new_prob = max(PROB_MIN, min(PROB_MAX, profil.probabilite_actuelle - impact_net))
     profil.probabilite_actuelle = new_prob
+
+    # 5. Reverser l'impact temps de la décision supprimée
+    profil.temps_gagne_jours = max(0, profil.temps_gagne_jours - impact_temps)
+
     profil.marquer_modification()
     profil_repo.sauvegarder(profil)
 
-    return {"detail": "Décision supprimée.", "probabilite_actuelle": new_prob}
+    return {"detail": "Décision supprimée.", "probabilite_actuelle": new_prob, "temps_gagne_jours": profil.temps_gagne_jours}

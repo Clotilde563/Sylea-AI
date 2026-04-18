@@ -55,8 +55,6 @@ async def _call_claude_json(prompt: str, max_tokens: int = 1500) -> dict:
 def _build_profil_context(profil) -> str:
     obj = profil.objectif
     obj_desc = obj.description if obj else "Non defini"
-    prob_calc = getattr(obj, "probabilite_calculee", 0) if obj else 0
-    prob_tot = max(0.01, min(99.99, prob_calc + profil.probabilite_actuelle))
     parts = []
     parts.append(f"Nom: {profil.nom}, {profil.age} ans, {profil.profession}, {profil.ville}")
     parts.append(f"Situation: {profil.situation_familiale}")
@@ -70,7 +68,8 @@ def _build_profil_context(profil) -> str:
     parts.append(f"Heures disponibles pour l'objectif: {profil.heures_objectif:.1f}h/jour")
     parts.append(f"Sante {profil.niveau_sante}/10, Stress {profil.niveau_stress}/10, Energie {profil.niveau_energie}/10, Bonheur {profil.niveau_bonheur}/10")
     parts.append(f"Objectif: {obj_desc}")
-    parts.append(f"Probabilite actuelle: {prob_tot:.1f}%")
+    parts.append(f"Temps initial estime: {profil.temps_initial_jours} jours")
+    parts.append(f"Temps gagne: {profil.temps_gagne_jours:.1f} jours")
     return "\n".join(parts)
 
 
@@ -456,21 +455,28 @@ async def completer_tache(
             break
     if not tache_trouvee:
         raise HTTPException(status_code=404, detail="Tache non trouvee.")
-    impact = 0.05
-    profil.probabilite_actuelle = min(99.9, profil.probabilite_actuelle + impact)
+    # Time-based: each completed task gains 0.5 days
+    impact_jours = 0.5
+    profil.temps_gagne_jours = min(
+        profil.temps_initial_jours,
+        profil.temps_gagne_jours + impact_jours,
+    )
     profil.marquer_modification()
     profil_repo.sauvegarder(profil)
     # Mettre a jour SEULEMENT le sous-objectif actif (premier avec progression < 100)
-    active_so = db.conn.execute(
-        "SELECT id, titre, progression, temps_estime FROM sous_objectifs "
-        "WHERE user_id = ? AND progression < 100 ORDER BY ordre LIMIT 1",
+    # Charger TOUS les SO pour le calcul proportionnel (invariant sum(SO_restant) = objectif_restant)
+    all_so_all = db.conn.execute(
+        "SELECT id, titre, progression, temps_estime FROM sous_objectifs WHERE user_id = ? ORDER BY ordre",
         (profil.id,),
-    ).fetchone()
+    ).fetchall()
+    active_so = next((so for so in all_so_all if so["progression"] < 100), None)
     impacts_so = []
     so_impacte = None
     if active_so:
+        total_te_all = sum(max(30, so["temps_estime"] or 180) for so in all_so_all)
         te = max(30, active_so["temps_estime"] if active_so["temps_estime"] else 180)
-        task_so_impact = 50.0 / (te * 4)  # tasks = 50% du progres sur temps_estime
+        so_initial_jours = (te / total_te_all) * profil.temps_initial_jours if total_te_all > 0 else te
+        task_so_impact = (impact_jours / so_initial_jours) * 100 if so_initial_jours > 0 else 0
         new_prog = min(100, active_so["progression"] + task_so_impact)
         db.conn.execute(
             "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
@@ -504,6 +510,8 @@ async def completer_tache(
         probabilite_avant=profil.probabilite_actuelle - impact,
         option_choisie_id=opt.id,
         probabilite_apres=profil.probabilite_actuelle,
+        temps_gagne_avant=profil.temps_gagne_jours - impact_jours,
+        temps_gagne_apres=profil.temps_gagne_jours,
     )
     if active_so:
         decision.sous_objectif_id = active_so["id"]

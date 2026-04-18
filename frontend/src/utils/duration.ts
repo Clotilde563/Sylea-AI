@@ -154,6 +154,65 @@ export function deltaFromImpact(probActuelle: number, impactPoints: number, maxJ
   }
 }
 
+/** Formate un nombre de jours en texte lisible */
+export function formatJours(totalJours: number): { totalJours: number; annees: number; mois: number; jours: number; ligne1: string; ligne2: string; label: string } {
+  const j = Math.max(0, Math.round(totalJours))
+  const annees = Math.floor(j / 365)
+  const mois = Math.floor((j % 365) / 30)
+  const jours = j % 30
+
+  let ligne1 = ''
+  let ligne2 = ''
+  if (annees > 0) {
+    ligne1 = `${annees} an${annees > 1 ? 's' : ''}`
+    if (mois > 0) ligne2 = `${mois} mois`
+  } else if (mois > 0) {
+    ligne1 = `${mois} mois`
+    if (jours > 0) ligne2 = `${jours} jour${jours > 1 ? 's' : ''}`
+  } else {
+    ligne1 = `${j} jour${j > 1 ? 's' : ''}`
+  }
+
+  const parts: string[] = []
+  if (annees > 0) parts.push(`${annees}a`)
+  if (mois > 0) parts.push(`${mois}m`)
+  if (jours > 0 && annees === 0) parts.push(`${jours}j`)
+  const label = parts.join(' ') || '0j'
+
+  return { totalJours: j, annees, mois, jours, ligne1, ligne2, label }
+}
+
+/** Pourcentage de la jauge = temps gagne / temps initial */
+export function gaugePercent(tempsInitial: number, tempsGagne: number): number {
+  if (tempsInitial <= 0) return 0
+  return Math.min(100, Math.max(0, (tempsGagne / tempsInitial) * 100))
+}
+
+/** Formate un impact en jours en label lisible : "+45j", "-1a 3m", "+2m 15j" */
+export function formatImpactJours(impactJours: number): string {
+  const sign = impactJours >= 0 ? '+' : '-'
+  const absVal = Math.abs(impactJours)
+  if (absVal === 0) return '0j'
+  // Less than 1 day: show in hours
+  if (absVal < 1) {
+    const heures = Math.round(absVal * 24)
+    return heures === 0 ? (absVal > 0 ? `${sign}1h` : '0j') : `${sign}${heures}h`
+  }
+  const abs = Math.round(absVal)
+  const ans = Math.floor(abs / 365)
+  const restJ = abs % 365
+  const mois = Math.floor(restJ / 30)
+  const jours = restJ % 30
+
+  if (ans >= 1) {
+    return `${sign}${ans}a${mois > 0 ? ` ${mois}m` : ''}`
+  } else if (mois >= 1) {
+    return `${sign}${mois}m${jours > 0 ? ` ${jours}j` : ''}`
+  } else {
+    return `${sign}${abs}j`
+  }
+}
+
 /**
  * Génère des ticks adaptés pour un axe X de durée réelle.
  * @param elapsedDays  durée totale en jours (fractionnaire autorisé)

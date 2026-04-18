@@ -238,7 +238,7 @@ function ProfilSection({ profil, t, authUser, authToken }: { profil: ReturnType<
               <h4 style={{ ...sectionTitle, marginTop: '1rem' }}>{t('settings.objectif')}</h4>
               <Field label={t('settings.categorie')} value={profil.objectif.categorie} />
               <Field label={t('settings.deadline')} value={profil.objectif.deadline || t('settings.non_renseigne')} />
-              <Field label={t('settings.probabilite')} value={`${profil.probabilite_actuelle?.toFixed(1) ?? 0}%`} />
+              <Field label={t('settings.probabilite')} value={profil.temps_initial_jours > 0 ? `${Math.round(profil.temps_initial_jours - profil.temps_gagne_jours)} jours restants` : `${profil.probabilite_actuelle?.toFixed(1) ?? 0}%`} />
               <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginTop: '0.4rem', lineHeight: 1.5 }}>
                 {profil.objectif.description?.slice(0, 200)}{(profil.objectif.description?.length ?? 0) > 200 ? '...' : ''}
               </div>

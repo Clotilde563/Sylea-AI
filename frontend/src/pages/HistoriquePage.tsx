@@ -7,6 +7,7 @@ import { api } from '../api/client'
 import type { Decision } from '../types'
 import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal'
 import { useT } from '../i18n/LanguageContext'
+import { formatImpactJours, formatJours } from '../utils/duration'
 
 export function HistoriquePage() {
   const t = useT()
@@ -54,9 +55,8 @@ export function HistoriquePage() {
   }
 
   const formatImpact = (impact: number | null) => {
-    if (impact === null) return '—'
-    const sign = impact >= 0 ? '+' : ''
-    return `${sign}${impact.toFixed(3)}%`
+    if (impact === null) return '\u2014'
+    return formatImpactJours(impact)
   }
 
   return (
@@ -163,9 +163,9 @@ export function HistoriquePage() {
                         <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                           {formatDate(d.cree_le)}
                         </span>
-                        {d.probabilite_avant !== undefined && d.probabilite_apres !== null && (
+                        {d.temps_gagne_avant !== undefined && d.temps_gagne_apres !== undefined && (
                           <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                            {d.probabilite_avant.toFixed(2)}% → {d.probabilite_apres?.toFixed(2)}%
+                            {formatJours(d.temps_gagne_avant).label} {'\u2192'} {formatJours(d.temps_gagne_apres).label}
                           </span>
                         )}
                       </div>

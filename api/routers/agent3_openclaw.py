@@ -58,6 +58,19 @@ from api.clawhub import (
     clawhub_skill_info, clawhub_check, clawhub_uninstall,
     ClawHubResult,
 )
+from api.agent3_memory_extractor import (
+    MemoryExtractor, ExtractedFact, get_extraction_scheduler,
+)
+from api.agent3_orchestrator import (
+    SubAgentOrchestrator, SubAgentResult, AgentStatus, get_orchestrator,
+)
+from api.agent3_todo_tracker import TodoTracker, TodoTransition, get_todo_tracker, reset_todo_tracker
+from api.agent3_hooks import HookRegistry, HookResult, HookDecision, get_hook_registry
+from api.agent3_interactive import InteractiveCorrectionManager, Correction, get_correction_manager
+from api.agent3_undo import UndoManager, get_undo_manager
+from api.agent3_slash_commands import SlashCommandParser, SlashCommandResult, get_slash_parser
+from api.agent3_self_review import SelfReviewer, ReviewResult, get_self_reviewer
+from api.agent3_mcp_client import MCPRegistry, MCPClient, MCPCallResult, get_mcp_registry
 from sylea.core.storage.database import DatabaseManager
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
 
@@ -77,6 +90,17 @@ class Agent3ChatIn(BaseModel):
     contexte_appareil: dict | None = None
     audio_data: str | None = None
     files: list[dict] | None = None  # [{name, type, size, data_base64}]
+    # Controle Agent 3 native (opt-in)
+    stream: bool | None = None           # True par defaut cote endpoint native
+    thinking: bool | None = None         # Active extended thinking (dilemmes)
+    thinking_budget: int | None = None   # Tokens dedies au raisonnement
+    cancel_token: str | None = None      # Token unique pour cancellation
+    # Cost control (opt-in, backend decide par defaut)
+    force_model: str | None = None       # Override routing : "haiku" | "sonnet" | model_id complet
+    max_tokens: int | None = None        # Override max_tokens (sinon 2048)
+    cost_hard_cap_usd: float | None = None  # Kill-switch: arret si cout > cap
+    cache_tools: bool | None = None      # Active prompt caching (defaut True)
+    interleaved_thinking: bool | None = None  # Beta header interleaved-thinking
 
 
 class Agent3ChatOut(BaseModel):
@@ -211,7 +235,9 @@ def _get_user_preferences(db: DatabaseManager, user_id: str) -> dict:
             return json.loads(row[0])
     except Exception:
         pass
-    return {"confirm_destructive": True}  # Default: require confirmation
+    # Default: mode sur = l'agent demande confirmation pour chaque action destructive.
+    # Le mode bypass (UI) force l'execution sans confirmation.
+    return {"confirm_destructive": True}
 
 
 def _save_user_preferences(db: DatabaseManager, user_id: str, prefs: dict):
@@ -351,6 +377,39 @@ def _send_email_smtp(db, user_id: str, to: str, subject: str, body: str, html: b
         return {"ok": False, "error": f"Erreur SMTP: {str(e)[:100]}"}
     except Exception as e:
         return {"ok": False, "error": f"Erreur envoi: {str(e)[:100]}"}
+
+
+def _sync_refresh_gmail_token(db, user_id: str) -> str | None:
+    """Rafraichir le token Gmail de maniere synchrone (pour usage dans les generators)."""
+    import httpx as _hx
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return None
+    try:
+        from api.routers.integrations import _get_integration, _get_conn
+        row = _get_integration(db, user_id, "gmail")
+        if not row or not row.get("refresh_token"):
+            return None
+        resp = _hx.post("https://oauth2.googleapis.com/token", data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": row["refresh_token"],
+            "grant_type": "refresh_token",
+        }, timeout=10)
+        if resp.status_code == 200:
+            new_token = resp.json().get("access_token")
+            if new_token:
+                _get_conn(db).execute(
+                    "UPDATE user_integrations SET access_token = ?, updated_at = ? "
+                    "WHERE auth_user_id = ? AND provider = ?",
+                    (new_token, datetime.now(timezone.utc).isoformat(), user_id, "gmail"),
+                )
+                _get_conn(db).commit()
+                return new_token
+    except Exception:
+        pass
+    return None
 
 
 def _email_fallback_url(to: str, subject: str, body: str) -> dict:
@@ -550,6 +609,64 @@ def _format_memories(memories: list[dict]) -> str:
     for m in memories:
         lines.append(f"  [{m['category']}] {m['key']}: {m['value']}")
     return "\n".join(lines)
+
+
+async def _auto_extract_memories(
+    db: DatabaseManager,
+    user_id: str,
+    turns: list[dict],
+    force: bool = False,
+) -> list[ExtractedFact]:
+    """
+    Extrait automatiquement les faits durables de la conversation recente
+    via Haiku, puis les persiste via _save_memory.
+
+    - Respecte le scheduler (N tours / seuil de chars) sauf si force=True.
+    - Ne jette JAMAIS : echec silencieux + log (pour ne pas casser le chat).
+    - Retourne les faits effectivement sauvegardes.
+    """
+    if not user_id or not turns:
+        return []
+
+    scheduler = get_extraction_scheduler()
+    total_chars = sum(len(str(t.get("content", ""))) for t in turns)
+    if not force and not scheduler.should_extract(user_id, conversation_chars=total_chars):
+        return []
+
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        logger.debug("MemoryExtractor: no ANTHROPIC_API_KEY, skipping")
+        return []
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=key)
+    except Exception as e:
+        logger.debug(f"MemoryExtractor: anthropic client init failed: {e}")
+        return []
+
+    existing = _load_memories(db, user_id, limit=80)
+    extractor = MemoryExtractor(client)
+
+    try:
+        facts = await extractor.extract(turns, existing_memories=existing)
+    except Exception as e:
+        logger.warning(f"MemoryExtractor.extract failed: {e}")
+        return []
+
+    saved: list[ExtractedFact] = []
+    for fact in facts:
+        try:
+            _save_memory(db, user_id, fact.key, fact.value, fact.category)
+            saved.append(fact)
+        except Exception as e:
+            logger.warning(f"_save_memory failed for {fact.key}: {e}")
+
+    if saved:
+        logger.info(f"Auto-extracted {len(saved)} memories for user {user_id[:8]}")
+        scheduler.force_reset(user_id)
+
+    return saved
 
 
 # ── DB helpers for agent3_messages ──────────────────────────────────────────
@@ -1115,7 +1232,7 @@ AGENT_ROUTES: list[dict] = [
     {
         "id": "writer",
         "keywords": [
-            "redige", "ecris", "mail", "email", "lettre", "cv",
+            "redige", "ecris", "lettre", "cv",
             "rapport", "article", "resume", "synthese",
             "presentation", "document", "note",
         ],
@@ -1189,13 +1306,24 @@ def route_to_agent(user_message: str) -> dict:
     best_score = 0
     matched_keywords = []
 
+    # Tokeniser le message en mots pour eviter les faux positifs substring
+    # (ex: "lance" dans "freelance")
+    msg_words = set(re.findall(r'\b\w+\b', msg_lower))
+
     for route in AGENT_ROUTES:
         score = 0
         kw_matched = []
         for kw in route["keywords"]:
-            if kw in msg_lower:
-                score += 1
-                kw_matched.append(kw)
+            # Multi-mots : verifier en substring (ex: "analyse le marche")
+            if " " in kw:
+                if kw in msg_lower:
+                    score += 1
+                    kw_matched.append(kw)
+            else:
+                # Mot simple : verifier en mot entier
+                if kw in msg_words:
+                    score += 1
+                    kw_matched.append(kw)
 
         if score > best_score:
             best_score = score
@@ -1389,6 +1517,13 @@ PROFIL DE L'UTILISATEUR :
 
     tone = _get_tone_instructions(familiarity, decision_score)
 
+    # Injecter les skills built-in disponibles
+    try:
+        from api.agent3_skills.registry import get_skill_registry
+        _skills_block = get_skill_registry().build_prompt_block()
+    except Exception:
+        _skills_block = ""
+
     return f"""Tu es l'Agent Sylea 3, l'agent d'elite de Sylea.AI.
 Tu n'es PAS Claude, tu n'es PAS un assistant Anthropic. Tu es SYLEA et rien d'autre.
 Si on te demande qui tu es : "Je suis l'Agent Sylea 3, {"votre" if familiarity == 0 else "ton"} coach de vie." Point.
@@ -1415,7 +1550,14 @@ Concretement :
 - [ACTION:FILE_CREATE] → le backend cree le fichier sur le PC via le Desktop Tauri
 - [ACTION:CRON] → le backend enregistre la tache planifiee en base de donnees
 - [ACTION:MEMORY] → le backend sauvegarde en memoire inter-sessions
-- [ACTION:SPAWN_AGENT] → le backend lance un sous-agent via OpenClaw
+- [ACTION:SKILL] → le backend execute une skill interne built-in
+- [ACTION:SPAWN_AGENT] → le backend lance un sous-agent isole avec budget et timeout
+
+=== SOUS-AGENTS (SPAWN_AGENT) ===
+Pour lancer un sous-agent specialise :
+[ACTION:SPAWN_AGENT]{{"task": "Description de la tache", "agent_type": "analyst|coder|writer|planner|default", "label": "Nom lisible", "budget_usd": 0.10, "timeout_s": 90, "context": "Contexte optionnel"}}[/ACTION]
+Types disponibles : analyst (recherche/synthese), coder (code), writer (redaction), planner (decomposition), default (generique).
+Tu peux aussi lancer PLUSIEURS sous-agents en parallele dans la meme reponse.
 
 Tu ne dois JAMAIS dire "je ne peux pas generer de PDF/image/etc". Tu le PEUX via les actions.
 Quand on te demande tes capacites, reponds avec ce que tu peux REELLEMENT faire.
@@ -1649,6 +1791,8 @@ UTILISE le Computer Use AUTOMATIQUEMENT quand :
 - La demande necessite d'interagir avec une application locale (Excel, Word, etc.)
 - La demande necessite de voir/interagir avec un site web d'une maniere qui depasse le browser simple
 - Tu dois montrer quelque chose a l'ecran (dernier tweet, page web specifique, etc.)
+- L'utilisateur demande de SE CONNECTER a un service (LinkedIn, Twitter, Instagram, etc.) : tu DOIS utiliser Computer Use pour ouvrir le site, demander les identifiants a l'utilisateur, puis les saisir et te connecter. Un simple lien NE SUFFIT PAS.
+- L'utilisateur demande une action qui necessite d'etre CONNECTE a un service : Computer Use OBLIGATOIRE
 
 Pour declencher le Computer Use :
 [ACTION:COMPUTER_USE]{{"prompt": "Description detaillee de ce qu'il faut faire sur l'ordinateur", "reason": "Pourquoi les outils classiques ne suffisent pas"}}[/ACTION]
@@ -1680,10 +1824,17 @@ Pour installer une skill :
 Pour chercher des skills :
 [ACTION:SKILL_SEARCH]{{"query": "mot-cle de recherche"}}[/ACTION]
 
+=== SKILLS INTERNES (Built-in) ===
+En plus de ClawHub, tu as des skills internes pre-chargees. Pour les invoquer :
+[ACTION:SKILL]{{"skill": "nom_de_la_skill", "instruction": "ce que tu veux faire"}}[/ACTION]
+
+Si une skill interne matche la demande, utilise-la EN PRIORITE avant ClawHub.
+
 === MEMOIRE INTER-SESSIONS ===
 Quand tu apprends quelque chose d'important sur l'utilisateur ou ses recherches,
 sauvegarde-le avec [ACTION:MEMORY]{{"key": "cle", "value": "info", "category": "recherche|preference|contact|projet"}}[/ACTION]
 Cela te permet de te souvenir entre les sessions.
+L'extraction automatique de faits durables est aussi activee (via Haiku) apres chaque N tours.
 
 === FICHIERS UPLOADÉS ===
 Si l'utilisateur t'envoie des fichiers, leur contenu est inclus ci-dessous.
@@ -1699,6 +1850,8 @@ Exemples de cron_expr : "0 9 * * *" (tous les jours 9h), "0 9 * * 1" (lundi 9h),
 - UTILISE tes outils : quand on te demande des infos, CHERCHE sur le web avec web_search
 - TWITTER/X : quand on te demande ce qui se dit sur Twitter/X, les tendances, opinions, posts -> utilise [ACTION:X_SEARCH]
 - Quand on te demande de visiter un site, NAVIGUE avec le browser
+- CONNEXION A UN SERVICE : quand l'utilisateur dit "connecte-toi a", "log-in", "identifie-toi sur" -> TOUJOURS [ACTION:COMPUTER_USE]. Tu ouvres le site, tu demandes email/mot de passe, puis tu te connectes. Un LINK ne suffit PAS.
+- CREATION SUR UN SERVICE EXTERNE : quand l'utilisateur demande de CREER quelque chose sur un service externe (TradingView, GitHub, etc.), tu dois TOUT FAIRE toi-meme via [ACTION:COMPUTER_USE]. Tu generes le code, puis tu ouvres le site, tu colles le code et tu l'appliques. NE DONNE PAS un bouton "Copier le code" ou un lien — FAIS-LE toi-meme. Le resultat final doit etre visible sur le service, pas juste dans le chat.
 - Analyse/recherche/rapport/plan = recherche web PUIS [ACTION:PDF] avec les vraies donnees
 - Le contenu riche va DANS le JSON de l'action, PAS dans le message texte
 - N'utilise JAMAIS de balises XML (<function_calls>, <invoke>, etc.) — uniquement [ACTION:TYPE]{{...}}[/ACTION]
@@ -1711,6 +1864,7 @@ Exemples de cron_expr : "0 9 * * *" (tous les jours 9h), "0 9 * * 1" (lundi 9h),
 - EXECUTION : quand tu executes un script/commande, montre le resultat avec [ACTION:EXEC_RESULT] — l'utilisateur DOIT voir la sortie
 - CAPTURES D'ECRAN : quand tu prends un screenshot avec le browser, affiche-le avec [ACTION:SCREENSHOT] — l'image doit etre VISIBLE
 - IMAGES : quand tu generes ou analyses une image, affiche-la avec [ACTION:IMAGE]
+- CODE : quand on te demande d'ecrire/coder/generer du code, un script, un programme -> [ACTION:CODE] OBLIGATOIRE avec language, filename, content et description. Le code sera affiche avec coloration syntaxique et execute dans un sandbox.
 
 === REGLE ABSOLUE — CONNAISSANCE DE TES CAPACITES ===
 Tu ne dois JAMAIS dire que tu ne peux pas faire quelque chose si c'est dans ta liste de capacites.
@@ -1721,8 +1875,11 @@ Quand l'utilisateur te demande ce que tu peux faire, reponds avec TOUTES tes cap
 Ne sous-estime JAMAIS tes capacites. Tu es l'agent le plus puissant de Sylea.
 Tu ne dis JAMAIS "je ne peux pas". Si tes outils ne suffisent pas, tu utilises Computer Use automatiquement.
 
-=== ACTIONS DESTRUCTIVES (suppression fichier, envoi email, modification systeme) ===
-{"- Tu DOIS demander confirmation AVANT d'executer une action destructive. Presente l'action et demande 'Tu confirmes ?' N'execute PAS l'action tant que l'utilisateur n'a pas dit oui/ok/confirme." if not user_preferences or user_preferences.get("confirm_destructive", True) else "- Execute directement sans demander confirmation."}
+=== AUTONOMIE TOTALE ===
+- Tu es un agent AUTONOME. Tu EXECUTES directement toute action demandee par l'utilisateur.
+- Tu n'as JAMAIS besoin de confirmation. Quand l'utilisateur dit "envoie un email", tu ENVOIES. Quand il dit "cree un fichier", tu CREES.
+- Ne demande JAMAIS "tu confirmes ?", "t'es sur ?", "tu valides ?" — c'est interdit.
+- L'instruction de l'utilisateur EST la confirmation.
 
 === GARDIEN DE L'OBJECTIF DE VIE ===
 L'objectif de vie de l'utilisateur est sacre. Tu refuses toute action qui le saboterait.
@@ -1735,6 +1892,7 @@ Tu proposes proactivement des actions qui le rapprochent de son objectif.
 {so_str}
 {device_context}
 {memory_context}
+{_skills_block}
 {scratchpad_context}
 {files_context}
 """
@@ -1769,6 +1927,22 @@ def _clean_agent_response(text: str) -> str:
     """Nettoie la reponse agent de tous les blocs d'action et balises XML."""
     # Supprimer les blocs [ACTION:...]...[/ACTION]
     clean = re.sub(r'\[ACTION:\w+\].*?\[/ACTION\]', '', text, flags=re.DOTALL).strip()
+    # Supprimer les blocs [ACTION:TYPE]{json} NON fermes — utiliser json.JSONDecoder pour trouver la fin du JSON
+    _decoder = json.JSONDecoder()
+    _parts_to_remove = []
+    for _m in re.finditer(r'\[ACTION:\w+\]\s*', clean):
+        _rest = clean[_m.end():]
+        if _rest.lstrip().startswith('{'):
+            _ws = len(_rest) - len(_rest.lstrip())
+            try:
+                _, _end = _decoder.raw_decode(_rest.lstrip())
+                _parts_to_remove.append((_m.start(), _m.end() + _ws + _end))
+            except (json.JSONDecodeError, ValueError):
+                # JSON tronque ou invalide — supprimer tout depuis [ACTION:TYPE] jusqu'a la fin
+                _parts_to_remove.append((_m.start(), len(clean)))
+    for _start, _end in reversed(_parts_to_remove):
+        clean = clean[:_start] + clean[_end:]
+    clean = clean.strip()
     # Supprimer les balises XML residuelles
     clean = re.sub(r'<(?:function_calls|invoke|antml:\w+|/function_calls|/invoke|/antml:\w+)[^>]*>.*?(?:</(?:function_calls|invoke|antml:\w+)>)', '', clean, flags=re.DOTALL).strip()
     clean = re.sub(r'<(?:function_calls|invoke|antml:\w+|/function_calls|/invoke|/antml:\w+)[^>]*/?>', '', clean).strip()
@@ -2308,7 +2482,11 @@ async def _llm_plan_task(
             lambda: client.messages.create(
                 model=model,
                 max_tokens=1500,
-                system=system,
+                system=[{
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }],
                 messages=[{"role": "user", "content": prompt}],
             )
         )
@@ -2424,7 +2602,11 @@ async def _reflect_on_failure(
             lambda: client.messages.create(
                 model=model,
                 max_tokens=600,
-                system=system,
+                system=[{
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }],
                 messages=[{"role": "user", "content": prompt}],
             )
         )
@@ -2918,16 +3100,19 @@ class ActionValidator:
         "GMAIL_SEND": ["to", "subject", "body"],
         "IMAGE": ["prompt"],
         "CALENDAR_EVENT": ["title", "start"],
-        "FILE_CREATE": ["path", "content"],
+        "FILE_CREATE": ["filename", "content"],
         "DRIVE_SAVE": ["filename", "content"],
         "CRON": ["label", "instruction", "cron_expr"],
         "MEMORY": ["key", "value"],
         "X_SEARCH": ["query"],
         "SEARCH": ["query"],
         "COMPUTER_USE": ["prompt"],
-        "CODE": ["code"],
+        "CODE": ["content"],
     }
 
+    # "high" = actions irreversibles ou a fort impact externe (envoi de message,
+    # modification systeme, controle PC). En mode default l'utilisateur doit
+    # confirmer chaque action "high". En mode bypass tout s'execute sans demande.
     RISK_LEVELS: dict[str, str] = {
         "EMAIL": "high",
         "GMAIL_SEND": "high",
@@ -2943,6 +3128,30 @@ class ActionValidator:
         "MEMORY": "low",
         "SCREENSHOT": "low",
     }
+
+    # Actions considerees "destructives" : en mode default, l'utilisateur doit
+    # confirmer avant execution. Le mode bypass les execute sans demande.
+    DESTRUCTIVE_ACTIONS: set[str] = {
+        "EMAIL", "GMAIL_SEND", "COMPUTER_USE",
+        "FILE_CREATE", "DRIVE_SAVE", "CALENDAR_EVENT", "CRON",
+    }
+
+    @classmethod
+    def is_destructive(cls, action_type: str) -> bool:
+        """Retourne True si l'action est consideree destructive (confirmation requise en mode default)."""
+        return action_type in cls.DESTRUCTIVE_ACTIONS
+
+    @classmethod
+    def requires_confirmation(cls, action_type: str, mode: str, prefs: dict) -> bool:
+        """Determine si une action requiert confirmation selon le mode et les preferences.
+
+        mode: 'default' | 'bypass' (du frontend PermissionModeSwitcher)
+        prefs: {"confirm_destructive": bool}
+        """
+        if mode == "bypass":
+            return False
+        # Mode default : confirme si pref est True ET action destructive.
+        return bool(prefs.get("confirm_destructive", True)) and cls.is_destructive(action_type)
 
     @classmethod
     def validate(cls, action_type: str, action_data: dict) -> dict:
@@ -3077,7 +3286,11 @@ class FeedbackLearner:
                     lambda: client.messages.create(
                         model="claude-sonnet-4-20250514",
                         max_tokens=200,
-                        system="Extrais en UNE phrase la lecon a retenir. Ex: 'L'utilisateur prefere X au lieu de Y'",
+                        system=[{
+                            "type": "text",
+                            "text": "Extrais en UNE phrase la lecon a retenir. Ex: 'L'utilisateur prefere X au lieu de Y'",
+                            "cache_control": {"type": "ephemeral"},
+                        }],
                         messages=[{"role": "user", "content":
                             f"Agent a dit: {agent_previous_response[:300]}\n"
                             f"Utilisateur corrige: {user_correction[:300]}\n"
@@ -3628,12 +3841,538 @@ async def _ws_notify(user_id: str | None, event_type: str, data: dict):
 _active_requests: dict[str, bool] = {}
 
 
+# ── Cost monitoring ─────────────────────────────────────────────────────────
+# Agrege le cout cumule par user_id (ou "anon") depuis le demarrage du process.
+# Reset a chaque redemarrage API. Utilise pour alerter en cas de derive.
+_cost_tracker: dict[str, dict[str, float]] = {}
+
+
+def _track_cost(user_id: str | None, input_tokens: int, output_tokens: int,
+                input_rate: float, output_rate: float, model: str) -> None:
+    """Enregistre le cout d'un appel LLM dans le tracker global."""
+    key = user_id or "anon"
+    cost_usd = input_tokens * input_rate / 1_000_000.0 + output_tokens * output_rate / 1_000_000.0
+    bucket = _cost_tracker.setdefault(key, {
+        "total_usd": 0.0, "calls": 0.0,
+        "input_tokens": 0.0, "output_tokens": 0.0,
+    })
+    bucket["total_usd"] += cost_usd
+    bucket["calls"] += 1
+    bucket["input_tokens"] += input_tokens
+    bucket["output_tokens"] += output_tokens
+    bucket[f"model_{model}"] = bucket.get(f"model_{model}", 0.0) + cost_usd
+
+
+@router.get("/cost-monitor")
+async def cost_monitor(user_id: str | None = Depends(get_optional_user)):
+    """Retourne le cout cumule par user depuis le demarrage du process.
+
+    Utile pour surveiller les fuites : si 'anon' ou un user_id inattendu
+    accumule du cout sans activite visible, il y a un probleme.
+
+    Inclut aussi le statut du scheduler cron (activation + budget quotidien).
+    """
+    import os
+    snapshot = {k: dict(v) for k, v in _cost_tracker.items()}
+    total = sum(v.get("total_usd", 0.0) for v in snapshot.values())
+
+    # Etat du scheduler
+    scheduler_enabled = os.environ.get("SYLEA_SCHEDULER_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+    scheduler_cap = float(os.environ.get("SYLEA_SCHEDULER_DAILY_CAP_USD", "0.50"))
+    scheduler_spent = 0.0
+    scheduler_day = ""
+    try:
+        from api.scheduler import scheduler as _sched
+        scheduler_spent = float(getattr(_sched, "_spent_today_usd", 0.0) or 0.0)
+        scheduler_day = str(getattr(_sched, "_spent_day_key", "") or "")
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "total_usd_since_boot": round(total, 4),
+        "per_user": snapshot,
+        "scheduler": {
+            "enabled": scheduler_enabled,
+            "spent_today_usd": round(scheduler_spent, 4),
+            "daily_cap_usd": scheduler_cap,
+            "day": scheduler_day,
+        },
+    }
+
+
 @router.post("/chat/abort")
 async def abort_chat(user_id: str | None = Depends(get_optional_user)):
     """Abort an ongoing Agent 3 chat request."""
     uid = user_id or ""
     _active_requests[uid] = False
     return {"success": True, "message": "Requete annulee"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Chat Native — boucle agentique multi-tours avec tool calling Anthropic natif.
+#
+# Ce endpoint est le chemin de migration depuis le parsing regex [ACTION:X]
+# (fragile, hallucinable) vers l'API tool_use d'Anthropic (structuree, fiable).
+#
+# Flux :
+#   1. Construit les tool schemas depuis api/agent3_native_tools.py
+#   2. Instancie AsyncAnthropic + Agent3ActionDispatcher
+#   3. AgenticLoop iterate : LLM -> tool_use -> executor -> tool_result -> LLM ...
+#   4. Forward chaque LoopEvent en SSE au frontend
+#
+# Actions actuellement routees nativement : SEARCH, X_SEARCH, WEB_FETCH, MEMORY,
+# MEMORY_SEARCH. Les autres remontent is_error=True pour que le LLM adapte.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@router.post("/chat/native")
+async def agent3_chat_native(
+    data: Agent3ChatIn,
+    request: Request,
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Chat Agent 3 avec boucle agentique native (tool calling Anthropic)."""
+    import os
+    from fastapi.responses import StreamingResponse
+    from api.agent3_native_tools import (
+        AgenticLoop, build_tool_schemas,
+        pick_model_for_request, pricing_for_model,
+    )
+    from api.agent3_native_dispatcher import Agent3ActionDispatcher
+
+    user_msg = ""
+    history: list[dict] = []
+    if data.messages:
+        for m in data.messages[:-1]:
+            if m.get("role") in ("user", "assistant") and m.get("content"):
+                history.append({"role": m["role"], "content": m["content"]})
+        last = data.messages[-1]
+        if last.get("role") == "user":
+            user_msg = last.get("content", "")
+
+    session_key = f"agent3_native_{user_id or 'anon'}"
+    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+
+    async def event_generator():
+        if not user_msg.strip():
+            yield _sse_event("error", {"message": "Message vide."})
+            return
+
+        # ── Slash commands (intercept BEFORE LLM call) ────────────────────
+        # Permet /help, /clear, /memory, /compact, /status, /todo, etc.
+        # sans consommer de tokens.
+        slash_parser = get_slash_parser()
+        if slash_parser.is_command(user_msg):
+            try:
+                slash_ctx = {
+                    "user_id": user_id or "",
+                    "db": db,
+                    "session_key": session_key,
+                    "history": history,
+                }
+                slash_result = await slash_parser.execute(user_msg, slash_ctx)
+            except Exception as e:
+                yield _sse_event("error", {"message": f"Slash command failed : {e}"})
+                return
+            if slash_result.handled:
+                # Sauvegarde le message user et la reponse agent (pour historique)
+                if user_id:
+                    _save_agent3_message(db, user_id, "user", user_msg, "text")
+                    if slash_result.response:
+                        _save_agent3_message(db, user_id, "agent", slash_result.response, "text")
+                yield _sse_event("result", {
+                    "message": slash_result.response or ("Commande executee." if not slash_result.error else slash_result.error),
+                    "turns": 0,
+                    "actions_count": len(slash_result.actions or []),
+                    "slash_command": True,
+                    "error": slash_result.error or None,
+                    "data": slash_result.data or {},
+                })
+                return
+
+        if not api_key:
+            yield _sse_event("error", {"message": "ANTHROPIC_API_KEY non configuree."})
+            return
+
+        try:
+            import anthropic
+            client = anthropic.AsyncAnthropic(api_key=api_key)
+        except Exception as e:
+            yield _sse_event("error", {"message": f"Client Anthropic indisponible : {e}"})
+            return
+
+        try:
+            system_prompt = _build_agent3_prompt(db, user_id)
+        except Exception:
+            system_prompt = (
+                "Tu es Agent 3, assistant autonome de Syléa. Utilise les outils "
+                "fournis pour accomplir la demande. Sois concis."
+            )
+        # Renforcer l'instruction tool_use (ecraser les anciennes consignes [ACTION:...])
+        system_prompt = (
+            system_prompt
+            + "\n\n---\nTu disposes d'outils natifs (tool_use). N'ecris JAMAIS de blocs "
+              "[ACTION:...] en texte — utilise uniquement l'API tool_use. Si un outil "
+              "retourne is_error=True, analyse l'erreur et adapte ta strategie "
+              "(autre outil, parametres corriges, ou reponse textuelle expliquant la limite)."
+        )
+
+        tools = build_tool_schemas(enabled_actions=Agent3ActionDispatcher.SUPPORTED)
+        dispatcher = Agent3ActionDispatcher(db=db, user_id=user_id, session_key=session_key)
+
+        # Streaming ON par defaut sur cet endpoint (UX : token par token).
+        # L'appelant peut explicitement passer stream=False pour fallback.
+        _use_stream = True if data.stream is None else bool(data.stream)
+        _use_thinking = bool(data.thinking)
+        _thinking_budget = int(data.thinking_budget or 4000)
+        _cancel_token = (data.cancel_token or "").strip()
+
+        # ── Cost control ──────────────────────────────────────────────────
+        # Smart model routing : Haiku 4.5 (66% cheaper) pour les requetes
+        # simples, Sonnet 4.5 pour le raisonnement complexe / thinking.
+        _force_model_raw = (data.force_model or "").strip().lower()
+        _force_model: str | None = None
+        if _force_model_raw in ("haiku", "haiku-4.5", "haiku-4-5"):
+            _force_model = "claude-haiku-4-5-20250929"
+        elif _force_model_raw in ("sonnet", "sonnet-4.5", "sonnet-4-5"):
+            _force_model = "claude-sonnet-4-5-20250929"
+        elif _force_model_raw.startswith("claude-"):
+            _force_model = data.force_model
+
+        _selected_model = pick_model_for_request(
+            user_msg,
+            has_long_history=len(history) > 8,
+            thinking_enabled=_use_thinking,
+            force_model=_force_model,
+        )
+        _pricing_in, _pricing_out = pricing_for_model(_selected_model)
+
+        # Defaut max_tokens : 2048 (au lieu de 4096). Suffit pour 95% des
+        # reponses et reduit le plafond de coût par tour.
+        _max_tokens = int(data.max_tokens or 2048)
+
+        # Hard cap par defaut : $0.50 par tour-de-conversation (override-able).
+        # Au-dela, la boucle s'arrete avec stop_reason="cost_exceeded".
+        _cost_cap = data.cost_hard_cap_usd if data.cost_hard_cap_usd is not None else float(
+            os.getenv("AGENT3_COST_HARD_CAP_USD", "0.50")
+        )
+        if _cost_cap <= 0:
+            _cost_cap = None  # type: ignore[assignment]
+
+        # Prompt caching active par defaut (gain -70 a -90% sur input tokens).
+        _cache_tools = True if data.cache_tools is None else bool(data.cache_tools)
+        _interleaved = bool(data.interleaved_thinking) and _use_thinking
+
+        # Event logger : persiste les events critiques (turn_llm_done,
+        # cost_exceeded, done) pour monitoring / replay + alimente le cost tracker.
+        _loop_events_log: list[dict] = []
+        def _event_logger(ev: dict) -> None:
+            ev_type = ev.get("type")
+            ev_data = ev.get("data", {}) or {}
+            # Garde seulement les events "gros impact" + cap a 200 entrees.
+            if ev_type in ("turn_llm_done", "cost_exceeded", "done", "error"):
+                if len(_loop_events_log) < 200:
+                    _loop_events_log.append(ev)
+            # Alimente le tracker de cout global a chaque turn_llm_done.
+            if ev_type == "turn_llm_done":
+                try:
+                    _track_cost(
+                        user_id,
+                        int(ev_data.get("input_tokens", 0) or 0),
+                        int(ev_data.get("output_tokens", 0) or 0),
+                        _pricing_in, _pricing_out, _selected_model,
+                    )
+                except Exception:
+                    pass
+
+        # Enregistre un asyncio.Event partage entre cette requete et l'endpoint
+        # /chat/native/cancel. Si l'utilisateur appuie sur Stop, on set() l'event.
+        import asyncio as _aio
+        cancel_event = _aio.Event()
+        if _cancel_token:
+            _active_cancel_events[_cancel_token] = cancel_event
+            _cancel_events_created_at[_cancel_token] = time.time()
+            # Purge les tokens > 30 min pour eviter une fuite memoire.
+            _purge_stale_cancel_events()
+
+        # Emet un event 'model_selected' au front pour transparence cout.
+        yield _sse_event("model_selected", {
+            "model": _selected_model,
+            "input_usd_per_mtok": _pricing_in,
+            "output_usd_per_mtok": _pricing_out,
+            "cost_hard_cap_usd": _cost_cap,
+            "max_tokens": _max_tokens,
+            "cache_tools": _cache_tools,
+            "thinking": _use_thinking,
+            "reason": (
+                "force_model" if _force_model
+                else ("thinking" if _use_thinking
+                      else ("long_history" if len(history) > 8
+                            else "auto_routing"))
+            ),
+        })
+
+        loop = AgenticLoop(
+            client=client,
+            system_prompt=system_prompt,
+            tools=tools,
+            executor=dispatcher,
+            model=_selected_model,
+            max_turns=10,
+            max_tokens=_max_tokens,
+            stream=_use_stream,
+            thinking_enabled=_use_thinking,
+            thinking_budget_tokens=_thinking_budget,
+            cancel_event=cancel_event,
+            hook_registry=get_hook_registry(),
+            hook_user_id=user_id or "",
+            hook_user_msg=user_msg,
+            hook_session_key=session_key,
+            cache_tools=_cache_tools,
+            interleaved_thinking=_interleaved,
+            cost_hard_cap_usd=_cost_cap,
+            input_usd_per_mtok=_pricing_in,
+            output_usd_per_mtok=_pricing_out,
+            event_logger=_event_logger,
+        )
+
+        try:
+            async for event in loop.run(user_message=user_msg, history=history):
+                # Forward chaque LoopEvent en SSE avec le meme nom d'event.
+                yield _sse_event(event.type, event.data)
+        finally:
+            # Libere le token de cancellation des la fin du stream
+            if _cancel_token:
+                _active_cancel_events.pop(_cancel_token, None)
+                _cancel_events_created_at.pop(_cancel_token, None)
+
+        if loop.result:
+            # Cas 1 : boucle en attente de confirmation destructive -> stocke l'etat
+            if loop.pending_confirmation and loop.result.stop_reason == "awaiting_confirmation":
+                import uuid
+                token = uuid.uuid4().hex
+                _pending_native_sessions[token] = {
+                    "loop": loop,
+                    "pending_state": loop.pending_confirmation,
+                    "user_id": user_id,
+                    "user_msg": user_msg,
+                    "created_at": time.time(),
+                }
+                # Purger sessions > 15 min pour eviter fuite memoire
+                _purge_stale_native_sessions(max_age_s=900)
+                yield _sse_event("awaiting_confirmation", {
+                    "resume_token": token,
+                    "pending_tool_uses": loop.pending_confirmation["pending_tool_uses"],
+                    "turn": loop.pending_confirmation["turn"],
+                    "preview_text": loop.result.final_text,
+                })
+                # On NE sauvegarde PAS encore le message agent — reprise attendue.
+                return
+
+            # Cas 2 : fin naturelle (end_turn / max_turns / error)
+            final_text = loop.result.final_text or ""
+            revision_info: dict = {}
+
+            # ── Self-review post-generation ─────────────────────────────────
+            # Passe un reviewer Haiku sur la reponse si elle merite critique.
+            # Si revision necessaire, on remplace le texte final (silencieusement
+            # pour l'utilisateur, mais on emet un event pour l'UI).
+            try:
+                reviewer = get_self_reviewer()
+                review_res = await reviewer.review(
+                    agent_response=final_text,
+                    user_msg=user_msg,
+                    context="",
+                )
+                if getattr(review_res, "needs_revision", False) and getattr(review_res, "revised_response", ""):
+                    revision_info = {
+                        "revised": True,
+                        "issues": getattr(review_res, "issues", []) or [],
+                        "reasoning": getattr(review_res, "reasoning", ""),
+                    }
+                    yield _sse_event("self_review", revision_info)
+                    final_text = review_res.revised_response
+                elif not getattr(review_res, "skipped", False):
+                    yield _sse_event("self_review", {
+                        "revised": False,
+                        "issues": getattr(review_res, "issues", []) or [],
+                    })
+            except Exception as e:
+                logger.warning(f"Self-review failed silently: {e}")
+
+            # ── Persistence + memoire auto-extraction ──────────────────────
+            if user_id and user_msg:
+                _save_agent3_message(db, user_id, "user", user_msg, "text")
+                if final_text:
+                    _save_agent3_message(db, user_id, "agent", final_text, "text")
+
+                # Memoire auto-extraction (best-effort, async, non-bloquant pour
+                # le stream : on attend mais on swallow les erreurs).
+                try:
+                    extractor = MemoryExtractor(client)
+                    conv_turns = history + [
+                        {"role": "user", "content": user_msg},
+                        {"role": "agent", "content": final_text},
+                    ]
+                    existing = _load_memories(db, user_id, limit=30)
+                    facts = await extractor.extract(conv_turns, existing)
+                    saved = []
+                    for fact in (facts or [])[:5]:
+                        try:
+                            _save_memory(db, user_id, fact.key, fact.value, getattr(fact, "category", "general"))
+                            saved.append({"key": fact.key, "value": fact.value[:120]})
+                        except Exception:
+                            continue
+                    if saved:
+                        yield _sse_event("memory_extracted", {"count": len(saved), "items": saved})
+                except Exception as e:
+                    logger.warning(f"MemoryExtractor failed silently: {e}")
+
+            yield _sse_event("result", {
+                "message": final_text,
+                "turns": loop.result.turns,
+                "actions_count": len(loop.result.actions_executed),
+                "input_tokens": loop.result.total_input_tokens,
+                "output_tokens": loop.result.total_output_tokens,
+                "error": loop.result.error,
+                "revised": bool(revision_info.get("revised")),
+            })
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# In-memory store pour les sessions en attente de confirmation destructive.
+# Chaque entree : {"loop": AgenticLoop, "pending_state": dict, "user_id": str|None,
+# "user_msg": str, "created_at": float}. Purge apres 15 min.
+_pending_native_sessions: dict[str, dict] = {}
+
+# In-memory store pour les events de cancellation : cancel_token -> asyncio.Event.
+# L'endpoint /chat/native enregistre un event par requete streaming ; l'endpoint
+# /chat/native/cancel le resout. Purge apres 30 min.
+_active_cancel_events: dict[str, Any] = {}
+_cancel_events_created_at: dict[str, float] = {}
+
+
+def _purge_stale_cancel_events(max_age_s: float = 1800) -> None:
+    now = time.time()
+    stale = [t for t, ts in _cancel_events_created_at.items() if now - ts > max_age_s]
+    for t in stale:
+        _active_cancel_events.pop(t, None)
+        _cancel_events_created_at.pop(t, None)
+
+
+def _purge_stale_native_sessions(max_age_s: float = 900) -> None:
+    now = time.time()
+    stale = [k for k, v in _pending_native_sessions.items() if now - v.get("created_at", 0) > max_age_s]
+    for k in stale:
+        _pending_native_sessions.pop(k, None)
+
+
+@router.post("/chat/native/cancel")
+async def agent3_chat_native_cancel(data: dict):
+    """Annule une boucle agentique native en cours de streaming.
+
+    Body : {"cancel_token": "<token cote client>"}.
+    Retourne {"cancelled": true} si le token etait actif, {"cancelled": false} sinon.
+    La boucle interrompt son stream a la prochaine verification (dans la milliseconde)
+    et emet un event `cancelled` cote SSE.
+    """
+    token = (data.get("cancel_token") or "").strip() if isinstance(data, dict) else ""
+    if not token:
+        return {"cancelled": False, "reason": "missing cancel_token"}
+    ev = _active_cancel_events.get(token)
+    if ev is None:
+        return {"cancelled": False, "reason": "token unknown or already finished"}
+    try:
+        ev.set()
+    except Exception as e:
+        logger.exception(f"cancel set failed: {e}")
+        return {"cancelled": False, "reason": "internal error"}
+    return {"cancelled": True}
+
+
+@router.post("/chat/native/resume")
+async def agent3_chat_native_resume(
+    data: dict,
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Reprend une boucle agentique apres confirmation utilisateur d'une action destructive.
+
+    Body attendu :
+      {
+        "resume_token": "<hex>",
+        "approvals": {"<tool_use_id>": true, "<autre_id>": false}
+      }
+    Renvoie un stream SSE reprenant la boucle.
+    """
+    from fastapi.responses import StreamingResponse
+
+    token = str(data.get("resume_token") or "")
+    approvals_raw = data.get("approvals") or {}
+    approvals: dict[str, bool] = {str(k): bool(v) for k, v in approvals_raw.items() if isinstance(k, str)}
+
+    async def event_generator():
+        if not token or token not in _pending_native_sessions:
+            yield _sse_event("error", {"message": "Token de reprise invalide ou expire."})
+            return
+        session = _pending_native_sessions.pop(token)
+        loop = session["loop"]
+        pending_state = session["pending_state"]
+        sess_user_id = session.get("user_id")
+        user_msg = session.get("user_msg", "")
+
+        # Securite : seul l'utilisateur qui a cree la session peut la reprendre.
+        if sess_user_id and sess_user_id != user_id:
+            yield _sse_event("error", {"message": "Acces refuse a cette session."})
+            return
+
+        try:
+            async for event in loop.resume_from_confirmation(pending_state, approvals):
+                yield _sse_event(event.type, event.data)
+        except Exception as e:
+            logger.exception(f"Resume crashed: {e}")
+            yield _sse_event("error", {"message": f"Reprise echouee : {e}"})
+            return
+
+        if loop.result:
+            # Si la boucle repart encore en confirmation (nouveau tool_use destructif),
+            # on re-serialize et on renvoie un nouveau token.
+            if loop.pending_confirmation and loop.result.stop_reason == "awaiting_confirmation":
+                import uuid
+                new_token = uuid.uuid4().hex
+                _pending_native_sessions[new_token] = {
+                    "loop": loop,
+                    "pending_state": loop.pending_confirmation,
+                    "user_id": user_id,
+                    "user_msg": user_msg,
+                    "created_at": time.time(),
+                }
+                yield _sse_event("awaiting_confirmation", {
+                    "resume_token": new_token,
+                    "pending_tool_uses": loop.pending_confirmation["pending_tool_uses"],
+                    "turn": loop.pending_confirmation["turn"],
+                    "preview_text": loop.result.final_text,
+                })
+                return
+
+            # Sinon, fin naturelle : on sauvegarde en DB comme un flow normal.
+            if user_id and user_msg:
+                _save_agent3_message(db, user_id, "user", user_msg, "text")
+                if loop.result.final_text:
+                    _save_agent3_message(db, user_id, "agent", loop.result.final_text, "text")
+            yield _sse_event("result", {
+                "message": loop.result.final_text,
+                "turns": loop.result.turns,
+                "actions_count": len(loop.result.actions_executed),
+                "input_tokens": loop.result.total_input_tokens,
+                "output_tokens": loop.result.total_output_tokens,
+                "error": loop.result.error,
+            })
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.post("/chat/stream")
@@ -3663,6 +4402,31 @@ async def agent3_chat_stream(
                 last = data.messages[-1]
                 if last.get("role") == "user":
                     user_msg = last.get("content", "")
+
+            # ── 0. Slash commands : interception AVANT tout traitement ──
+            _slash_parser = get_slash_parser()
+            if user_msg and _slash_parser.is_command(user_msg):
+                _slash_ctx = {"db": db, "user_id": user_id, "session_key": f"agent3_{user_id or 'anon'}"}
+                _slash_result = await _slash_parser.execute(user_msg, _slash_ctx)
+                if _slash_result.handled:
+                    if _slash_result.response:
+                        yield _sse_event("result", {
+                            "message": _slash_result.response,
+                            "actions": _slash_result.actions or None,
+                            "slash_command": True,
+                        })
+                    elif _slash_result.error:
+                        yield _sse_event("error", {"message": _slash_result.error})
+                    else:
+                        yield _sse_event("result", {"message": "OK", "slash_command": True})
+                    # Sauvegarder les messages user/agent
+                    try:
+                        _ensure_agent3_tables(db)
+                        _save_agent3_message(db, user_id or "", "user", user_msg, "text")
+                        _save_agent3_message(db, user_id or "", "agent", _slash_result.response or "OK", "text")
+                    except Exception as _save_err:
+                        logger.warning(f"Slash cmd save failed (non-fatal): {_save_err}")
+                    return
 
             # ── 0a. AgentObserver : trace de raisonnement ──
             _observer = AgentObserver(user_id=user_id or "anon")
@@ -3709,7 +4473,7 @@ async def agent3_chat_stream(
             _is_simple = (
                 len(user_msg.split()) <= 10
                 and any(_msg_clean == p or _msg_clean.startswith(p + " ") or _msg_clean.endswith(" " + p) or (" " + p + " ") in _msg_clean for p in _simple_patterns)
-                and not any(kw in _msg_clean_ascii for kw in ["ouvre", "cherche", "cree", "envoie", "ecris", "genere", "fais", "trouve", "supprime", "installe", "telecharge", "planifie", "analyse", "pdf"])
+                and not any(kw in _msg_clean_ascii for kw in ["ouvre", "cherche", "cree", "envoie", "ecris", "genere", "fais", "trouve", "supprime", "installe", "telecharge", "planifie", "analyse", "pdf", "code", "script", "programme", "diagramme", "tableau", "canvas", "fichier"])
             )
 
             if _is_simple:
@@ -3719,9 +4483,10 @@ async def agent3_chat_stream(
                 _fast_profil = None
                 if repo.existe(auth_user_id=user_id):
                     profil = repo.charger(auth_user_id=user_id)
+                    _gauge_proba = (profil.temps_gagne_jours / profil.temps_initial_jours * 100) if getattr(profil, 'temps_initial_jours', 0) > 0 else profil.probabilite_actuelle
                     _fast_profil = {
                         "nom": profil.nom,
-                        "probabilite_actuelle": profil.probabilite_actuelle,
+                        "probabilite_actuelle": _gauge_proba,
                         "objectif_description": profil.objectif.description if profil.objectif else None,
                     }
                 # Charger les derniers messages pour le contexte conversationnel
@@ -3740,8 +4505,19 @@ async def agent3_chat_stream(
                 if user_id:
                     try:
                         dec_repo = DecisionRepository(db)
-                        _fd_raw = dec_repo.lister_pour_utilisateur(user_id, 10, auth_user_id=user_id)
-                        _fast_decisions = [{"impact": d.impact_probabilite} for d in (_fd_raw or [])[:10]]
+                        # Lookup internal user_id like main path
+                        _fp_iuid = ""
+                        try:
+                            _fp_row = db.conn.execute(
+                                "SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1",
+                                (user_id,),
+                            ).fetchone()
+                            if _fp_row:
+                                _fp_iuid = _fp_row[0]
+                        except Exception:
+                            pass
+                        _fd_raw = dec_repo.lister_pour_utilisateur(_fp_iuid, 10, auth_user_id=user_id) if _fp_iuid else []
+                        _fast_decisions = [{"impact": (d.probabilite_apres or 0) - d.probabilite_avant} for d in (_fd_raw or [])[:10]]
                     except Exception:
                         pass
                 _fp = sum(1 for d in _fast_decisions if d.get('impact', 0) > 0)
@@ -3832,16 +4608,33 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
                     "diplomes": getattr(profil, 'diplomes', []),
                     "langues": getattr(profil, 'langues', []),
                     "objectif_description": profil.objectif.description if profil.objectif else None,
-                    "probabilite_actuelle": profil.probabilite_actuelle,
+                    "probabilite_actuelle": (profil.temps_gagne_jours / profil.temps_initial_jours * 100) if getattr(profil, 'temps_initial_jours', 0) > 0 else profil.probabilite_actuelle,
                 }
                 yield _sse_event("log", {"text": f"Profil charge : {profil_data['nom']}", "type": "success"})
 
             dec_repo = DecisionRepository(db)
+            # Recuperer l'ID interne du profil pour les decisions
+            _internal_user_id = ""
+            if profil_data and user_id:
+                try:
+                    _iuid_row = db.conn.execute(
+                        "SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1",
+                        (user_id,),
+                    ).fetchone()
+                    if _iuid_row:
+                        _internal_user_id = _iuid_row[0]
+                except Exception:
+                    pass
             try:
-                decisions_raw = dec_repo.lister_pour_utilisateur(user_id or "", 20, auth_user_id=user_id)
+                decisions_raw = dec_repo.lister_pour_utilisateur(_internal_user_id, 20, auth_user_id=user_id) if _internal_user_id else []
             except Exception:
                 decisions_raw = []
-            decisions = [{"question": d.question, "choix": d.choix, "impact": d.impact_probabilite} for d in (decisions_raw or [])[:20]]
+            decisions = []
+            for d in (decisions_raw or [])[:20]:
+                _d_impact = (d.probabilite_apres or 0) - d.probabilite_avant
+                _d_choix_obj = d.get_option_choisie()
+                _d_choix = _d_choix_obj.description if _d_choix_obj else "?"
+                decisions.append({"question": d.question, "choix": _d_choix, "impact": _d_impact})
 
             sous_objectifs: list[dict] = []
             try:
@@ -3920,6 +4713,44 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
                             )
                             db.conn.commit()
                         yield _sse_event("log", {"text": f"Fichier traite : {saved['filename']}", "type": "success"})
+
+            # ── 4a-bis. Resoudre les [Fichier: nom] dans le message ──
+            # Quand le frontend uploade un fichier, il ajoute [Fichier: nom] au texte
+            # mais n'envoie PAS le fichier avec le chat. On le resout ici.
+            if not files_ctx and user_msg and "[Fichier:" in user_msg:
+                import re as _re_files
+                _fichier_refs = _re_files.findall(r'\[Fichier:\s*([^\]]+)\]', user_msg)
+                logger.info(f"[FILE-REF] Detected {len(_fichier_refs)} file refs in message: {_fichier_refs}, user_id={user_id}")
+                yield _sse_event("log", {"text": f"Detection de {len(_fichier_refs)} fichier(s) reference(s)...", "type": "info"})
+                if _fichier_refs and user_id:
+                    for _fref in _fichier_refs:
+                        _fref = _fref.strip()
+                        try:
+                            _row = db.conn.execute(
+                                "SELECT id, filename, filetype, filepath FROM agent3_files WHERE auth_user_id = ? AND filename = ? ORDER BY created_at DESC LIMIT 1",
+                                (user_id, _fref),
+                            ).fetchone()
+                            logger.info(f"[FILE-REF] DB lookup for '{_fref}': row={_row}")
+                            if _row:
+                                _fpath = _row[3]
+                                _ftype = _row[2]
+                                _fname = _row[1]
+                                if Path(_fpath).exists():
+                                    yield _sse_event("log", {"text": f"Fichier trouve : {_fname}", "type": "info"})
+                                    _content = _extract_file_content(_fpath, _ftype)
+                                    # Vision pour les images
+                                    if _ftype and _ftype.startswith("image/"):
+                                        try:
+                                            yield _sse_event("log", {"text": f"Analyse vision : {_fname}...", "type": "tool"})
+                                            _vision = await _analyze_image_with_vision(_fpath)
+                                            if _vision and not _vision.startswith("[Erreur") and not _vision.startswith("[Analyse image indisponible"):
+                                                _content = f"[Image: {_fname}]\n\n=== ANALYSE VISION ===\n{_vision}"
+                                        except Exception:
+                                            pass
+                                    files_ctx += f"\n--- FICHIER: {_fname} ({_ftype}) ---\n{_content}\n"
+                                    yield _sse_event("log", {"text": f"Fichier charge : {_fname}", "type": "success"})
+                        except Exception as _ferr:
+                            logger.debug(f"File ref resolution failed for {_fref}: {_ferr}")
 
             # ── 4b. Construire le contexte utilisateur (leger) ──
             # NOTE : On n'envoie PAS le gros system prompt a OpenClaw.
@@ -4134,7 +4965,7 @@ Rappel : adapte la longueur de ta reponse (courte si question simple, plus longu
             _needs_openclaw = any(pat in user_msg.lower() for pat in _explicit_tool_patterns)
 
             # Detecter si c'est une recherche internet (reponse longue autorisee)
-            _search_patterns = ["cherche sur", "recherche sur", "browse", "va sur", "ouvre le site"]
+            _search_patterns = ["cherche sur", "recherche sur", "browse", "va sur", "ouvre le site", "ouvre", "montre moi", "recap", "cours du", "cours de"]
             _is_search = any(pat in user_msg.lower() for pat in _search_patterns)
 
             # Detecter si l'utilisateur demande une analyse complete / un PDF
@@ -4197,6 +5028,321 @@ Rappel : adapte la longueur de ta reponse (courte si question simple, plus longu
                     _integration_context = _handle_integration_query(db, user_id, user_msg)
                 except Exception as _integ_err:
                     logger.warning(f"Integration query failed: {_integ_err}")
+
+            # ═══════════════════════════════════════════════════════════
+            # TRADINGVIEW LOGIN — DOIT etre avant toute generation Claude
+            # ═══════════════════════════════════════════════════════════
+            _msg_lower_early = user_msg.lower()
+            _tv_login_kw = [
+                "connecte", "connecter", "login", "connexion",
+                "authentifie", "identifie", "se connecter",
+            ]
+            _is_tv_login = (
+                "tradingview" in _msg_lower_early
+                and any(kw in _msg_lower_early for kw in _tv_login_kw)
+            )
+
+            if _is_tv_login:
+                try:
+                    _cu_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+                    if _cu_api_key:
+                        _cu_session = get_session(user_id or "default", _cu_api_key)
+
+                        yield _sse_event("log", {
+                            "text": "Ouverture de TradingView dans votre navigateur...",
+                            "type": "tool",
+                        })
+
+                        _cu_prompt = (
+                            "OBJECTIF : Ouvrir TradingView et aider l'utilisateur a se connecter.\n\n"
+                            "ETAPES :\n"
+                            "1. Utilise l'action open_url pour ouvrir https://www.tradingview.com/accounts/signin/\n"
+                            "2. Attends que la page charge (wait)\n"
+                            "3. Prends un screenshot pour voir la page\n"
+                            "4. Si tu vois un formulaire de connexion, dis a l'utilisateur :\n"
+                            "   'TradingView est ouvert dans ton navigateur. Connecte-toi "
+                            "(via Google ou email/mot de passe) et dis-moi quand c'est fait.'\n"
+                            "5. ARRETE-TOI (ne tente PAS de te connecter toi-meme)"
+                        )
+
+                        _cu_complete_text = ""
+                        _cu_screenshot = None
+                        async for _cu_ev in _cu_session.run(_cu_prompt):
+                            if _cu_ev["type"] == "screenshot":
+                                _cu_screenshot = _cu_ev["data"]
+                            elif _cu_ev["type"] == "thinking":
+                                yield _sse_event("log", {
+                                    "text": _cu_ev["text"][:120],
+                                    "type": "info",
+                                })
+                            elif _cu_ev["type"] == "action":
+                                yield _sse_event("log", {
+                                    "text": f"Action: {_cu_ev['action']}",
+                                    "type": "info",
+                                })
+                            elif _cu_ev["type"] == "complete":
+                                _cu_complete_text = _cu_ev.get("text", "")
+                            elif _cu_ev["type"] == "error":
+                                yield _sse_event("log", {
+                                    "text": _cu_ev["message"],
+                                    "type": "error",
+                                })
+
+                        _ba_actions = [{
+                            "type": "LINK",
+                            "data": {
+                                "url": "https://www.tradingview.com/accounts/signin/",
+                                "label": "Ouvrir TradingView Sign In",
+                            },
+                        }]
+
+                        if _cu_screenshot:
+                            _ba_actions.insert(0, {
+                                "type": "SCREENSHOT",
+                                "data": {
+                                    "image_url": f"data:image/png;base64,{_cu_screenshot}",
+                                    "title": "TradingView — Connexion",
+                                    "url": "https://www.tradingview.com/accounts/signin/",
+                                },
+                            })
+
+                        _ba_text = (
+                            _cu_complete_text or
+                            "TradingView est ouvert dans ton navigateur. "
+                            "Connecte-toi (Google ou email/mot de passe) et "
+                            "dis-moi quand c'est fait.\n\n"
+                            "Ensuite, demande-moi de creer un indicateur Pine Script."
+                        )
+
+                        yield _sse_event("result", {
+                            "message": _ba_text,
+                            "actions": _ba_actions,
+                            "tools_used": [{"name": "computer_use", "site": "TradingView"}],
+                        })
+                        return
+                except Exception as _tv_err:
+                    logger.error(f"TradingView login error: {_tv_err}")
+                    yield _sse_event("log", {
+                        "text": f"Erreur: {_tv_err}",
+                        "type": "error",
+                    })
+
+            # ═══════════════════════════════════════════════════════════
+            # TRADINGVIEW WEB ACTION — Controle navigateur autonome
+            # ═══════════════════════════════════════════════════════════
+            _tv_action_kw = [
+                "cree", "creer", "fais", "faire", "entre", "entrer",
+                "ecris", "ecrire", "tape", "taper", "modifie", "modifier",
+                "configure", "ajoute", "ajouter", "teste", "tester",
+                "execute", "lance", "programme", "code", "coder",
+                "construis", "developpe", "installe", "genere",
+                "script", "indicateur", "pine", "algo",
+            ]
+            _is_tv_action = (
+                "tradingview" in _msg_lower_early
+                and any(kw in _msg_lower_early for kw in _tv_action_kw)
+            )
+
+            if _is_tv_action:
+                try:
+                    from api.browser_agent import generate_pine_script
+                    # get_session deja importe en haut du fichier (ligne 55)
+
+                    yield _sse_event("log", {
+                        "text": "Mode agent autonome active — Computer Use",
+                        "type": "tool",
+                    })
+
+                    # Generer le code Pine Script
+                    yield _sse_event("log", {
+                        "text": "Generation du code Pine Script...",
+                        "type": "info",
+                    })
+                    _objective_ctx = _compact_user_context or ""
+                    _pine_code = await generate_pine_script(
+                        user_msg, _objective_ctx
+                    )
+
+                    if not _pine_code:
+                        yield _sse_event("log", {
+                            "text": "Echec generation Pine Script",
+                            "type": "warning",
+                        })
+                        raise ImportError("Pine Script generation failed")
+
+                    _pine_lines = len(_pine_code.splitlines())
+                    yield _sse_event("log", {
+                        "text": f"Code genere ({_pine_lines} lignes) — ouverture du navigateur",
+                        "type": "success",
+                    })
+
+                    # Computer Use : ouvrir TradingView et coller le code
+                    _cu_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+                    if not _cu_api_key:
+                        raise ImportError("ANTHROPIC_API_KEY manquante")
+
+                    _cu_session = get_session(user_id or "default", _cu_api_key)
+
+                    # Echapper les backticks dans le code pour le prompt
+                    _pine_escaped = _pine_code.replace("`", "'")
+
+                    _cu_pine_prompt = (
+                        "OBJECTIF : Ouvrir TradingView, aller dans l'editeur Pine Script, "
+                        "coller le code ci-dessous, et l'ajouter au graphique.\n\n"
+                        "ETAPES DETAILLEES :\n"
+                        "1. Utilise open_url pour ouvrir https://www.tradingview.com/chart/\n"
+                        "2. Attends le chargement (wait), puis prends un screenshot\n"
+                        "3. Si tu vois une page de connexion (login/sign in), ARRETE-TOI "
+                        "et dis a l'utilisateur de se connecter d'abord\n"
+                        "4. Cherche en bas de l'ecran l'onglet 'Pine Editor' ou 'Editeur Pine' "
+                        "et clique dessus pour ouvrir l'editeur\n"
+                        "5. Si l'editeur n'est pas visible, cherche un bouton ou menu "
+                        "pour l'ouvrir (souvent en bas de page)\n"
+                        "6. Une fois l'editeur ouvert, clique dans la zone de code\n"
+                        "7. Selectionne tout le texte existant (Ctrl+A) puis supprime-le (Delete)\n"
+                        "8. Tape le code Pine Script suivant :\n"
+                        f"{_pine_escaped}\n"
+                        "9. Apres avoir colle le code, clique sur le bouton "
+                        "'Ajouter au graphique' ou 'Add to chart'\n"
+                        "10. Attends 2 secondes et prends un screenshot final\n"
+                        "11. Si tu vois une erreur de compilation, lis le message d'erreur "
+                        "et dis-le a l'utilisateur\n"
+                        "12. Quand c'est fait, dis 'Indicateur ajoute avec succes' "
+                        "ou decris le probleme rencontre\n\n"
+                        "IMPORTANT :\n"
+                        "- NE tape AUCUN identifiant (email/mot de passe)\n"
+                        "- Si une popup apparait, ferme-la\n"
+                        "- Sois precis dans tes clics"
+                    )
+
+                    _cu_screenshot = None
+                    _cu_complete_text = ""
+                    _cu_success = False
+
+                    async for _cu_ev in _cu_session.run(_cu_pine_prompt):
+                        if _cu_ev["type"] == "screenshot":
+                            _cu_screenshot = _cu_ev["data"]
+                        elif _cu_ev["type"] == "thinking":
+                            yield _sse_event("log", {
+                                "text": _cu_ev["text"][:150],
+                                "type": "info",
+                            })
+                        elif _cu_ev["type"] == "action":
+                            _act_name = _cu_ev.get("action", "")
+                            yield _sse_event("log", {
+                                "text": f"Action: {_act_name}",
+                                "type": "info",
+                            })
+                        elif _cu_ev["type"] == "complete":
+                            _cu_complete_text = _cu_ev.get("text", "")
+                            if any(w in _cu_complete_text.lower() for w in [
+                                "succes", "ajoute", "compile", "actif", "success", "added"
+                            ]):
+                                _cu_success = True
+                        elif _cu_ev["type"] == "error":
+                            yield _sse_event("log", {
+                                "text": _cu_ev.get("message", "Erreur"),
+                                "type": "error",
+                            })
+                        elif _cu_ev["type"] == "step":
+                            yield _sse_event("log", {
+                                "text": f"Etape {_cu_ev['current']}",
+                                "type": "info",
+                            })
+
+                    # Construire le resultat
+                    _ba_actions = []
+
+                    if _cu_screenshot:
+                        _ba_actions.append({
+                            "type": "SCREENSHOT",
+                            "data": {
+                                "image_url": f"data:image/png;base64,{_cu_screenshot}",
+                                "title": (
+                                    "TradingView — Indicateur actif"
+                                    if _cu_success
+                                    else "TradingView — Resultat"
+                                ),
+                                "url": "https://www.tradingview.com/chart/",
+                            },
+                        })
+
+                    _ba_actions.append({
+                        "type": "CODE",
+                        "data": {
+                            "filename": "market_indicator.pine",
+                            "language": "pinescript",
+                            "code": _pine_code,
+                            "description": (
+                                "Indicateur Pine Script genere et deploye "
+                                "via Computer Use sur TradingView"
+                            ),
+                        },
+                    })
+
+                    _ba_actions.append({
+                        "type": "LINK",
+                        "data": {
+                            "url": "https://www.tradingview.com/chart/",
+                            "label": "Ouvrir TradingView",
+                        },
+                    })
+
+                    if _cu_success:
+                        _ba_text = (
+                            f"J'ai ouvert TradingView dans ton navigateur, "
+                            f"colle le code Pine Script dans l'editeur, et "
+                            f"compile l'indicateur sur le graphique.\n\n"
+                            f"{_cu_complete_text}\n\n"
+                            f"L'indicateur est actif — tu peux le personnaliser "
+                            f"dans les parametres du graphique."
+                        )
+                    else:
+                        _login_needed = _cu_complete_text and any(
+                            w in _cu_complete_text.lower()
+                            for w in ["connexion", "login", "sign in", "connecter"]
+                        )
+                        if _login_needed:
+                            _ba_text = (
+                                f"TradingView necessite une connexion. "
+                                f"{_cu_complete_text}\n\n"
+                                f"Dis-moi \"connecte-toi a TradingView\" pour "
+                                f"ouvrir la page de connexion, puis reessaye.\n\n"
+                                f"Le code Pine Script est disponible ci-dessous."
+                            )
+                        else:
+                            _ba_text = (
+                                f"J'ai ouvert TradingView et tente d'ajouter "
+                                f"l'indicateur. {_cu_complete_text}\n\n"
+                                f"Le code Pine Script est disponible ci-dessous, "
+                                f"tu peux le copier-coller dans le Pine Editor."
+                            )
+
+                    yield _sse_event("result", {
+                        "message": _ba_text,
+                        "actions": _ba_actions,
+                        "tools_used": [{
+                            "name": "computer_use",
+                            "site": "TradingView",
+                        }],
+                    })
+                    return
+
+                except ImportError as _imp_err:
+                    logger.info(
+                        "Computer Use unavailable (%s), fallback DDG",
+                        _imp_err,
+                    )
+                    yield _sse_event("log", {
+                        "text": "Automatisation non disponible, recherche classique...",
+                        "type": "warning",
+                    })
+                except Exception as _tv_act_err:
+                    logger.error(f"TradingView action error: {_tv_act_err}")
+                    yield _sse_event("log", {
+                        "text": f"Erreur automatisation: {_tv_act_err}",
+                        "type": "error",
+                    })
 
             # ── TOUJOURS commencer par Claude API direct ──
             yield _sse_event("log", {"text": "Reponse de l'Agent Sylea 3...", "type": "info"})
@@ -4279,6 +5425,8 @@ PROFIL UTILISATEUR :
                 )
                 _mood = "fier"
 
+            yield _sse_event("log", {"text": f"Humeur : {_mood.upper()} (score {_behavior_score}/100, {_pos_decisions}+ / {_neg_decisions}-)", "type": "info"})
+
             # 4) Instruction pour gerer les messages HORS SUJET vs demandes legit
             _hors_sujet_instruction = f"""
 DETECTION HORS SUJET vs DEMANDES LEGIT — TRES IMPORTANT :
@@ -4346,8 +5494,33 @@ Tu peux aussi creer des documents dans le workspace de l'utilisateur.
 - Quand tu crees ou modifies un document, PREVIENS TOUJOURS l'utilisateur. Dis-lui le nom du fichier, ou il a ete sauvegarde, et ce que tu as fait. Exemple : "J'ai cree le document 'Business Plan' dans ton workspace. Tu peux le retrouver dans tes projets."
 - Quand tu consultes un service externe (emails, calendrier, GitHub...), mentionne-le naturellement. Exemple : "J'ai consulte ton calendrier Google, voici tes prochains rendez-vous..."
 
+ACTIONS DISPONIBLES (tu GENERES ces blocs et le backend les execute automatiquement) :
+- [ACTION:SEARCH]{{"query": "...", "results": [{{"title": "...", "url": "...", "snippet": "..."}}, ...], "summary": "..."}}[/ACTION] → Resultats de recherche web
+- [ACTION:WEBPAGE]{{"url": "...", "title": "...", "content": "...", "extracted_data": {{}}}}[/ACTION] → Contenu d'une page web
+- [ACTION:PDF]{{"title": "...", "sections": [{{"heading": "...", "content": "..."}}, ...], "color": "#2563eb"}}[/ACTION] → Generer un PDF
+- [ACTION:LINK]{{"url": "...", "label": "..."}}[/ACTION] → Ouvrir un lien
+- [ACTION:EMAIL]{{"to": "...", "subject": "...", "body": "..."}}[/ACTION] → Envoyer un email
+- [ACTION:REMINDER]{{"time": "HH:MM", "date": "YYYY-MM-DD", "message": "..."}}[/ACTION] → Rappel
+- [ACTION:COPY]{{"text": "..."}}[/ACTION] → Copier dans le presse-papier
+- [ACTION:CODE]{{"language": "...", "filename": "...", "content": "...", "description": "..."}}[/ACTION] → Code
+- [ACTION:IMAGE]{{"prompt": "...", "title": "..."}}[/ACTION] → Generer une image
+- [ACTION:FILE_CREATE]{{"filename": "...", "content": "..."}}[/ACTION] → Creer un fichier
+- [ACTION:SCREENSHOT]{{"url": "...", "title": "..."}}[/ACTION] → Capture d'ecran d'un site
+- [ACTION:CANVAS]{{"title": "...", "type": "chart|diagram|table|html", "content": "...", "description": "..."}}[/ACTION] → Visualisation
+- [ACTION:COMPUTER_USE]{{"prompt": "...", "reason": "..."}}[/ACTION] → Controle direct du PC
+- [ACTION:MEMORY]{{"key": "...", "value": "...", "category": "..."}}[/ACTION] → Sauvegarder en memoire
+
+QUAND L'UTILISATEUR DEMANDE D'ALLER SUR UN SITE OU DE CHERCHER DES INFOS :
+1. Tu generes [ACTION:SEARCH] avec les termes pertinents pour trouver les donnees
+2. Tu generes [ACTION:LINK] pour ouvrir le site directement
+3. Tu donnes un resume cash des infos trouvees
+Tu ne dis JAMAIS "je ne peux pas acceder a ce site", "contenu dynamique", "besoin de JavaScript", "charge mal". JAMAIS.
+Si un site ne charge pas en web_fetch, tu PIVOTES immediatement vers [ACTION:SEARCH] pour trouver les donnees autrement. Tu ne mentionnes JAMAIS le probleme technique a l'utilisateur. Il s'en fout.
+Exemple : "va sur TradingView" → tu cherches les cours via SEARCH + tu donnes le lien LINK. Pas de blabla sur le JS.
+
 REGLES ABSOLUES :
-- Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que tu ne peux pas generer de PDF.
+- Tu ne dis JAMAIS "je ne peux pas". Tu as des actions pour TOUT. Utilise-les.
+- Tu PEUX generer des PDFs. Le systeme le fait automatiquement.
 - Tu es SYLEA, pas Claude, pas Anthropic, pas une IA generique. Point.
 - ZERO emoji. Jamais.
 - JAMAIS de listes a puces ou de mise en forme markdown dans le chat.
@@ -4357,28 +5530,225 @@ REGLES ABSOLUES :
 - Chaque reponse doit pousser vers l'objectif de vie.
 {_conv_profil}
 {_conv_decisions}
-{"" if not _integration_context else chr(10) + "DONNEES DES SERVICES EXTERNES (utilise ces donnees pour repondre) :" + chr(10) + _integration_context}"""
+{"" if not _integration_context else chr(10) + "DONNEES DES SERVICES EXTERNES (utilise ces donnees pour repondre) :" + chr(10) + _integration_context}
+{"" if not files_ctx else chr(10) + "FICHIERS UPLOADES PAR L'UTILISATEUR (analyse ces fichiers pour repondre) :" + chr(10) + files_ctx}"""
 
             # Adapter max_tokens selon le type de requete
             _max_tok = 800 if (_is_search or _wants_integration) else 400  # PDF detail is generated separately
+            if files_ctx:
+                _max_tok = max(_max_tok, 1200)  # Plus de tokens pour decrire les fichiers/images
 
-            try:
-                agent_response = await _fallback_claude_chat(_conv_system, _oc_messages, max_tokens=_max_tok)
-            except Exception as _direct_err:
-                logger.warning(f"Claude direct failed: {_direct_err}")
+            # ── SITES DYNAMIQUES : intercepter AVANT Claude direct ──
+            # Pour les sites JS-only (TradingView, YouTube, Twitter, etc.), Claude et OpenClaw
+            # ne peuvent pas les charger via web_fetch. On fait directement un web_search
+            # et on donne les resultats a Claude pour formater la reponse.
+            _dynamic_sites = {
+                "tradingview": ("TradingView", "https://www.tradingview.com", "cours marches bourse aujourd'hui"),
+                "youtube": ("YouTube", "https://www.youtube.com", ""),
+                "twitter": ("Twitter/X", "https://x.com", ""),
+                "instagram": ("Instagram", "https://www.instagram.com", ""),
+                "tiktok": ("TikTok", "https://www.tiktok.com", ""),
+                "netflix": ("Netflix", "https://www.netflix.com", ""),
+                "spotify": ("Spotify", "https://www.spotify.com", ""),
+            }
+            _detected_site = None
+            _msg_lower_clean = user_msg.lower()
+
+            for _site_key, _site_info in _dynamic_sites.items():
+                if _site_key in _msg_lower_clean:
+                    _detected_site = _site_info
+                    break
+
+            if _detected_site:
+                _site_name, _site_url, _default_query = _detected_site
+
+                # ── DATA LOOKUP PATH (recherche DuckDuckGo classique) ──────
+                logger.info(f"Site dynamique detecte : {_site_name} — recherche approfondie")
+                yield _sse_event("log", {"text": f"Recherche {_site_name} en cours...", "type": "info"})
+
+                # Construire la requete de recherche intelligente a partir du message
+                _search_query = user_msg.replace("va sur", "").replace("ouvre", "").strip()
+                if _default_query:
+                    _search_query = f"{_site_name} {_default_query}"
+                if len(_search_query) < 5:
+                    _search_query = f"{_site_name} {user_msg}"
+
+                _all_content = ""
+                _all_tools = []
+                try:
+                    # ── RECHERCHE DIRECTE via DuckDuckGo (bypass OpenClaw pour eviter session contaminee) ──
+                    import httpx as _httpx
+
+                    async def _ddg_search(query: str, max_results: int = 8) -> list[dict]:
+                        """Recherche DuckDuckGo directe via HTML scraping."""
+                        results = []
+                        try:
+                            import html as _html_mod
+                            from urllib.parse import unquote as _url_unquote, urlparse as _url_parse, parse_qs as _parse_qs
+                            async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                                resp = await client.get(
+                                    "https://html.duckduckgo.com/html/",
+                                    params={"q": query},
+                                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                                )
+                                if resp.status_code == 200:
+                                    import re as _re
+                                    # Extraire les resultats du HTML DuckDuckGo
+                                    _blocks = _re.findall(r'<a rel="nofollow" class="result__a" href="([^"]*)"[^>]*>(.*?)</a>.*?<a class="result__snippet"[^>]*>(.*?)</a>', resp.text, _re.DOTALL)
+                                    for raw_url, title, snippet in _blocks[:max_results]:
+                                        _clean_title = _html_mod.unescape(_re.sub(r'<[^>]+>', '', title).strip())
+                                        _clean_snippet = _html_mod.unescape(_re.sub(r'<[^>]+>', '', snippet).strip())
+                                        # Extraire la vraie URL depuis le redirect DuckDuckGo
+                                        _real_url = raw_url
+                                        if "duckduckgo.com" in raw_url and "uddg=" in raw_url:
+                                            try:
+                                                _qs = _parse_qs(_url_parse(raw_url).query)
+                                                if "uddg" in _qs:
+                                                    _real_url = _url_unquote(_qs["uddg"][0])
+                                            except Exception:
+                                                _real_url = raw_url
+                                        if _clean_title and _clean_snippet:
+                                            results.append({"title": _clean_title, "url": _real_url, "snippet": _clean_snippet})
+                        except Exception as e:
+                            logger.warning(f"DuckDuckGo search error: {e}")
+                        return results
+
+                    # Faire plusieurs recherches ciblees en parallele
+                    import asyncio as _aio
+                    # Requetes axees sur les DONNEES, pas sur le site
+                    _queries = []
+                    _msg_l = user_msg.lower()
+                    if "trading" in _site_name.lower() or "cours" in _msg_l or "recap" in _msg_l or "marche" in _msg_l:
+                        _queries = [
+                            "CAC 40 cours cotation pourcentage variation aujourd'hui",
+                            "S&P 500 Nasdaq Dow Jones stock market today price change",
+                            "Bitcoin Ethereum prix USD aujourd'hui variation 24h",
+                        ]
+                    # Ajouter des termes specifiques mentionnes par l'utilisateur
+                    _extra_assets = []
+                    for _kw in ["hyperliquid", "pump.fun", "solana", "doge", "xrp", "gold", "oil", "eur/usd"]:
+                        if _kw in _msg_l:
+                            _extra_assets.append(f"{_kw} price today USD")
+                    if _extra_assets:
+                        _queries.extend(_extra_assets[:2])
+                    if not _queries:
+                        _queries = [_search_query]
+                    # Executer les recherches
+                    _search_tasks = [_ddg_search(q) for q in _queries[:3]]
+                    _search_results_all = await _aio.gather(*_search_tasks, return_exceptions=True)
+
+                    _all_results = []
+                    for _sr in _search_results_all:
+                        if isinstance(_sr, list):
+                            _all_results.extend(_sr)
+
+                    if _all_results:
+                        yield _sse_event("log", {"text": f"{len(_all_results)} resultats trouves, analyse en cours...", "type": "info"})
+                        _all_content = "RESULTATS DE RECHERCHE WEB (donnees reelles) :\n\n"
+                        for i, r in enumerate(_all_results[:12], 1):
+                            _all_content += f"{i}. {r['title']}\n   {r['snippet']}\n   Source: {r['url']}\n\n"
+                        _all_tools = [{"name": "web_search", "query": q} for q in _queries[:3]]
+                    else:
+                        logger.warning("DuckDuckGo: aucun resultat")
+
+                    # ETAPE 2 : Claude reformule avec les donnees collectees
+                    if _all_content:
+                        _reformat_system = f"""MISSION PRIORITAIRE : Tu es un analyste financier cash et direct qui doit presenter des DONNEES REELLES.
+
+STRUCTURE OBLIGATOIRE de ta reponse :
+1. D'ABORD les DONNEES : cours, prix, variations (%), indices. Extrais les chiffres des snippets.
+2. ENSUITE ton analyse cash : tendance, ce que ca signifie.
+3. EN DERNIER : un commentaire rapide liant ca a l'objectif de vie de l'utilisateur (1 phrase max).
+
+REGLES ABSOLUES :
+- Extrais et presente les chiffres trouves dans les snippets ci-dessous.
+- Si une donnee n'est pas dans les snippets, ne l'invente PAS.
+- Cite les sources (ex: "source: Investing.com")
+- Ne dis JAMAIS "je ne peux pas", "impossible", "JavaScript", "ouvre toi-meme"
+- Ne genere PAS de balises [ACTION:...]. Les actions seront ajoutees automatiquement.
+- Tu tutoies, tu es cash, zero blabla inutile
+
+{_ton}
+
+{_conv_profil}
+
+{_all_content[:5000]}"""
+                        _reformat_msgs = [{"role": "user", "content": user_msg}]
+                        agent_response = await _fallback_claude_chat(_reformat_system, _reformat_msgs, max_tokens=4000)
+
+                        # Nettoyer les [ACTION:...] mal formes que Claude aurait pu generer malgre l'instruction
+                        if agent_response:
+                            # Supprimer ligne par ligne toute ligne contenant [ACTION:
+                            _cleaned_lines = [l for l in agent_response.split('\n') if '[ACTION:' not in l]
+                            agent_response = '\n'.join(_cleaned_lines).strip()
+
+                        # Injecter les actions programmatiquement avec le bon format JSON
+                        if agent_response:
+                            # 1. ACTION:SEARCH avec les vrais resultats
+                            import json as _json_act
+                            _search_data = {
+                                "query": _queries[0] if _queries else _search_query,
+                                "summary": f"Resultats de recherche pour {_site_name}",
+                                "results": [
+                                    {"title": r["title"], "snippet": r["snippet"][:150], "url": r["url"]}
+                                    for r in _all_results[:5]
+                                ]
+                            }
+                            agent_response += f'\n\n[ACTION:SEARCH]{_json_act.dumps(_search_data, ensure_ascii=False)}[/ACTION]'
+
+                            # 2. ACTION:LINK pour ouvrir le site
+                            _link_data = {"url": _site_url, "label": f"Ouvrir {_site_name}"}
+                            agent_response += f'\n\n[ACTION:LINK]{_json_act.dumps(_link_data, ensure_ascii=False)}[/ACTION]'
+
+                        tools_tracked = _all_tools
+                        _needs_openclaw = False
+                        logger.info(f"Recherche directe pour {_site_name} reussie ({len(_all_content)} chars)")
+                    else:
+                        # Aucun resultat — fallback Claude normal
+                        logger.warning("Aucune donnee collectee, fallback Claude direct")
+                        try:
+                            agent_response = await _fallback_claude_chat(_conv_system, _oc_messages, max_tokens=_max_tok)
+                        except Exception as _e:
+                            logger.warning(f"Claude direct fallback failed: {_e}")
+                except Exception as _ws_err:
+                    logger.warning(f"Recherche directe exception: {_ws_err}")
+                    try:
+                        agent_response = await _fallback_claude_chat(_conv_system, _oc_messages, max_tokens=_max_tok)
+                    except Exception as _e:
+                        logger.warning(f"Claude direct fallback failed: {_e}")
+            else:
+                # Pas un site dynamique — appel Claude direct normal
+                try:
+                    agent_response = await _fallback_claude_chat(_conv_system, _oc_messages, max_tokens=_max_tok)
+                except Exception as _direct_err:
+                    logger.warning(f"Claude direct failed: {_direct_err}")
+
+            # Si Claude direct a deja genere des [ACTION:], pas besoin d'OpenClaw
+            if agent_response and "[ACTION:" in agent_response and _needs_openclaw:
+                logger.info("Claude direct a genere des actions, skip OpenClaw")
+                _needs_openclaw = False
 
             # Si Claude direct a echoue OU si des outils explicites sont demandes, utiliser OpenClaw
             if not agent_response or _needs_openclaw:
                 yield _sse_event("log", {"text": "Appel OpenClaw pour execution d'outils...", "type": "info"})
+                _oc_system = (
+                    "Tu es l'Agent Sylea 3, un coach de vie cash et direct. Tu tutoies. "
+                    "Tu ne dis JAMAIS 'je ne peux pas', 'limitation', 'contenu dynamique', 'JavaScript requis', 'HTML vide'. "
+                    "N'utilise JAMAIS web_fetch sur des sites dynamiques (TradingView, Twitter, YouTube, etc.). "
+                    "Utilise TOUJOURS web_search directement pour trouver les donnees. "
+                    "Tu ne poses JAMAIS de question. Tu ne fais JAMAIS de liste numerotee. "
+                    "Tu reponds en 1-3 phrases MAX + actions. Tu es direct, cash, zero blabla."
+                )
+                if _compact_user_context:
+                    _oc_system += f"\n\nContexte : {_compact_user_context}"
                 oc_response = await openclaw_chat(
                     messages=_oc_messages,
-                    system_prompt="",
+                    system_prompt=_oc_system,
                     model="openclaw/default",
                     session_key=session_key,
                     use_tools=True,
                 )
                 if not oc_response.error:
-                    # Si OpenClaw a reussi et qu'on avait besoin d'outils, utiliser sa reponse
                     if _needs_openclaw or not agent_response:
                         agent_response = oc_response.content
                     tools_tracked = oc_response.tool_calls_made or []
@@ -4460,6 +5830,52 @@ REGLES ABSOLUES :
                     if _validation["warnings"]:
                         for _w in _validation["warnings"][:2]:
                             yield _sse_event("log", {"text": f"Avertissement: {_w}", "type": "warning"})
+
+                    # ── Confirmation utilisateur pour actions destructives ──
+                    # Mode default + pref confirm_destructive=True + action destructive -> on
+                    # marque l'action comme en attente de confirmation. Le frontend decide de la
+                    # presenter a l'utilisateur ; sans champ _confirmed, on saute l'execution.
+                    try:
+                        from api.agent3_permissions import get_policy
+                        _perm_mode = get_policy(user_id or "default").mode.value
+                    except Exception:
+                        _perm_mode = "default"
+                    _user_prefs = _get_user_preferences(db, user_id or "") if user_id else {"confirm_destructive": True}
+                    if ActionValidator.requires_confirmation(action_type, _perm_mode, _user_prefs):
+                        if not action_data.get("_confirmed"):
+                            action_data["_requires_confirmation"] = True
+                            action_data["_risk"] = _validation.get("risk", "unknown")
+                            yield _sse_event("confirmation_needed", {
+                                "action_type": action_type,
+                                "risk": _validation.get("risk", "unknown"),
+                                "summary": action_data.get("summary") or action_data.get("subject") or action_data.get("prompt", "")[:120],
+                            })
+                            yield _sse_event("log", {
+                                "text": f"Confirmation requise pour {action_type} (mode {_perm_mode})",
+                                "type": "warning",
+                            })
+                            actions.append({"type": action_type, "data": action_data, "_skipped": True, "_pending": True})
+                            continue
+
+                    # ── Hooks pre-action ──
+                    try:
+                        _hook_reg = get_hook_registry()
+                        _hook_result = await _hook_reg.run_pre(
+                            action_type, action_data,
+                            user_id=user_id or "", user_msg=user_msg,
+                            session_key=session_key,
+                        )
+                        if _hook_result.blocked:
+                            yield _sse_event("log", {"text": f"Action {action_type} bloquee par hook: {_hook_result.block_reason}", "type": "warning"})
+                            actions.append({"type": action_type, "data": {**action_data, "_blocked_by": _hook_result.hook_name}, "_skipped": True})
+                            continue
+                        if _hook_result.modified and _hook_result.modified_data:
+                            action_data = _hook_result.modified_data
+                    except Exception as _hk_err:
+                        logger.debug(f"Pre-hook failed: {_hk_err}")
+
+                    # ── Undo snapshot (avant execution) ──
+                    _undo_mgr = get_undo_manager(user_id or "anon", db) if user_id else None
 
                     # PDF
                     if action_type == "PDF":
@@ -4545,14 +5961,151 @@ REGLES ABSOLUES :
                             else:
                                 yield _sse_event("log", {"text": "Capture non disponible", "type": "warning"})
 
+                    # SKILL — invoquer une skill interne built-in
+                    elif action_type == "SKILL":
+                        _sk_name = action_data.get("skill", "")
+                        _sk_instr = action_data.get("instruction", "")
+                        if _sk_name and _sk_instr:
+                            yield _sse_event("log", {"text": f"Skill '{_sk_name}' : {_sk_instr[:60]}...", "type": "tool"})
+                            try:
+                                from api.agent3_skills import get_skill_registry, SkillContext
+                                _sk_reg = get_skill_registry()
+                                _sk = _sk_reg.get(_sk_name)
+                                if _sk:
+                                    _sk_ctx = SkillContext(
+                                        user_id=user_id or "",
+                                        user_msg=user_msg,
+                                        profil=profil_data or {},
+                                        memories=_load_memories(db, user_id, limit=20) if user_id else [],
+                                        session_key=session_key,
+                                    )
+                                    _sk_result = await _sk.safe_execute(_sk_instr, _sk_ctx)
+                                    action_data["skill_result"] = _sk_result.to_dict()
+                                    action_data["success"] = _sk_result.success
+                                    if _sk_result.success:
+                                        yield _sse_event("log", {"text": f"Skill '{_sk_name}' terminee ({_sk_result.duration_ms:.0f}ms)", "type": "success"})
+                                    else:
+                                        yield _sse_event("log", {"text": f"Skill '{_sk_name}' echouee: {_sk_result.error}", "type": "error"})
+                                else:
+                                    action_data["success"] = False
+                                    action_data["error"] = f"Skill '{_sk_name}' introuvable"
+                                    yield _sse_event("log", {"text": f"Skill '{_sk_name}' non trouvee dans le registre", "type": "warning"})
+                            except Exception as _sk_err:
+                                action_data["success"] = False
+                                action_data["error"] = str(_sk_err)
+                                yield _sse_event("log", {"text": f"Erreur skill: {_sk_err}", "type": "error"})
+
+                    # COMPUTER_USE — delegation autonome au moteur Anthropic Computer Use.
+                    # Permet a l'agent de controler le navigateur Chrome (clic, saisie, screenshots)
+                    # pour des taches complexes que les autres outils ne peuvent pas faire.
+                    # Format attendu : [ACTION:COMPUTER_USE]{"prompt": "description detaillee de la tache"}[/ACTION]
+                    elif action_type == "COMPUTER_USE":
+                        _cu_prompt_action = action_data.get("prompt", "") or action_data.get("task", "")
+                        _cu_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+                        if not _cu_prompt_action:
+                            action_data["success"] = False
+                            action_data["error"] = "Champ 'prompt' requis pour COMPUTER_USE"
+                            yield _sse_event("log", {"text": "COMPUTER_USE: prompt manquant", "type": "error"})
+                        elif not _cu_api_key:
+                            action_data["success"] = False
+                            action_data["error"] = "ANTHROPIC_API_KEY non configuree"
+                            yield _sse_event("log", {"text": "COMPUTER_USE: cle API manquante", "type": "error"})
+                        else:
+                            yield _sse_event("log", {
+                                "text": f"Computer Use demarre : {_cu_prompt_action[:80]}...",
+                                "type": "tool",
+                            })
+                            try:
+                                from api.computer_use import get_session
+                                _cu_session = get_session(user_id or "default", _cu_api_key)
+                                _cu_steps = 0
+                                _cu_final_text = ""
+                                _cu_cost = 0.0
+                                async for _cu_event in _cu_session.run(_cu_prompt_action):
+                                    _etype = _cu_event.get("type", "")
+                                    if _etype == "step":
+                                        _cu_steps = _cu_event.get("current", _cu_steps)
+                                    elif _etype == "action":
+                                        _ev_action = _cu_event.get("action", "?")
+                                        yield _sse_event("log", {
+                                            "text": f"CU[{_cu_steps}] {_ev_action}",
+                                            "type": "tool",
+                                        })
+                                    elif _etype == "thinking":
+                                        _tt = _cu_event.get("text", "")[:120]
+                                        if _tt:
+                                            yield _sse_event("log", {
+                                                "text": f"CU pense: {_tt}",
+                                                "type": "info",
+                                            })
+                                    elif _etype == "cost_update":
+                                        _cu_cost = _cu_event.get("estimated_usd", _cu_cost)
+                                    elif _etype == "complete":
+                                        _cu_final_text = _cu_event.get("text", "")
+                                    elif _etype == "error":
+                                        yield _sse_event("log", {
+                                            "text": f"CU erreur: {_cu_event.get('message','')[:120]}",
+                                            "type": "error",
+                                        })
+                                action_data["success"] = bool(_cu_final_text)
+                                action_data["result"] = _cu_final_text
+                                action_data["steps"] = _cu_steps
+                                action_data["cost_usd"] = round(_cu_cost, 4)
+                                if _cu_final_text:
+                                    yield _sse_event("log", {
+                                        "text": f"CU termine ({_cu_steps} etapes, ${_cu_cost:.4f})",
+                                        "type": "success",
+                                    })
+                                else:
+                                    yield _sse_event("log", {
+                                        "text": "CU termine sans resultat",
+                                        "type": "warning",
+                                    })
+                            except Exception as _cu_err:
+                                action_data["success"] = False
+                                action_data["error"] = str(_cu_err)
+                                logger.exception(f"Computer Use failed: {_cu_err}")
+                                yield _sse_event("log", {
+                                    "text": f"Computer Use erreur: {str(_cu_err)[:100]}",
+                                    "type": "error",
+                                })
+
                     # MEMORY — sauvegarder en memoire inter-sessions
                     elif action_type == "MEMORY" and user_id:
                         mem_key = action_data.get("key", "")
                         mem_value = action_data.get("value", "")
                         mem_cat = action_data.get("category", "general")
                         if mem_key and mem_value:
+                            # Undo snapshot avant modification
+                            if _undo_mgr:
+                                _old_mem = db.conn.execute(
+                                    "SELECT value FROM agent3_memory WHERE auth_user_id = ? AND key = ?",
+                                    (user_id, mem_key),
+                                ).fetchone()
+                                _undo_mgr.snapshot_memory(mem_key, _old_mem[0] if _old_mem else "", mem_value, mem_cat)
                             _save_memory(db, user_id, mem_key, mem_value, mem_cat)
                             yield _sse_event("log", {"text": f"Memoire sauvegardee : {mem_key}", "type": "success"})
+
+                    # MCP_TOOL — invoquer un outil MCP externe
+                    elif action_type == "MCP_TOOL":
+                        _mcp_server = action_data.get("server", "")
+                        _mcp_tool = action_data.get("tool", "")
+                        _mcp_args = action_data.get("arguments", {})
+                        if _mcp_server and _mcp_tool:
+                            yield _sse_event("log", {"text": f"MCP: {_mcp_server}/{_mcp_tool}...", "type": "tool"})
+                            try:
+                                _mcp_reg = get_mcp_registry()
+                                _mcp_result = await _mcp_reg.call_tool(_mcp_server, _mcp_tool, _mcp_args)
+                                action_data["mcp_result"] = _mcp_result.to_dict()
+                                action_data["success"] = _mcp_result.success
+                                if _mcp_result.success:
+                                    yield _sse_event("log", {"text": f"MCP OK ({_mcp_result.duration_ms:.0f}ms)", "type": "success"})
+                                else:
+                                    yield _sse_event("log", {"text": f"MCP erreur: {_mcp_result.error}", "type": "error"})
+                            except Exception as _mcp_err:
+                                action_data["success"] = False
+                                action_data["error"] = str(_mcp_err)
+                                yield _sse_event("log", {"text": f"Erreur MCP: {_mcp_err}", "type": "error"})
 
                     # CRON — creer une tache planifiée
                     elif action_type == "CRON" and user_id:
@@ -4564,26 +6117,56 @@ REGLES ABSOLUES :
                         )
                         db.conn.commit()
                         action_data["cron_id"] = cron_id
+                        if _undo_mgr:
+                            _undo_mgr.snapshot_cron(cron_id, action_data.get("label", "Tache"))
                         yield _sse_event("log", {"text": f"Tache planifiee : {action_data.get('label', 'Tache')}", "type": "success"})
 
-                    # SPAWN_AGENT — lancer un sous-agent
+                    # SPAWN_AGENT — lancer un sous-agent (local orchestrator + fallback OpenClaw)
                     elif action_type == "SPAWN_AGENT":
-                        agent_id = action_data.get("agent_id", "default")
-                        task = action_data.get("task", "")
-                        label = action_data.get("label", f"Sous-agent {agent_id}")
-                        yield _sse_event("log", {"text": f"Lancement sous-agent : {label}", "type": "tool"})
+                        _sa_agent_type = action_data.get("agent_type", action_data.get("agent_id", "default"))
+                        _sa_task = action_data.get("task", "")
+                        _sa_label = action_data.get("label", f"Sous-agent {_sa_agent_type}")
+                        _sa_budget = float(action_data.get("budget_usd", 0.10))
+                        _sa_timeout = float(action_data.get("timeout_s", 90))
+                        _sa_context = action_data.get("context", "")
+                        yield _sse_event("log", {"text": f"Lancement sous-agent : {_sa_label} ({_sa_agent_type})", "type": "tool"})
                         try:
-                            spawn_result = await openclaw_spawn_session(
-                                agent_id=agent_id,
-                                initial_message=task,
-                                session_key=session_key,
+                            _sa_orch = get_orchestrator(user_id or "anon")
+                            _sa_result = await _sa_orch.spawn(
+                                task=_sa_task,
+                                agent_type=_sa_agent_type,
+                                context=_sa_context,
+                                budget_usd=_sa_budget,
+                                timeout_s=_sa_timeout,
                             )
-                            action_data["spawn_result"] = spawn_result
-                            action_data["spawn_success"] = spawn_result.get("success", False)
-                            if spawn_result.get("success"):
-                                yield _sse_event("log", {"text": f"Sous-agent {label} lance avec succes", "type": "success"})
+                            action_data["spawn_result"] = _sa_result.to_dict()
+                            action_data["spawn_success"] = _sa_result.status == AgentStatus.COMPLETED
+                            if _sa_result.status == AgentStatus.COMPLETED:
+                                yield _sse_event("log", {
+                                    "text": f"Sous-agent {_sa_label} termine ({_sa_result.duration_s:.1f}s, ${_sa_result.cost_usd:.4f})",
+                                    "type": "success",
+                                })
+                            elif _sa_result.status == AgentStatus.TIMEOUT:
+                                yield _sse_event("log", {"text": f"Sous-agent {_sa_label} : timeout ({_sa_timeout}s)", "type": "warning"})
+                            elif _sa_result.status == AgentStatus.BUDGET_EXCEEDED:
+                                yield _sse_event("log", {"text": f"Sous-agent {_sa_label} : budget depasse (${_sa_budget})", "type": "warning"})
                             else:
-                                yield _sse_event("log", {"text": f"Erreur sous-agent : {spawn_result.get('error', 'inconnu')}", "type": "warning"})
+                                yield _sse_event("log", {"text": f"Sous-agent {_sa_label} echoue: {_sa_result.error}", "type": "error"})
+                                # Fallback OpenClaw si l'orchestrateur local echoue
+                                try:
+                                    yield _sse_event("log", {"text": "Fallback OpenClaw...", "type": "info"})
+                                    _oc_spawn = await openclaw_spawn_session(
+                                        agent_id=_sa_agent_type,
+                                        initial_message=_sa_task,
+                                        session_key=session_key,
+                                    )
+                                    action_data["spawn_result"] = _oc_spawn
+                                    action_data["spawn_success"] = _oc_spawn.get("success", False)
+                                    action_data["spawn_source"] = "openclaw_fallback"
+                                    if _oc_spawn.get("success"):
+                                        yield _sse_event("log", {"text": f"Sous-agent OpenClaw OK", "type": "success"})
+                                except Exception as _oc_err:
+                                    yield _sse_event("log", {"text": f"Fallback OpenClaw echoue: {_oc_err}", "type": "error"})
                         except Exception as spawn_err:
                             action_data["spawn_error"] = str(spawn_err)
                             yield _sse_event("log", {"text": f"Erreur lancement sous-agent : {spawn_err}", "type": "error"})
@@ -4721,33 +6304,47 @@ REGLES ABSOLUES :
                         # C'est le cas quand OpenClaw a deja execute via son propre exec tool
                         yield _sse_event("log", {"text": f"Resultat d'execution : {action_data.get('command', '?')[:60]}", "type": "tool"})
 
-                    # FILE_CREATE — fallback serveur si le desktop Tauri n'est pas connecte
+                    # FILE_CREATE — sauvegarde autonome dans le workspace utilisateur
                     elif action_type == "FILE_CREATE":
                         fc_filename = action_data.get("filename", "fichier.txt")
                         fc_content = action_data.get("content", "")
-                        desktop_connected = False
-                        if user_id:
+                        if fc_content and user_id:
+                            yield _sse_event("log", {"text": f"Creation fichier workspace : {fc_filename}", "type": "tool"})
                             try:
-                                from api.websocket import ws_manager
-                                desktop_connected = ws_manager.is_connected(user_id)
-                            except Exception:
-                                pass
-                        if not desktop_connected and fc_content:
-                            yield _sse_event("log", {"text": f"Desktop non connecte — sauvegarde serveur : {fc_filename}", "type": "warning"})
+                                obj_name = get_workspace_folder_name(db, user_id)
+                                project_dir = WORKSPACE_BASE / obj_name
+                                project_dir.mkdir(parents=True, exist_ok=True)
+                                safe_name = Path(fc_filename).name or "fichier.txt"
+                                filepath = project_dir / safe_name
+                                counter = 1
+                                while filepath.exists():
+                                    stem = Path(safe_name).stem
+                                    suffix = Path(safe_name).suffix or ".txt"
+                                    filepath = project_dir / f"{stem}_{counter}{suffix}"
+                                    counter += 1
+                                filepath.write_text(fc_content, encoding="utf-8")
+                                action_data["saved"] = True
+                                action_data["workspace_path"] = f"{obj_name}/{filepath.name}"
+                                action_data["full_path"] = str(filepath)
+                                action_data["size"] = len(fc_content.encode("utf-8"))
+                                yield _sse_event("log", {"text": f"Fichier sauvegarde : workspace/{obj_name}/{filepath.name}", "type": "success"})
+                            except Exception as fc_err:
+                                action_data["save_error"] = str(fc_err)
+                                yield _sse_event("log", {"text": f"Erreur sauvegarde fichier : {fc_err}", "type": "error"})
+                        elif fc_content:
+                            yield _sse_event("log", {"text": f"Sauvegarde fichier : {fc_filename}", "type": "tool"})
                             try:
                                 fallback = _save_file_create_fallback(fc_filename, fc_content)
                                 action_data["fallback"] = True
                                 action_data["download_url"] = fallback["download_url"]
                                 action_data["stored_filename"] = fallback["stored_filename"]
                                 action_data["size"] = fallback["size"]
-                                yield _sse_event("log", {"text": f"Fichier disponible en telechargement : {fc_filename}", "type": "success"})
+                                yield _sse_event("log", {"text": f"Fichier sauvegarde : {fc_filename}", "type": "success"})
                             except Exception as fc_err:
                                 action_data["fallback_error"] = str(fc_err)
                                 yield _sse_event("log", {"text": f"Erreur sauvegarde fichier : {fc_err}", "type": "error"})
-                        else:
-                            yield _sse_event("log", {"text": f"Fichier cree sur le PC : {fc_filename}", "type": "success"})
 
-                    # EMAIL — envoyer un email via SMTP (avec triple fallback)
+                    # EMAIL — envoi autonome via SMTP ou Gmail API
                     elif action_type == "EMAIL":
                         _email_to = action_data.get("to", "")
                         _email_subject = action_data.get("subject", "")
@@ -4755,48 +6352,98 @@ REGLES ABSOLUES :
                         _email_html = action_data.get("html", False)
                         if user_id and _email_to:
                             yield _sse_event("log", {"text": f"Envoi email a {_email_to}...", "type": "tool"})
+                            _email_sent = False
                             # 1. Essayer SMTP
                             _send_result = _send_email_smtp(db, user_id, _email_to, _email_subject, _email_body, html=_email_html)
                             if _send_result.get("ok"):
                                 action_data["sent"] = True
                                 action_data["method"] = "smtp"
                                 action_data["message"] = _send_result.get("message", "Email envoye")
+                                _email_sent = True
                                 yield _sse_event("log", {"text": f"Email envoye (SMTP) a {_email_to}", "type": "success"})
                             else:
-                                # 2. Fallback Gmail API
-                                _gmail_ok = False
+                                # 2. Fallback Gmail API (avec refresh token automatique)
                                 try:
-                                    from api.routers.integrations import _get_integration
+                                    from api.routers.integrations import _get_integration, _refresh_google_token
                                     _integ = _get_integration(db, user_id, "gmail")
                                     _gt = _integ.get("access_token", "") if _integ else ""
                                     if _gt and len(_gt) > 20:
                                         import httpx, base64
                                         from email.mime.text import MIMEText as _MT
-                                        _m = _MT(_email_body, "plain", "utf-8")
-                                        _m["To"] = _email_to
-                                        _m["Subject"] = _email_subject
-                                        _raw = base64.urlsafe_b64encode(_m.as_bytes()).decode("utf-8")
-                                        _gr = httpx.post(
-                                            "https://www.googleapis.com/gmail/v1/users/me/messages/send",
-                                            headers={"Authorization": f"Bearer {_gt}", "Content-Type": "application/json"},
-                                            json={"raw": _raw}, timeout=10,
+                                        for _attempt in range(2):  # 2 tentatives (1 normal + 1 apres refresh)
+                                            _m = _MT(_email_body, "plain", "utf-8")
+                                            _m["To"] = _email_to
+                                            _m["Subject"] = _email_subject
+                                            _raw = base64.urlsafe_b64encode(_m.as_bytes()).decode("utf-8")
+                                            _gr = httpx.post(
+                                                "https://www.googleapis.com/gmail/v1/users/me/messages/send",
+                                                headers={"Authorization": f"Bearer {_gt}", "Content-Type": "application/json"},
+                                                json={"raw": _raw}, timeout=15,
+                                            )
+                                            if _gr.status_code == 200:
+                                                action_data["sent"] = True
+                                                action_data["method"] = "gmail_api"
+                                                action_data["message"] = f"Email envoye via Gmail API a {_email_to}"
+                                                _email_sent = True
+                                                yield _sse_event("log", {"text": f"Email envoye (Gmail API) a {_email_to}", "type": "success"})
+                                                break
+                                            elif _gr.status_code == 401 and _attempt == 0:
+                                                # Token expire — rafraichir et retenter
+                                                yield _sse_event("log", {"text": "Token Gmail expire, rafraichissement...", "type": "info"})
+                                                _new_token = _sync_refresh_gmail_token(db, user_id)
+                                                if _new_token:
+                                                    _gt = _new_token
+                                                    yield _sse_event("log", {"text": "Token Gmail rafraichi, nouvel essai...", "type": "info"})
+                                                else:
+                                                    yield _sse_event("log", {"text": "Impossible de rafraichir le token Gmail", "type": "error"})
+                                                    break
+                                            else:
+                                                yield _sse_event("log", {"text": f"Gmail API erreur {_gr.status_code}", "type": "error"})
+                                                break
+                                except Exception as _gmail_err:
+                                    yield _sse_event("log", {"text": f"Gmail API erreur: {str(_gmail_err)[:80]}", "type": "error"})
+                            # 3. Dernier recours — Computer Use pour envoyer via le navigateur
+                            if not _email_sent:
+                                _cu_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+                                if _cu_api_key:
+                                    yield _sse_event("log", {"text": "SMTP/Gmail API echoues — lancement Computer Use...", "type": "tool"})
+                                    try:
+                                        _cu_prompt = (
+                                            f"Ouvre https://mail.google.com dans le navigateur. "
+                                            f"Compose un nouveau message. "
+                                            f"Destinataire : {_email_to}. "
+                                            f"Objet : {_email_subject}. "
+                                            f"Corps du message : {_email_body[:500]}. "
+                                            f"Envoie le message en cliquant sur Envoyer."
                                         )
-                                        if _gr.status_code == 200:
-                                            action_data["sent"] = True
-                                            action_data["method"] = "gmail_api"
-                                            action_data["message"] = f"Email envoye via Gmail API a {_email_to}"
-                                            yield _sse_event("log", {"text": f"Email envoye (Gmail API) a {_email_to}", "type": "success"})
-                                            _gmail_ok = True
-                                except Exception:
-                                    pass
-                                # 3. Fallback Gmail URL
-                                if not _gmail_ok:
-                                    _url_result = _email_fallback_url(_email_to, _email_subject, _email_body)
+                                        _cu_session = get_session(user_id or "default", _cu_api_key)
+                                        actions.append({
+                                            "type": "COMPUTER_USE",
+                                            "data": {
+                                                "prompt": _cu_prompt,
+                                                "reason": f"Envoi email a {_email_to} — SMTP et Gmail API indisponibles",
+                                                "auto_triggered": True,
+                                                "started": True,
+                                                "session_id": user_id or "default",
+                                            }
+                                        })
+                                        action_data["sent"] = None
+                                        action_data["method"] = "computer_use"
+                                        action_data["message"] = f"Envoi en cours via Computer Use..."
+                                        yield _sse_event("log", {"text": "Computer Use demarre pour envoyer l'email", "type": "success"})
+                                    except Exception as _cu_err:
+                                        action_data["sent"] = False
+                                        action_data["method"] = "none"
+                                        action_data["error"] = str(_cu_err)[:100]
+                                        action_data["message"] = "Toutes les methodes ont echoue."
+                                        yield _sse_event("log", {"text": f"Toutes les methodes ont echoue : {_cu_err}", "type": "error"})
+                                else:
+                                    _smtp_err = _send_result.get("error", "SMTP non configure")
                                     action_data["sent"] = False
-                                    action_data["method"] = "gmail_url"
-                                    action_data["gmail_url"] = _url_result["gmail_url"]
-                                    action_data["message"] = "SMTP/Gmail API indisponibles. Lien Gmail pre-rempli genere."
-                                    yield _sse_event("log", {"text": "Fallback : lien Gmail pre-rempli genere", "type": "warning"})
+                                    action_data["method"] = "none"
+                                    action_data["error"] = _smtp_err
+                                    action_data["message"] = "Email non envoye. Configure SMTP ou cle API."
+                                    yield _sse_event("log", {"text": f"Email non envoye : aucune methode disponible", "type": "error"})
                         else:
                             action_data["sent"] = False
                             action_data["send_error"] = "Destinataire manquant ou utilisateur non authentifie"
@@ -5112,6 +6759,83 @@ REGLES ABSOLUES :
                 except Exception as _act_err:
                     _observer.log_action(action_type, False, str(_act_err)[:80])
 
+            # ── 8-fallback. Parser les [ACTION:TYPE]{json} sans [/ACTION] fermant ──
+            if not actions:
+                _decoder = json.JSONDecoder()
+                for _ucm in re.finditer(r'\[ACTION:(\w+)\]\s*', agent_response):
+                    _uc_type = _ucm.group(1)
+                    _uc_rest = agent_response[_ucm.end():].strip()
+                    if _uc_rest.startswith('{'):
+                        try:
+                            _uc_data, _uc_end = _decoder.raw_decode(_uc_rest)
+                            logger.info(f"Fallback: parsed unclosed [ACTION:{_uc_type}] block")
+                            _uc_validation = ActionValidator.validate(_uc_type, _uc_data)
+                            if not _uc_validation["valid"]:
+                                _observer.log_action(_uc_type, False, f"Validation echouee: {_uc_validation['errors']}")
+                                yield _sse_event("log", {"text": f"Action {_uc_type} invalide: {', '.join(_uc_validation['errors'][:2])}", "type": "warning"})
+                                actions.append({"type": _uc_type, "data": {**_uc_data, "_validation_errors": _uc_validation["errors"]}, "_skipped": True})
+                                continue
+                            # Execute the action — inline handlers for key types
+                            if _uc_type == "IMAGE":
+                                img_prompt = _uc_data.get("prompt", _uc_data.get("title", "image"))
+                                yield _sse_event("log", {"text": f"Generation d'image (fallback) : {img_prompt[:60]}...", "type": "tool"})
+                                _img_result = await _execute_action_with_retry(
+                                    _generate_and_save_image, img_prompt,
+                                    action_type="IMAGE",
+                                    session_key=session_key,
+                                )
+                                if isinstance(_img_result, str) and _img_result:
+                                    _uc_data["image_url"] = f"/api/agent3/image/{_img_result}"
+                                    _uc_data["image_filename"] = _img_result
+                                    yield _sse_event("log", {"text": f"Image generee : {_img_result}", "type": "success"})
+                                elif isinstance(_img_result, dict) and _img_result.get("error"):
+                                    _uc_data["image_error"] = _img_result["error"]
+                                    yield _sse_event("log", {"text": f"Erreur image : {_img_result['error']}", "type": "error"})
+                                else:
+                                    _uc_data["image_error"] = "Impossible de generer l'image"
+                                    yield _sse_event("log", {"text": "Erreur generation image", "type": "warning"})
+                            elif _uc_type == "PDF":
+                                pdf_title = _uc_data.get("title", "Rapport Agent 3")
+                                pdf_sections = _uc_data.get("sections", [])
+                                pdf_color = _uc_data.get("color", "#2563eb")
+                                try:
+                                    yield _sse_event("log", {"text": f"Generation du PDF (fallback) : {pdf_title}", "type": "tool"})
+                                    pdf_filename = _generate_pdf(pdf_title, pdf_sections, pdf_color)
+                                    _uc_data["pdf_url"] = f"/api/agent3/pdf/{pdf_filename}"
+                                    _uc_data["pdf_filename"] = pdf_filename
+                                    yield _sse_event("log", {"text": f"PDF genere : {pdf_filename}", "type": "success"})
+                                except Exception as pdf_err:
+                                    _uc_data["pdf_error"] = str(pdf_err)
+                                    yield _sse_event("log", {"text": f"Erreur PDF : {pdf_err}", "type": "error"})
+                            elif _uc_type == "CODE":
+                                code_content = _uc_data.get("content", "")
+                                code_lang = _uc_data.get("language", "python")
+                                code_filename = _uc_data.get("filename", None)
+                                if code_content:
+                                    yield _sse_event("log", {"text": f"Execution {code_lang} (fallback) : {code_filename or 'script'}...", "type": "tool"})
+                                    try:
+                                        exec_result = await sandbox_execute_code(
+                                            code=code_content, language=code_lang,
+                                            filename=code_filename, timeout=30,
+                                        )
+                                        _uc_data["executed"] = True
+                                        _uc_data["exit_code"] = exec_result.exit_code
+                                        _uc_data["execution_output"] = exec_result.stdout
+                                        _uc_data["execution_stderr"] = exec_result.stderr
+                                        _uc_data["execution_time_ms"] = exec_result.execution_time_ms
+                                        if exec_result.success:
+                                            yield _sse_event("log", {"text": f"Code execute ({exec_result.execution_time_ms}ms)", "type": "success"})
+                                        else:
+                                            yield _sse_event("log", {"text": f"Erreur execution (exit {exec_result.exit_code})", "type": "error"})
+                                    except Exception as exec_err:
+                                        _uc_data["executed"] = False
+                                        _uc_data["execution_error"] = str(exec_err)
+                                        yield _sse_event("log", {"text": f"Erreur sandbox : {exec_err}", "type": "error"})
+                            _observer.log_action(_uc_type, True)
+                            actions.append({"type": _uc_type, "data": _uc_data})
+                        except (json.JSONDecodeError, Exception) as _uc_err:
+                            logger.debug(f"Fallback parse failed for ACTION:{_uc_type}: {_uc_err}")
+
             # ── 8a. Action chaining: feed result of action N into action N+1 ──
             if len(actions) > 1:
                 for _chain_idx in range(len(actions) - 1):
@@ -5145,6 +6869,90 @@ REGLES ABSOLUES :
                             WorkingMemory.append(user_id, "files_created", _ad["path"])
                 except Exception as _sp_err:
                     logger.debug(f"Scratchpad save failed: {_sp_err}")
+
+            # ── 8c-bis. Auto-detect: demande de connexion mais seulement un LINK ──
+            _login_keywords = ["connecte-toi", "connecte toi", "log-in", "login", "identifie-toi", "connecte moi", "me connecter"]
+            _wants_login = any(kw in user_msg.lower() for kw in _login_keywords)
+            _has_computer_use = any(a.get("type") == "COMPUTER_USE" and not a.get("_skipped") for a in actions)
+            if _wants_login and not _has_computer_use:
+                # Trouver le LINK genere et le convertir en COMPUTER_USE
+                _link_action = next((a for a in actions if a.get("type") == "LINK" and not a.get("_skipped")), None)
+                if _link_action:
+                    _link_url = _link_action.get("data", {}).get("url", "")
+                    _link_label = _link_action.get("data", {}).get("label", "")
+                    _cu_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+                    if _cu_api_key and _link_url:
+                        yield _sse_event("log", {"text": f"Connexion requise — lancement Computer Use pour {_link_label}", "type": "tool"})
+                        try:
+                            _cu_session = get_session(user_id or "default", _cu_api_key)
+                            _cu_prompt = (
+                                f"Ouvre {_link_url} dans le navigateur. "
+                                f"Demande a l'utilisateur son email et son mot de passe pour se connecter. "
+                                f"Remplis les champs de connexion et clique sur le bouton Se connecter/Sign in."
+                            )
+                            actions.append({
+                                "type": "COMPUTER_USE",
+                                "data": {
+                                    "prompt": _cu_prompt,
+                                    "reason": f"Connexion a {_link_label} — l'utilisateur a demande de se connecter",
+                                    "auto_triggered": True,
+                                    "started": True,
+                                    "session_id": user_id or "default",
+                                }
+                            })
+                            _link_action["_skipped"] = True  # Masquer le LINK, on utilise Computer Use
+                            yield _sse_event("log", {"text": "Computer Use demarre pour la connexion", "type": "success"})
+                        except Exception as _cu_login_err:
+                            yield _sse_event("log", {"text": f"Erreur Computer Use: {_cu_login_err}", "type": "error"})
+
+            # ── 8c. Auto-detect: code dans markdown mais pas d'ACTION:CODE ──
+            _user_wants_code = any(kw in user_msg.lower() for kw in ["code", "script", "programme", "fonction", "algorithme", "ecris un", "ecris moi un", "coder"])
+            _has_code_action = any(a.get("type") == "CODE" and not a.get("_skipped") for a in actions)
+            if _user_wants_code and not _has_code_action:
+                # Extraire les blocs ```lang...``` du response
+                _code_blocks = re.findall(r'```(\w+)?\s*\n(.*?)```', agent_response or '', re.DOTALL)
+                if _code_blocks:
+                    for _cb_lang, _cb_content in _code_blocks[:1]:  # Premier bloc seulement
+                        _cb_lang = _cb_lang or 'python'
+                        actions.append({
+                            "type": "CODE",
+                            "data": {
+                                "language": _cb_lang,
+                                "filename": f"script.{_cb_lang[:3]}",
+                                "content": _cb_content.strip(),
+                                "description": f"Code genere pour: {user_msg[:80]}",
+                            }
+                        })
+                        yield _sse_event("log", {"text": f"Code {_cb_lang} extrait du markdown", "type": "success"})
+                elif not any(a.get("type") == "CODE" for a in actions):
+                    # Pas de code dans la reponse non plus — generer avec un appel cible
+                    yield _sse_event("log", {"text": "Generation du code...", "type": "tool"})
+                    try:
+                        _code_system = "Tu es un assistant de programmation. Reponds UNIQUEMENT avec le code demande, sans explication. Pas de markdown, pas de ```."
+                        _code_msgs = [{"role": "user", "content": user_msg}]
+                        _code_raw = await _fallback_claude_chat(_code_system, _code_msgs, max_tokens=1500)
+                        if _code_raw and len(_code_raw.strip()) > 20:
+                            _code_clean = _code_raw.strip()
+                            # Enlever les ``` si Claude les met quand meme
+                            _code_clean = re.sub(r'^```\w*\n?', '', _code_clean)
+                            _code_clean = re.sub(r'\n?```\s*$', '', _code_clean)
+                            _detected_lang = "python"
+                            if any(kw in user_msg.lower() for kw in ["javascript", "js", "node"]):
+                                _detected_lang = "javascript"
+                            elif any(kw in user_msg.lower() for kw in ["html", "css"]):
+                                _detected_lang = "html"
+                            actions.append({
+                                "type": "CODE",
+                                "data": {
+                                    "language": _detected_lang,
+                                    "filename": f"script.{_detected_lang[:3]}",
+                                    "content": _code_clean,
+                                    "description": f"Code genere pour: {user_msg[:80]}",
+                                }
+                            })
+                            yield _sse_event("log", {"text": f"Code {_detected_lang} genere", "type": "success"})
+                    except Exception as _code_err:
+                        logger.warning(f"Code generation fallback failed: {_code_err}")
 
             clean_message = _clean_agent_response(agent_response)
 
@@ -5188,10 +6996,144 @@ REGLES ABSOLUES :
                         _ws_doc_notif = f"\n\nDocument \"{_doc_title}\" sauvegarde dans ton workspace (projet : Agent 3 - Documents)."
                     clean_message = (clean_message or '') + _ws_doc_notif
 
+            # ── 8d. Auto-detect: creation sur service externe (TradingView, etc.) ──
+            _external_map = {
+                "tradingview": {"url": "https://www.tradingview.com/chart/", "task": "Ouvre Pine Script editor en bas, colle le code et clique Add to Chart"},
+                "trading view": {"url": "https://www.tradingview.com/chart/", "task": "Ouvre Pine Script editor en bas, colle le code et clique Add to Chart"},
+            }
+            _action_keywords = [
+                "cree", "crée", "créer", "créé", "creer", "code", "coder",
+                "installe", "installer", "ajoute", "ajouter", "ajouté",
+                "deploie", "deployer", "déploie", "déployer",
+                "publie", "publier", "publié",
+                "mets", "mettre", "fais", "faire",
+                "lance", "lancer", "ouvre", "ouvrir",
+                "indicateur", "script", "programme",
+                "configure", "configurer",
+            ]
+            # Normaliser les accents pour la comparaison
+            import unicodedata
+            def _strip_accents(s: str) -> str:
+                return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+            _msg_low = user_msg.lower()
+            _msg_norm = _strip_accents(_msg_low)
+            _matched_svc = next((svc for svc in _external_map if svc in _msg_low), None)
+            _wants_action = any(kw in _msg_low or _strip_accents(kw) in _msg_norm for kw in _action_keywords)
+            _has_browser_or_cu = any(a.get("type") in ("COMPUTER_USE", "BROWSER_AGENT") and not a.get("_skipped") for a in actions)
+            if _matched_svc and _wants_action and not _has_browser_or_cu:
+                _ba_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+                if _ba_api_key:
+                    _svc_info = _external_map[_matched_svc]
+                    # Chercher le code genere (CODE action ou markdown)
+                    _code_action = next((a for a in actions if a.get("type") == "CODE" and not a.get("_skipped")), None)
+                    _ext_code = ""
+                    if _code_action:
+                        _ext_code = _code_action.get("data", {}).get("content", "")[:3000]
+                    else:
+                        # Extraire du markdown
+                        _md_blocks = re.findall(r'```\w*\s*\n(.*?)```', agent_response or '', re.DOTALL)
+                        if _md_blocks:
+                            _ext_code = _md_blocks[0].strip()[:3000]
+                    # URL : utiliser LINK si present, sinon URL par defaut
+                    _link_action_ext = next((a for a in actions if a.get("type") == "LINK" and not a.get("_skipped")), None)
+                    _ext_url = _link_action_ext.get("data", {}).get("url", _svc_info["url"]) if _link_action_ext else _svc_info["url"]
+
+                    # Si pas de code, le generer avec Claude
+                    if not _ext_code and "tradingview" in _matched_svc:
+                        yield _sse_event("log", {"text": "Generation du code Pine Script...", "type": "tool"})
+                        try:
+                            _pine_prompt = f"Genere un script Pine Script v5 pour TradingView basé sur la demande suivante : {user_msg}. Reponds UNIQUEMENT avec le code Pine Script, sans explication, sans markdown."
+                            _pine_code = await _fallback_claude_chat(
+                                "Tu es un expert Pine Script TradingView. Reponds uniquement avec le code.",
+                                [{"role": "user", "content": _pine_prompt}],
+                                max_tokens=2000,
+                            )
+                            if _pine_code and len(_pine_code.strip()) > 50:
+                                _ext_code = _pine_code.strip()
+                                # Nettoyer les ``` si presents
+                                if _ext_code.startswith("```"):
+                                    _ext_code = re.sub(r'^```\w*\s*\n?', '', _ext_code)
+                                    _ext_code = re.sub(r'\n?```\s*$', '', _ext_code)
+                                yield _sse_event("log", {"text": f"Code Pine Script genere ({len(_ext_code)} chars)", "type": "success"})
+                        except Exception as _gen_err:
+                            yield _sse_event("log", {"text": f"Erreur generation code: {_gen_err}", "type": "error"})
+
+                    if _ext_code:
+                        yield _sse_event("log", {"text": f"BrowserAgent : ouverture de {_matched_svc} pour appliquer le code", "type": "tool"})
+                        actions.append({
+                            "type": "BROWSER_AGENT",
+                            "data": {
+                                "task": _svc_info["task"],
+                                "url": _ext_url,
+                                "code": _ext_code,
+                                "auto_triggered": True,
+                                "started": True,
+                            }
+                        })
+                        yield _sse_event("log", {"text": "BrowserAgent Playwright demarre", "type": "success"})
+                    else:
+                        # Pas de nouveau code : launcher BrowserAgent avec la demande utilisateur
+                        # (cas "modifie le code existant", "ajoute X", "reprends le travail")
+                        _modify_keywords = ("reprends", "modif", "ajoute", "edit", "change", "amelior", "améliorer")
+                        _is_modify_task = any(kw in _msg_low or _strip_accents(kw) in _msg_norm for kw in _modify_keywords)
+                        if _is_modify_task:
+                            yield _sse_event("log", {"text": f"BrowserAgent : ouverture de {_matched_svc} pour modifier l'existant", "type": "tool"})
+                            actions.append({
+                                "type": "BROWSER_AGENT",
+                                "data": {
+                                    "task": user_msg,  # Utiliser la demande utilisateur comme tache
+                                    "url": _ext_url,
+                                    "code": "",  # Pas de code a coller — l'agent edite l'existant
+                                    "auto_triggered": True,
+                                    "started": True,
+                                }
+                            })
+                            yield _sse_event("log", {"text": "BrowserAgent Playwright demarre (mode modification)", "type": "success"})
+                        else:
+                            yield _sse_event("log", {"text": "Pas de code a appliquer — BrowserAgent non lance", "type": "warning"})
+
+            # ── 8c. Self-review pass (agent critique) ──
+            if clean_message and len(clean_message) > 50:
+                try:
+                    _reviewer = get_self_reviewer()
+                    _review = await _reviewer.review(clean_message, user_msg)
+                    if _review.needs_revision and not _review.skipped:
+                        yield _sse_event("log", {"text": f"Self-review: revision (avg={_review.average:.1f})", "type": "info"})
+                        _revised = await _reviewer.revise(clean_message, _review, user_msg)
+                        if _revised and _revised != clean_message:
+                            clean_message = _revised
+                            yield _sse_event("log", {"text": "Reponse amelioree par self-review", "type": "success"})
+                    elif not _review.skipped:
+                        yield _sse_event("log", {"text": f"Self-review OK (avg={_review.average:.1f})", "type": "success"})
+                except Exception as _sr_err:
+                    logger.debug(f"Self-review failed: {_sr_err}")
+
             # ── 9. Sauvegarder le message agent ──
             if user_id:
                 agent_msg_type = "voice" if user_msg_type == "voice" else "text"
                 _save_agent3_message(db, user_id, "agent", clean_message or "C'est fait.", agent_msg_type)
+
+            # ── 9b. Auto-extraction de memoires durables (Haiku) ──
+            if user_id:
+                try:
+                    _recent_msgs = _load_agent3_messages(db, user_id, limit=20)
+                    _recent_turns = [
+                        {"role": m["role"], "content": m["content"]}
+                        for m in _recent_msgs
+                        if m.get("content", "").strip()
+                    ]
+                    _saved_facts = await _auto_extract_memories(db, user_id, _recent_turns)
+                    if _saved_facts:
+                        yield _sse_event("memory_extracted", {
+                            "count": len(_saved_facts),
+                            "facts": [f.to_dict() for f in _saved_facts],
+                        })
+                        yield _sse_event("log", {
+                            "text": f"{len(_saved_facts)} fait(s) memorise(s) automatiquement",
+                            "type": "success",
+                        })
+                except Exception as _mem_err:
+                    logger.debug(f"Auto memory extraction failed: {_mem_err}")
 
             # ── 10. Marquer la derniere etape ──
             # Trouver le step "respond"
@@ -5311,6 +7253,39 @@ async def agent3_chat(
     db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
+    # ── 0. Slash command interception (AVANT tout appel LLM) ─────────────
+    _user_msg_for_slash = ""
+    if data.messages:
+        for _m in reversed(data.messages):
+            if _m.get("role") == "user":
+                _user_msg_for_slash = _m.get("content", "").strip()
+                break
+    if _user_msg_for_slash:
+        _slash_parser = get_slash_parser()
+        if _slash_parser.is_command(_user_msg_for_slash):
+            try:
+                _slash_ctx = {"db": db, "user_id": user_id, "session_key": f"agent3_{user_id or 'anon'}"}
+                _slash_result = await _slash_parser.execute(_user_msg_for_slash, _slash_ctx)
+                if _slash_result.handled:
+                    _resp_text = _slash_result.response or _slash_result.error or "OK"
+                    # Sauvegarder les messages
+                    try:
+                        _ensure_agent3_tables(db)
+                        _save_agent3_message(db, user_id or "", "user", _user_msg_for_slash, "text")
+                        _save_agent3_message(db, user_id or "", "agent", _resp_text, "text")
+                    except Exception as _save_err:
+                        logger.warning(f"Slash cmd save failed (non-fatal): {_save_err}")
+                    return {
+                        "message": _resp_text,
+                        "actions": _slash_result.actions or None,
+                    }
+            except Exception as _slash_err:
+                logger.error(f"Slash command execution failed: {_slash_err}", exc_info=True)
+                return {
+                    "message": f"Erreur commande: {_slash_err}",
+                    "actions": None,
+                }
+
     # ── 1. Charger le contexte utilisateur Sylea ──────────────────────────
     repo = ProfilRepository(db)
     profil_data = None
@@ -5327,19 +7302,32 @@ async def agent3_chat(
             "diplomes": getattr(profil, 'diplomes', []),
             "langues": getattr(profil, 'langues', []),
             "objectif_description": profil.objectif.description if profil.objectif else None,
-            "probabilite_actuelle": profil.probabilite_actuelle,
+            "probabilite_actuelle": (profil.temps_gagne_jours / profil.temps_initial_jours * 100) if getattr(profil, 'temps_initial_jours', 0) > 0 else profil.probabilite_actuelle,
         }
 
     # Decisions
     dec_repo = DecisionRepository(db)
+    _ns_internal_user_id = ""
+    if user_id:
+        try:
+            _ns_row = db.conn.execute(
+                "SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            if _ns_row:
+                _ns_internal_user_id = _ns_row[0]
+        except Exception:
+            pass
     try:
-        decisions_raw = dec_repo.lister_pour_utilisateur(user_id or "", 20, auth_user_id=user_id)
+        decisions_raw = dec_repo.lister_pour_utilisateur(_ns_internal_user_id, 20, auth_user_id=user_id) if _ns_internal_user_id else []
     except Exception:
         decisions_raw = []
-    decisions = (
-        [{"question": d.question, "choix": d.choix, "impact": d.impact_probabilite} for d in decisions_raw[:20]]
-        if decisions_raw else []
-    )
+    decisions = []
+    for d in (decisions_raw or [])[:20]:
+        _ns_impact = (d.probabilite_apres or 0) - d.probabilite_avant
+        _ns_choix_obj = d.get_option_choisie()
+        _ns_choix = _ns_choix_obj.description if _ns_choix_obj else "?"
+        decisions.append({"question": d.question, "choix": _ns_choix, "impact": _ns_impact})
 
     # Sous-objectifs
     sous_objectifs: list[dict] = []
@@ -5658,6 +7646,33 @@ async def agent3_chat(
                     except Exception as scr_err:
                         logger.error(f"Screenshot generation error: {scr_err}")
 
+            # SKILL — invoquer une skill interne built-in
+            elif action_type == "SKILL":
+                _sk_name = action_data.get("skill", "")
+                _sk_instr = action_data.get("instruction", "")
+                if _sk_name and _sk_instr:
+                    try:
+                        from api.agent3_skills import get_skill_registry, SkillContext
+                        _sk_reg = get_skill_registry()
+                        _sk = _sk_reg.get(_sk_name)
+                        if _sk:
+                            _sk_ctx = SkillContext(
+                                user_id=user_id or "",
+                                user_msg=user_msg,
+                                profil=profil_data or {},
+                                memories=_load_memories(db, user_id, limit=20) if user_id else [],
+                                session_key=session_key,
+                            )
+                            _sk_result = await _sk.safe_execute(_sk_instr, _sk_ctx)
+                            action_data["skill_result"] = _sk_result.to_dict()
+                            action_data["success"] = _sk_result.success
+                        else:
+                            action_data["success"] = False
+                            action_data["error"] = f"Skill '{_sk_name}' introuvable"
+                    except Exception as _sk_err:
+                        action_data["success"] = False
+                        action_data["error"] = str(_sk_err)
+
             # MEMORY
             elif action_type == "MEMORY" and user_id:
                 mem_key = action_data.get("key", "")
@@ -5677,18 +7692,37 @@ async def agent3_chat(
                 db.conn.commit()
                 action_data["cron_id"] = cron_id
 
-            # SPAWN_AGENT — lancer un sous-agent OpenClaw
+            # SPAWN_AGENT — lancer un sous-agent (local orchestrator + fallback OpenClaw)
             elif action_type == "SPAWN_AGENT":
-                agent_id = action_data.get("agent_id", "default")
-                task = action_data.get("task", "")
+                _sa_agent_type = action_data.get("agent_type", action_data.get("agent_id", "default"))
+                _sa_task = action_data.get("task", "")
+                _sa_budget = float(action_data.get("budget_usd", 0.10))
+                _sa_timeout = float(action_data.get("timeout_s", 90))
+                _sa_context = action_data.get("context", "")
                 try:
-                    spawn_result = await openclaw_spawn_session(
-                        agent_id=agent_id,
-                        initial_message=task,
-                        session_key=session_key,
+                    _sa_orch = get_orchestrator(user_id or "anon")
+                    _sa_result = await _sa_orch.spawn(
+                        task=_sa_task,
+                        agent_type=_sa_agent_type,
+                        context=_sa_context,
+                        budget_usd=_sa_budget,
+                        timeout_s=_sa_timeout,
                     )
-                    action_data["spawn_result"] = spawn_result
-                    action_data["spawn_success"] = spawn_result.get("success", False)
+                    action_data["spawn_result"] = _sa_result.to_dict()
+                    action_data["spawn_success"] = _sa_result.status == AgentStatus.COMPLETED
+                    if _sa_result.status != AgentStatus.COMPLETED:
+                        # Fallback OpenClaw
+                        try:
+                            _oc_spawn = await openclaw_spawn_session(
+                                agent_id=_sa_agent_type,
+                                initial_message=_sa_task,
+                                session_key=session_key,
+                            )
+                            action_data["spawn_result"] = _oc_spawn
+                            action_data["spawn_success"] = _oc_spawn.get("success", False)
+                            action_data["spawn_source"] = "openclaw_fallback"
+                        except Exception:
+                            pass  # Keep the local result
                 except Exception as spawn_err:
                     action_data["spawn_error"] = str(spawn_err)
 
@@ -5743,19 +7777,33 @@ async def agent3_chat(
                         action_data["executed"] = False
                         action_data["execution_error"] = str(exec_err)
 
-            # FILE_CREATE — fallback serveur si le desktop Tauri n'est pas connecte
+            # FILE_CREATE — sauvegarde autonome dans le workspace utilisateur
             elif action_type == "FILE_CREATE":
                 fc_filename = action_data.get("filename", "fichier.txt")
                 fc_content = action_data.get("content", "")
-                desktop_connected = False
-                if user_id:
+                if fc_content and user_id:
                     try:
-                        from api.websocket import ws_manager
-                        desktop_connected = ws_manager.is_connected(user_id)
-                    except Exception:
-                        pass
-                if not desktop_connected and fc_content:
-                    logger.info(f"FILE_CREATE fallback serveur : {fc_filename}")
+                        obj_name = get_workspace_folder_name(db, user_id)
+                        project_dir = WORKSPACE_BASE / obj_name
+                        project_dir.mkdir(parents=True, exist_ok=True)
+                        safe_name = Path(fc_filename).name or "fichier.txt"
+                        filepath = project_dir / safe_name
+                        counter = 1
+                        while filepath.exists():
+                            stem = Path(safe_name).stem
+                            suffix = Path(safe_name).suffix or ".txt"
+                            filepath = project_dir / f"{stem}_{counter}{suffix}"
+                            counter += 1
+                        filepath.write_text(fc_content, encoding="utf-8")
+                        action_data["saved"] = True
+                        action_data["workspace_path"] = f"{obj_name}/{filepath.name}"
+                        action_data["full_path"] = str(filepath)
+                        action_data["size"] = len(fc_content.encode("utf-8"))
+                        logger.info(f"FILE_CREATE workspace : {filepath}")
+                    except Exception as fc_err:
+                        logger.error(f"FILE_CREATE workspace error: {fc_err}")
+                        action_data["save_error"] = str(fc_err)
+                elif fc_content:
                     try:
                         fallback = _save_file_create_fallback(fc_filename, fc_content)
                         action_data["fallback"] = True
@@ -5766,49 +7814,93 @@ async def agent3_chat(
                         logger.error(f"FILE_CREATE fallback error: {fc_err}")
                         action_data["fallback_error"] = str(fc_err)
 
-            # EMAIL — envoyer un email via SMTP (avec triple fallback)
+            # EMAIL — envoi autonome via SMTP ou Gmail API
             elif action_type == "EMAIL":
                 _email_to = action_data.get("to", "")
                 _email_subject = action_data.get("subject", "")
                 _email_body = action_data.get("body", "")
                 _email_html = action_data.get("html", False)
                 if user_id and _email_to:
+                    _email_sent = False
                     _send_result = _send_email_smtp(db, user_id, _email_to, _email_subject, _email_body, html=_email_html)
                     if _send_result.get("ok"):
                         action_data["sent"] = True
                         action_data["method"] = "smtp"
                         action_data["message"] = _send_result.get("message", "Email envoye")
+                        _email_sent = True
                     else:
-                        _gmail_ok = False
                         try:
-                            from api.routers.integrations import _get_integration
+                            from api.routers.integrations import _get_integration, _refresh_google_token
                             _integ = _get_integration(db, user_id, "gmail")
                             _gt = _integ.get("access_token", "") if _integ else ""
                             if _gt and len(_gt) > 20:
-                                import httpx, base64
+                                import httpx, base64, asyncio
                                 from email.mime.text import MIMEText as _MT
-                                _m = _MT(_email_body, "plain", "utf-8")
-                                _m["To"] = _email_to
-                                _m["Subject"] = _email_subject
-                                _raw = base64.urlsafe_b64encode(_m.as_bytes()).decode("utf-8")
-                                _gr = httpx.post(
-                                    "https://www.googleapis.com/gmail/v1/users/me/messages/send",
-                                    headers={"Authorization": f"Bearer {_gt}", "Content-Type": "application/json"},
-                                    json={"raw": _raw}, timeout=10,
-                                )
-                                if _gr.status_code == 200:
-                                    action_data["sent"] = True
-                                    action_data["method"] = "gmail_api"
-                                    action_data["message"] = f"Email envoye via Gmail API a {_email_to}"
-                                    _gmail_ok = True
+                                for _attempt in range(2):
+                                    _m = _MT(_email_body, "plain", "utf-8")
+                                    _m["To"] = _email_to
+                                    _m["Subject"] = _email_subject
+                                    _raw = base64.urlsafe_b64encode(_m.as_bytes()).decode("utf-8")
+                                    _gr = httpx.post(
+                                        "https://www.googleapis.com/gmail/v1/users/me/messages/send",
+                                        headers={"Authorization": f"Bearer {_gt}", "Content-Type": "application/json"},
+                                        json={"raw": _raw}, timeout=15,
+                                    )
+                                    if _gr.status_code == 200:
+                                        action_data["sent"] = True
+                                        action_data["method"] = "gmail_api"
+                                        action_data["message"] = f"Email envoye via Gmail API a {_email_to}"
+                                        _email_sent = True
+                                        break
+                                    elif _gr.status_code == 401 and _attempt == 0:
+                                        _new_token = asyncio.get_event_loop().run_until_complete(
+                                            _refresh_google_token(db, user_id, "gmail")
+                                        )
+                                        if _new_token:
+                                            _gt = _new_token
+                                        else:
+                                            break
+                                    else:
+                                        break
                         except Exception:
                             pass
-                        if not _gmail_ok:
-                            _url_result = _email_fallback_url(_email_to, _email_subject, _email_body)
+                    if not _email_sent:
+                        _cu_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+                        if _cu_api_key:
+                            try:
+                                _cu_prompt = (
+                                    f"Ouvre https://mail.google.com dans le navigateur. "
+                                    f"Compose un nouveau message. "
+                                    f"Destinataire : {_email_to}. "
+                                    f"Objet : {_email_subject}. "
+                                    f"Corps du message : {_email_body[:500]}. "
+                                    f"Envoie le message en cliquant sur Envoyer."
+                                )
+                                _cu_session = get_session(user_id or "default", _cu_api_key)
+                                actions.append({
+                                    "type": "COMPUTER_USE",
+                                    "data": {
+                                        "prompt": _cu_prompt,
+                                        "reason": f"Envoi email a {_email_to} — SMTP et Gmail API indisponibles",
+                                        "auto_triggered": True,
+                                        "started": True,
+                                        "session_id": user_id or "default",
+                                    }
+                                })
+                                action_data["sent"] = None
+                                action_data["method"] = "computer_use"
+                                action_data["message"] = f"Envoi en cours via Computer Use..."
+                            except Exception as _cu_err:
+                                action_data["sent"] = False
+                                action_data["method"] = "none"
+                                action_data["error"] = str(_cu_err)[:100]
+                                action_data["message"] = "Toutes les methodes ont echoue."
+                        else:
+                            _smtp_err = _send_result.get("error", "SMTP non configure")
                             action_data["sent"] = False
-                            action_data["method"] = "gmail_url"
-                            action_data["gmail_url"] = _url_result["gmail_url"]
-                            action_data["message"] = "Lien Gmail pre-rempli genere."
+                            action_data["method"] = "none"
+                            action_data["error"] = _smtp_err
+                            action_data["message"] = "Email non envoye. Configure SMTP ou cle API."
                 else:
                     action_data["sent"] = False
                     action_data["send_error"] = "Destinataire manquant ou utilisateur non authentifie"
@@ -6058,6 +8150,40 @@ async def agent3_chat(
         except Exception:
             pass
 
+    # ── 7-fallback. Parser les [ACTION:TYPE]{json} sans [/ACTION] fermant ──
+    if not actions:
+        _decoder_ns = json.JSONDecoder()
+        for _ucm_ns in re.finditer(r'\[ACTION:(\w+)\]\s*', agent_response):
+            _uc_type_ns = _ucm_ns.group(1)
+            _uc_rest_ns = agent_response[_ucm_ns.end():].strip()
+            if _uc_rest_ns.startswith('{'):
+                try:
+                    _uc_data_ns, _ = _decoder_ns.raw_decode(_uc_rest_ns)
+                    logger.info(f"Fallback (non-stream): parsed unclosed [ACTION:{_uc_type_ns}] block")
+                    if _uc_type_ns == "IMAGE":
+                        img_prompt = _uc_data_ns.get("prompt", _uc_data_ns.get("title", "image"))
+                        try:
+                            img_fn = await _generate_and_save_image(img_prompt, session_key=session_key)
+                            if img_fn:
+                                _uc_data_ns["image_url"] = f"/api/agent3/image/{img_fn}"
+                                _uc_data_ns["image_filename"] = img_fn
+                        except Exception as _img_err:
+                            _uc_data_ns["image_error"] = str(_img_err)
+                    elif _uc_type_ns == "PDF":
+                        pdf_title = _uc_data_ns.get("title", "Rapport Agent 3")
+                        pdf_sections = _uc_data_ns.get("sections", [])
+                        pdf_color = _uc_data_ns.get("color", "#2563eb")
+                        try:
+                            pdf_fn = _generate_pdf(pdf_title, pdf_sections, pdf_color)
+                            _uc_data_ns["pdf_url"] = f"/api/agent3/pdf/{pdf_fn}"
+                            _uc_data_ns["pdf_filename"] = pdf_fn
+                        except Exception as _pdf_err:
+                            _uc_data_ns["pdf_error"] = str(_pdf_err)
+                    _observer_ns.log_action(_uc_type_ns, True)
+                    actions.append({"type": _uc_type_ns, "data": _uc_data_ns})
+                except (json.JSONDecodeError, Exception) as _uc_err_ns:
+                    logger.debug(f"Fallback parse failed for ACTION:{_uc_type_ns}: {_uc_err_ns}")
+
     # Nettoyer le message affiche
     clean_message = _clean_agent_response(agent_response)
 
@@ -6111,6 +8237,18 @@ async def agent3_chat(
             db, user_id, "agent", clean_message or "C'est fait.", agent_msg_type,
             audio_data=agent_audio_data,
         )
+
+        # Auto-extraction de memoires durables (non-bloquant)
+        try:
+            _recent_msgs = _load_agent3_messages(db, user_id, limit=20)
+            _recent_turns = [
+                {"role": m["role"], "content": m["content"]}
+                for m in _recent_msgs
+                if m.get("content", "").strip()
+            ]
+            await _auto_extract_memories(db, user_id, _recent_turns)
+        except Exception as _mem_err:
+            logger.debug(f"Auto memory extraction (non-stream) failed: {_mem_err}")
 
     return Agent3ChatOut(
         message=clean_message if clean_message else "C'est fait.",
@@ -6375,14 +8513,24 @@ async def generate_proactive_message(
     profil_data = {
         "nom": profil.nom,
         "objectif_description": profil.objectif.description if profil.objectif else "non defini",
-        "probabilite_actuelle": profil.probabilite_actuelle,
+        "probabilite_actuelle": (profil.temps_gagne_jours / profil.temps_initial_jours * 100) if getattr(profil, 'temps_initial_jours', 0) > 0 else profil.probabilite_actuelle,
     }
 
     # Charger decisions recentes
     dec_repo = DecisionRepository(db)
+    _pr_iuid = ""
     try:
-        decisions_raw = dec_repo.lister_pour_utilisateur(user_id, 10, auth_user_id=user_id)
-        decisions = [{"impact": d.impact_probabilite} for d in (decisions_raw or [])[:10]]
+        _pr_row = db.conn.execute(
+            "SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if _pr_row:
+            _pr_iuid = _pr_row[0]
+    except Exception:
+        pass
+    try:
+        decisions_raw = dec_repo.lister_pour_utilisateur(_pr_iuid, 10, auth_user_id=user_id) if _pr_iuid else []
+        decisions = [{"impact": (d.probabilite_apres or 0) - d.probabilite_avant} for d in (decisions_raw or [])[:10]]
     except Exception:
         decisions = []
 
@@ -7623,6 +9771,34 @@ async def search_memories(
     }
 
 
+@router.post("/memory/extract-now")
+async def extract_memories_now(
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """
+    Declenche MANUELLEMENT l'extraction de faits durables
+    a partir de la conversation recente. Bypass le scheduler.
+    """
+    if not user_id:
+        return {"error": "Non authentifie"}
+    _ensure_agent3_tables(db)
+    recent = _load_agent3_messages(db, user_id, limit=20)
+    turns = [
+        {"role": m["role"], "content": m["content"]}
+        for m in recent
+        if m.get("content", "").strip()
+    ]
+    if not turns:
+        return {"extracted": 0, "facts": [], "message": "Aucune conversation recente"}
+    facts = await _auto_extract_memories(db, user_id, turns, force=True)
+    return {
+        "extracted": len(facts),
+        "facts": [f.to_dict() for f in facts],
+        "message": f"{len(facts)} fait(s) extrait(s) et memorise(s)",
+    }
+
+
 @router.delete("/memory/{key}")
 async def delete_memory(
     key: str,
@@ -7639,6 +9815,387 @@ async def delete_memory(
     )
     db.conn.commit()
     return {"success": True}
+
+
+# ── Skills Registry REST API ──────────────────────────────────────────────────
+
+@router.get("/skills")
+async def list_skills():
+    """Liste toutes les skills built-in disponibles."""
+    from api.agent3_skills import get_skill_registry
+    reg = get_skill_registry()
+    return {
+        "skills": reg.to_dict_list(),
+        "count": reg.count,
+    }
+
+
+@router.get("/skills/{skill_name}")
+async def get_skill_info(skill_name: str):
+    """Retourne les infos d'une skill specifique."""
+    from api.agent3_skills import get_skill_registry
+    reg = get_skill_registry()
+    skill = reg.get(skill_name)
+    if not skill:
+        raise HTTPException(404, f"Skill '{skill_name}' introuvable")
+    return skill.to_dict()
+
+
+@router.post("/skills/{skill_name}/execute")
+async def execute_skill(
+    skill_name: str,
+    data: dict,
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Execute manuellement une skill via l'API REST."""
+    from api.agent3_skills import get_skill_registry, SkillContext
+    reg = get_skill_registry()
+    skill = reg.get(skill_name)
+    if not skill:
+        raise HTTPException(404, f"Skill '{skill_name}' introuvable")
+
+    instruction = data.get("instruction", "")
+    if not instruction:
+        raise HTTPException(400, "instruction requise")
+
+    ctx = SkillContext(
+        user_id=user_id or "",
+        user_msg=instruction,
+        profil={},
+        memories=_load_memories(db, user_id, limit=20) if user_id else [],
+        session_key=data.get("session_key", ""),
+    )
+    result = await skill.safe_execute(instruction, ctx)
+    return result.to_dict()
+
+
+# ── Sub-Agent Orchestrator REST API ───────────────────────────────────────────
+
+@router.get("/orchestrator/types")
+async def list_agent_types():
+    """Liste les types de sous-agents disponibles."""
+    return SubAgentOrchestrator.list_agent_types()
+
+
+@router.post("/orchestrator/spawn")
+async def spawn_sub_agent(
+    data: dict,
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Lance manuellement un sous-agent via l'API REST.
+
+    Body: {
+        "task": "Analyse le cours du BTC",
+        "agent_type": "analyst",  (optionnel, default: "default")
+        "context": "...",          (optionnel)
+        "budget_usd": 0.10,        (optionnel, default: 0.10)
+        "timeout_s": 90            (optionnel, default: 90)
+    }
+    """
+    task = data.get("task", "")
+    if not task:
+        raise HTTPException(400, "task requise")
+
+    orch = get_orchestrator(user_id or "anon")
+    result = await orch.spawn(
+        task=task,
+        agent_type=data.get("agent_type", "default"),
+        context=data.get("context", ""),
+        budget_usd=float(data.get("budget_usd", 0.10)),
+        timeout_s=float(data.get("timeout_s", 90)),
+    )
+    return result.to_dict()
+
+
+@router.post("/orchestrator/spawn-multiple")
+async def spawn_multiple_agents(
+    data: dict,
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Lance plusieurs sous-agents en parallele.
+
+    Body: {
+        "tasks": [
+            {"task": "...", "agent_type": "analyst"},
+            {"task": "...", "agent_type": "coder"}
+        ],
+        "budget_usd_per_task": 0.05,
+        "timeout_s": 120
+    }
+    """
+    tasks = data.get("tasks", [])
+    if not tasks:
+        raise HTTPException(400, "tasks requises")
+
+    orch = get_orchestrator(user_id or "anon")
+    results = await orch.spawn_multiple(
+        tasks=tasks,
+        budget_usd_per_task=float(data.get("budget_usd_per_task", 0.05)),
+        timeout_s=float(data.get("timeout_s", 120)),
+    )
+    return {
+        "results": [r.to_dict() for r in results],
+        "total": len(results),
+        "completed": sum(1 for r in results if r.status == AgentStatus.COMPLETED),
+    }
+
+
+@router.get("/orchestrator/running")
+async def get_running_agents(
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Retourne les sous-agents en cours d'execution."""
+    orch = get_orchestrator(user_id or "anon")
+    return {"running": orch.get_running()}
+
+
+# ── Slash Commands REST API ───────────────────────────────────────────────────
+
+@router.get("/slash-commands")
+async def list_slash_commands():
+    """Liste les slash commands disponibles."""
+    parser = get_slash_parser()
+    return {"commands": parser.list_commands(), "count": len(parser.list_commands())}
+
+
+# ── Hooks REST API ───────────────────────────────────────────────────────────
+
+@router.get("/hooks")
+async def list_hooks():
+    """Liste les hooks actifs."""
+    reg = get_hook_registry()
+    return {"hooks": reg.list_hooks(), "count": reg.count}
+
+
+# ── Undo REST API ────────────────────────────────────────────────────────────
+
+@router.get("/undo/history")
+async def get_undo_history(
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Retourne l'historique des actions annulables."""
+    if not user_id:
+        return {"error": "Non authentifie"}
+    mgr = get_undo_manager(user_id, db)
+    return {
+        "history": mgr.get_all_history(limit=20),
+        "undoable_count": mgr.undoable_count,
+    }
+
+
+@router.post("/undo")
+async def undo_last_action(
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Annule la derniere action."""
+    if not user_id:
+        return {"error": "Non authentifie"}
+    mgr = get_undo_manager(user_id, db)
+    success, msg = await mgr.undo_last()
+    return {"success": success, "message": msg}
+
+
+@router.post("/undo/{snapshot_id}")
+async def undo_specific(
+    snapshot_id: str,
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Annule un snapshot specifique."""
+    if not user_id:
+        return {"error": "Non authentifie"}
+    mgr = get_undo_manager(user_id, db)
+    success, msg = await mgr.rollback(snapshot_id)
+    return {"success": success, "message": msg}
+
+
+# ── Interactive Correction REST API ──────────────────────────────────────────
+
+@router.post("/interactive/correction")
+async def submit_correction(
+    data: dict,
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Soumet une correction interactive sur un screenshot.
+
+    Body: {
+        "session_id": "...",
+        "type": "click_here|select_region|annotate|retry|skip|text_input",
+        "x": 0.5, "y": 0.3,
+        "x2": 0.8, "y2": 0.6,   (optionnel, pour select_region/annotate)
+        "text": "...",            (optionnel, pour annotate/text_input)
+    }
+    """
+    session_id = data.get("session_id", "default")
+    mgr = get_correction_manager(session_id)
+    correction = mgr.create_correction(
+        correction_type=data.get("type", "click_here"),
+        x=float(data.get("x", 0)),
+        y=float(data.get("y", 0)),
+        x2=float(data.get("x2", 0)),
+        y2=float(data.get("y2", 0)),
+        text=data.get("text", ""),
+    )
+    return {
+        "correction": correction.to_dict(),
+        "instruction": correction.to_agent_instruction(),
+    }
+
+
+@router.get("/interactive/corrections/{session_id}")
+async def get_corrections(session_id: str):
+    """Retourne les corrections pour une session."""
+    mgr = get_correction_manager(session_id)
+    return {"corrections": mgr.get_all(), "count": mgr.count}
+
+
+# ── Self-Review REST API ─────────────────────────────────────────────────────
+
+@router.get("/self-review/stats")
+async def get_self_review_stats():
+    """Statistiques de self-review."""
+    reviewer = get_self_reviewer()
+    return reviewer.get_stats()
+
+
+@router.post("/self-review/toggle")
+async def toggle_self_review(data: dict):
+    """Active/desactive le self-review."""
+    reviewer = get_self_reviewer()
+    reviewer.enabled = bool(data.get("enabled", True))
+    return {"enabled": reviewer.enabled}
+
+
+# ── MCP REST API ─────────────────────────────────────────────────────────────
+
+@router.get("/mcp/servers")
+async def list_mcp_servers():
+    """Liste les serveurs MCP configures."""
+    reg = get_mcp_registry()
+    return {
+        "servers": reg.list_servers(),
+        "total": reg.count,
+        "connected": reg.connected_count,
+    }
+
+
+@router.get("/mcp/tools")
+async def list_mcp_tools():
+    """Liste tous les outils MCP disponibles."""
+    reg = get_mcp_registry()
+    tools = reg.list_all_tools()
+    return {
+        "tools": [t.to_dict() for t in tools],
+        "count": len(tools),
+    }
+
+
+@router.post("/mcp/servers")
+async def add_mcp_server(data: dict):
+    """Ajoute un serveur MCP.
+
+    Body: {"name": "weather", "command": "npx", "args": ["-y", "@weather/mcp"]}
+    """
+    name = data.get("name", "")
+    command = data.get("command", "")
+    if not name or not command:
+        raise HTTPException(400, "name et command requis")
+    reg = get_mcp_registry()
+    client = reg.add_server(name, command, data.get("args", []), data.get("env", {}))
+    connected = await client.connect()
+    return {
+        "server": client.to_dict(),
+        "connected": connected,
+    }
+
+
+@router.post("/mcp/connect-all")
+async def connect_all_mcp():
+    """Connecte tous les serveurs MCP."""
+    reg = get_mcp_registry()
+    results = await reg.connect_all()
+    return {"results": results}
+
+
+@router.post("/mcp/call")
+async def call_mcp_tool(data: dict):
+    """Appelle un outil MCP.
+
+    Body: {"server": "weather", "tool": "get_weather", "arguments": {"city": "Paris"}}
+    """
+    server = data.get("server", "")
+    tool = data.get("tool", "")
+    if not tool:
+        raise HTTPException(400, "tool requis")
+    reg = get_mcp_registry()
+    if server:
+        result = await reg.call_tool(server, tool, data.get("arguments", {}))
+    else:
+        result = await reg.call_tool_auto(tool, data.get("arguments", {}))
+    return result.to_dict()
+
+
+# ── Todo Tracker REST API ────────────────────────────────────────────────────
+
+@router.get("/todos")
+async def get_todos(
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Retourne les todos en cours."""
+    tracker = get_todo_tracker(user_id or "anon", create=False)
+    if not tracker:
+        return {"total": 0, "items": [], "progress": 100.0}
+    return tracker.get_summary()
+
+
+@router.post("/todos")
+async def create_todo(
+    data: dict,
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Cree un ou plusieurs todos.
+
+    Body: {"items": [{"title": "...", "active_form": "..."}, ...]}
+    """
+    tracker = get_todo_tracker(user_id or "anon")
+    items = data.get("items", [])
+    if not items:
+        raise HTTPException(400, "items requis")
+    created = tracker.create_batch(items)
+    return {"created": len(created), "summary": tracker.get_summary()}
+
+
+@router.post("/todos/{item_id}/transition")
+async def transition_todo(
+    item_id: str,
+    data: dict,
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Change le status d'un todo.
+
+    Body: {"action": "start|complete|fail|skip", "result": "...", "error": "..."}
+    """
+    tracker = get_todo_tracker(user_id or "anon", create=False)
+    if not tracker:
+        raise HTTPException(404, "Aucun tracker actif")
+    action = data.get("action", "")
+    result_text = data.get("result", "")
+    error_text = data.get("error", "")
+    tr = None
+    if action == "start":
+        tr = tracker.start(item_id)
+    elif action == "complete":
+        tr = tracker.complete(item_id, result_text)
+    elif action == "fail":
+        tr = tracker.fail(item_id, error_text)
+    elif action == "skip":
+        tr = tracker.skip(item_id, result_text)
+    if not tr:
+        raise HTTPException(400, f"Transition '{action}' invalide pour {item_id}")
+    return {"transition": tr.to_sse_data(), "summary": tracker.get_summary()}
 
 
 # ── User Preferences ─────────────────────────────────────────────────────────
@@ -7866,10 +10423,10 @@ async def setup_check() -> SetupCheckResult:
     if npm_path:
         result.npm_installed = True
 
-    # 3. OpenClaw
-    openclaw_path = shutil.which("openclaw")
+    # 3. OpenClaw (cherche dans PATH + npm global)
+    openclaw_path = _find_openclaw_cmd()
     if not openclaw_path:
-        # Check npx
+        # Fallback: npx
         try:
             proc = await asyncio.to_thread(
                 subprocess.run, ["npx", "openclaw", "--version"],
@@ -7884,7 +10441,7 @@ async def setup_check() -> SetupCheckResult:
         result.openclaw_installed = True
         try:
             proc = await asyncio.to_thread(
-                subprocess.run, ["openclaw", "--version"],
+                subprocess.run, [openclaw_path, "--version"],
                 capture_output=True, text=True, timeout=10
             )
             result.openclaw_version = proc.stdout.strip()
@@ -7900,11 +10457,11 @@ async def setup_check() -> SetupCheckResult:
     result.token_configured = bool(token and len(token) > 10)
 
     # 6. HTTP endpoint configured?
-    if result.openclaw_installed:
+    if result.openclaw_installed and openclaw_path:
         try:
             proc = await asyncio.to_thread(
                 subprocess.run,
-                ["openclaw", "config", "get", "gateway.http.endpoints.chatCompletions.enabled"],
+                [openclaw_path, "config", "get", "gateway.http.endpoints.chatCompletions.enabled"],
                 capture_output=True, text=True, timeout=10
             )
             result.gateway_configured = "true" in proc.stdout.lower()
@@ -7978,6 +10535,24 @@ async def setup_configure():
     }
 
 
+def _find_openclaw_cmd() -> str | None:
+    """Cherche le binaire openclaw dans les chemins connus."""
+    import shutil
+    # 1. Deja dans le PATH ?
+    found = shutil.which("openclaw")
+    if found:
+        return found
+    # 2. npm global (Windows)
+    npm_global = os.path.join(os.environ.get("APPDATA", ""), "npm", "openclaw.cmd")
+    if os.path.isfile(npm_global):
+        return npm_global
+    # 3. npm global Linux/Mac
+    for p in ["/usr/local/bin/openclaw", os.path.expanduser("~/.npm-global/bin/openclaw")]:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
 @router.post("/setup/start")
 async def setup_start():
     """Demarre le Gateway OpenClaw en arriere-plan."""
@@ -7986,16 +10561,20 @@ async def setup_start():
     if health.get("connected"):
         return {"success": True, "message": "Le Gateway OpenClaw est deja en cours d'execution", "already_running": True}
 
+    openclaw_bin = _find_openclaw_cmd()
+    if not openclaw_bin:
+        return {"success": False, "error": "OpenClaw n'est pas installe. Installez-le avec : npm install -g openclaw"}
+
     try:
         # Lancer en arriere-plan
         proc = await asyncio.to_thread(
             subprocess.Popen,
-            ["openclaw", "gateway", "start"],
+            [openclaw_bin, "gateway", "start"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) | getattr(subprocess, 'DETACHED_PROCESS', 0),
         )
         # Attendre un peu que le gateway demarre
-        await asyncio.sleep(3)
+        await asyncio.sleep(4)
 
         # Verifier qu'il tourne
         health = await openclaw_health()
@@ -8003,13 +10582,13 @@ async def setup_start():
             return {"success": True, "message": "Gateway OpenClaw demarre avec succes"}
         else:
             # Attendre un peu plus
-            await asyncio.sleep(3)
+            await asyncio.sleep(4)
             health = await openclaw_health()
             if health.get("connected"):
                 return {"success": True, "message": "Gateway OpenClaw demarre avec succes"}
-            return {"success": False, "error": "Le Gateway a ete lance mais ne repond pas encore. Reessayez dans quelques secondes."}
+            return {"success": False, "error": "Le Gateway a ete lance mais ne repond pas encore. Cliquez sur 'Suivant' pour reessayer."}
     except FileNotFoundError:
-        return {"success": False, "error": "OpenClaw n'est pas installe"}
+        return {"success": False, "error": f"Impossible de lancer '{openclaw_bin}'. Verifiez l'installation."}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -8078,9 +10657,14 @@ async def start_computer_use(
                 # Don't send raw base64 screenshot data in SSE (too large)
                 # Instead send a flag and let frontend fetch via endpoint
                 if event_type == "screenshot":
-                    # Store latest screenshot in session for fetching
-                    session._latest_screenshot = event.get("data", "")
-                    yield f"event: screenshot\ndata: {json.dumps({'available': True, 'iteration': session.iteration})}\n\n"
+                    # _latest_screenshot is now set by session itself
+                    yield f"event: screenshot\ndata: {json.dumps({'available': True, 'step': session.iteration})}\n\n"
+                elif event_type == "cost_update":
+                    yield f"event: cost_update\ndata: {json.dumps(event)}\n\n"
+                elif event_type == "cost_warning":
+                    yield f"event: cost_warning\ndata: {json.dumps(event)}\n\n"
+                elif event_type == "compaction":
+                    yield f"event: compaction\ndata: {json.dumps(event)}\n\n"
                 elif event_type == "confirmation_needed":
                     yield f"event: confirmation_needed\ndata: {json.dumps(event)}\n\n"
                 elif event_type == "confirmation_result":
@@ -8089,10 +10673,14 @@ async def start_computer_use(
                     yield f"event: action\ndata: {json.dumps(event)}\n\n"
                 elif event_type == "thinking":
                     yield f"event: thinking\ndata: {json.dumps(event)}\n\n"
-                elif event_type == "iteration":
-                    yield f"event: iteration\ndata: {json.dumps(event)}\n\n"
+                elif event_type == "step":
+                    yield f"event: step\ndata: {json.dumps(event)}\n\n"
                 elif event_type == "complete":
                     yield f"event: complete\ndata: {json.dumps(event)}\n\n"
+                elif event_type == "user_action_needed":
+                    yield f"event: user_action_needed\ndata: {json.dumps(event)}\n\n"
+                elif event_type == "user_action_result":
+                    yield f"event: user_action_result\ndata: {json.dumps(event)}\n\n"
                 elif event_type == "error":
                     yield f"event: error\ndata: {json.dumps(event)}\n\n"
         except Exception as e:
@@ -8103,6 +10691,279 @@ async def start_computer_use(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/browser-agent/start")
+async def start_browser_agent(request: Request):
+    """Lance le BrowserAgent Playwright pour une tache web autonome.
+
+    Body additionnel supporte :
+      - plan_id : si fourni, le plan correspondant est attache a l'agent
+      - permission_mode : 'default'|'plan'|'auto_safe'|'bypass'
+    """
+    body = await request.json()
+    task = body.get("task", "")
+    url = body.get("url", "")
+    code = body.get("code", "")
+    plan_id = body.get("plan_id", "")
+    permission_mode = body.get("permission_mode", "")
+    user_id = body.get("user_id") or "default"
+    if not task:
+        raise HTTPException(400, "Task requis")
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY non configuree")
+
+    from api.browser_agent import get_browser_agent
+    from api.agent3_permissions import get_policy, PermissionMode
+    from api.agent3_plan_mode import get_plan_store, PlanStatus
+
+    agent = get_browser_agent(user_id, api_key)
+
+    # Appliquer le mode de permission si fourni
+    if permission_mode in ("default", "plan", "auto_safe", "bypass"):
+        get_policy(user_id).mode = PermissionMode(permission_mode)
+
+    # Attacher un plan approuve si plan_id fourni
+    attached_plan_dict = None
+    if plan_id:
+        plan = get_plan_store().get(plan_id)
+        if plan and plan.status == PlanStatus.APPROVED:
+            agent.attach_plan(plan)
+            plan.status = PlanStatus.EXECUTING
+            attached_plan_dict = plan.to_dict()
+
+    async def event_generator():
+        # Emit l'info du plan attache en premier
+        if attached_plan_dict:
+            yield f"event: plan_attached\ndata: {json.dumps(attached_plan_dict)}\n\n"
+        try:
+            async for event in agent.run(task=task, url=url, code=code):
+                event_type = event.get("type", "unknown")
+                if event_type == "screenshot":
+                    agent._latest_screenshot = event.get("data", "")
+                    yield f"event: screenshot\ndata: {json.dumps({'available': True, 'step': agent.iteration})}\n\n"
+                elif event_type == "log":
+                    yield f"event: thinking\ndata: {json.dumps({'type': 'thinking', 'text': event.get('text', '')})}\n\n"
+                else:
+                    # Les nouveaux types (permission_needed, cost_update, cost_warning,
+                    # cost_exhausted, plan_mode_active, permission_denied,
+                    # permission_result, plan_attached) passent directement.
+                    yield f"event: {event_type}\ndata: {json.dumps(event)}\n\n"
+        except Exception as e:
+            yield f"event: error\ndata: {json.dumps({'type': 'error', 'message': str(e)[:200]})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/browser-agent/screenshot")
+async def get_browser_agent_screenshot():
+    """Get the latest screenshot from the BrowserAgent (actif ou sauvegarde sur disque)."""
+    from api.browser_agent import get_active_browser_agent, SCREENSHOTS_DIR
+    agent = get_active_browser_agent("default")
+    if agent and agent._latest_screenshot:
+        return {"screenshot": agent._latest_screenshot}
+    # Fallback : capture sauvegardee sur disque
+    saved_file = SCREENSHOTS_DIR / "browser_agent_latest.jpg"
+    if saved_file.exists():
+        import base64
+        b64 = base64.standard_b64encode(saved_file.read_bytes()).decode("utf-8")
+        return {"screenshot": b64, "source": "saved"}
+    raise HTTPException(404, "Pas de screenshot disponible")
+
+
+@router.post("/browser-agent/user-action")
+async def browser_agent_user_action(request: Request):
+    """Signal Effectue/Abandonner pour le BrowserAgent."""
+    body = await request.json()
+    result = body.get("result", "abandon")
+    from api.browser_agent import get_active_browser_agent
+    agent = get_active_browser_agent("default")
+    if not agent:
+        raise HTTPException(404, "Pas de BrowserAgent actif")
+    agent.user_action_done(result)
+    return {"success": True, "result": result}
+
+
+@router.post("/browser-agent/abort")
+async def abort_browser_agent():
+    """Abort le BrowserAgent."""
+    from api.browser_agent import get_active_browser_agent
+    agent = get_active_browser_agent("default")
+    if not agent:
+        raise HTTPException(404, "Pas de BrowserAgent actif")
+    agent.abort()
+    return {"success": True}
+
+
+# ── Plan Mode / Permissions / Cost tracking ────────────────────────────────
+
+@router.post("/browser-agent/plan")
+async def browser_agent_generate_plan(request: Request):
+    """Genere un plan d'execution avant de lancer le BrowserAgent.
+
+    Body: { task: str, url?: str, code?: str, user_id?: str }
+    Retour: le plan (steps, risque, duree estimee) a afficher dans l'UI.
+    """
+    body = await request.json()
+    task = (body.get("task") or "").strip()
+    url = body.get("url", "")
+    code = body.get("code", "")
+    user_id = body.get("user_id") or "default"
+    if not task:
+        raise HTTPException(400, "Task requis")
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY non configuree")
+
+    from api.agent3_plan_mode import PlanGenerator, get_plan_store
+    import anthropic as _anthropic
+    client = _anthropic.Anthropic(api_key=api_key)
+    generator = PlanGenerator(client)
+    plan = await asyncio.to_thread(generator.generate, task, url, code, user_id)
+    get_plan_store().save(plan)
+    return plan.to_dict()
+
+
+@router.post("/browser-agent/plan/{plan_id}/approve")
+async def browser_agent_approve_plan(plan_id: str, request: Request):
+    """Approuve un plan genere. L'user peut ensuite lancer /browser-agent/start."""
+    from api.agent3_plan_mode import get_plan_store
+    store = get_plan_store()
+    plan = store.approve(plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan introuvable")
+    return plan.to_dict()
+
+
+@router.post("/browser-agent/plan/{plan_id}/edit-step")
+async def browser_agent_edit_plan_step(plan_id: str, request: Request):
+    """Modifie une etape d'un plan DRAFT avant approbation.
+
+    Body: { step_id: int, description?: str, risk?: 'safe'|'caution'|'destructive' }
+    """
+    body = await request.json()
+    step_id = int(body.get("step_id", 0))
+    description = body.get("description")
+    risk_str = body.get("risk")
+
+    from api.agent3_plan_mode import get_plan_store, RiskLevel
+    store = get_plan_store()
+    risk = None
+    if risk_str in ("safe", "caution", "destructive"):
+        risk = RiskLevel(risk_str)
+    ok = store.edit_step(plan_id, step_id, description=description, risk=risk)
+    if not ok:
+        raise HTTPException(404, "Plan ou etape introuvable (ou plan deja approuve)")
+    plan = store.get(plan_id)
+    return plan.to_dict() if plan else {"success": True}
+
+
+@router.post("/browser-agent/plan/{plan_id}/abort")
+async def browser_agent_abort_plan(plan_id: str):
+    """Annule un plan non encore execute."""
+    from api.agent3_plan_mode import get_plan_store
+    store = get_plan_store()
+    plan = store.abort(plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan introuvable")
+    return plan.to_dict()
+
+
+@router.get("/browser-agent/plan/{plan_id}")
+async def browser_agent_get_plan(plan_id: str):
+    from api.agent3_plan_mode import get_plan_store
+    plan = get_plan_store().get(plan_id)
+    if not plan:
+        raise HTTPException(404, "Plan introuvable")
+    return plan.to_dict()
+
+
+@router.post("/browser-agent/permission/respond")
+async def browser_agent_permission_respond(request: Request):
+    """Reponse user a une demande de permission (ALLOW / DENY).
+
+    Body: { allow: bool, user_id?: str }
+    """
+    body = await request.json()
+    allow = bool(body.get("allow", False))
+    user_id = body.get("user_id") or "default"
+    from api.browser_agent import get_active_browser_agent
+    agent = get_active_browser_agent(user_id)
+    if not agent:
+        raise HTTPException(404, "Pas de BrowserAgent actif")
+    agent.user_grant_permission(allow)
+    return {"success": True, "decision": "allow" if allow else "deny"}
+
+
+@router.get("/browser-agent/permission/policy")
+async def browser_agent_get_policy(user_id: str = "default"):
+    """Retourne la policy de permissions active."""
+    from api.agent3_permissions import get_policy
+    p = get_policy(user_id)
+    return {
+        "mode": p.mode.value,
+        "always_ask_domains": sorted(p.always_ask_domains),
+        "trusted_domains": sorted(p.trusted_domains),
+        "blocked_domains": sorted(p.blocked_domains),
+        "destructive_count": p.destructive_count,
+        "destructive_quota": p.destructive_quota,
+    }
+
+
+@router.post("/browser-agent/permission/policy")
+async def browser_agent_set_policy(request: Request):
+    """Met a jour la policy de permissions.
+
+    Body: { mode?: 'default'|'plan'|'auto_safe'|'bypass',
+            always_ask_domains?: [str], trusted_domains?: [str],
+            blocked_domains?: [str], destructive_quota?: int,
+            user_id?: str }
+    """
+    body = await request.json()
+    user_id = body.get("user_id") or "default"
+    from api.agent3_permissions import get_policy, PermissionMode
+    p = get_policy(user_id)
+
+    mode = body.get("mode")
+    if mode in ("default", "plan", "auto_safe", "bypass"):
+        p.mode = PermissionMode(mode)
+    if "always_ask_domains" in body:
+        p.always_ask_domains = set(body.get("always_ask_domains") or [])
+    if "trusted_domains" in body:
+        p.trusted_domains = set(body.get("trusted_domains") or [])
+    if "blocked_domains" in body:
+        p.blocked_domains = set(body.get("blocked_domains") or [])
+    if "destructive_quota" in body:
+        try:
+            p.destructive_quota = int(body["destructive_quota"])
+        except Exception:
+            pass
+    return {
+        "mode": p.mode.value,
+        "always_ask_domains": sorted(p.always_ask_domains),
+        "trusted_domains": sorted(p.trusted_domains),
+        "blocked_domains": sorted(p.blocked_domains),
+        "destructive_quota": p.destructive_quota,
+    }
+
+
+@router.get("/browser-agent/cost")
+async def browser_agent_cost(user_id: str = "default"):
+    """Snapshot du cost tracker pour l'UI."""
+    from api.agent3_cost_tracker import get_cost_tracker
+    return get_cost_tracker(user_id).get()
+
+
+@router.post("/browser-agent/cost/reset")
+async def browser_agent_cost_reset(user_id: str = "default"):
+    from api.agent3_cost_tracker import reset_cost_tracker
+    reset_cost_tracker(user_id)
+    return {"success": True}
 
 
 @router.get("/computer-use/screenshot")
@@ -8145,6 +11006,41 @@ async def abort_computer_use():
     return {"success": True, "message": "Session Computer Use annulee"}
 
 
+@router.post("/computer-use/user-action")
+async def computer_use_user_action(request: Request):
+    """Signal que l'utilisateur a effectue ou abandonne l'action demandee."""
+    body = await request.json()
+    result = body.get("result", "abandon")  # "done" ou "abandon"
+
+    session = get_active_session("default")
+    if not session:
+        raise HTTPException(404, "Pas de session Computer Use active")
+
+    session.user_action_done(result)
+    return {"success": True, "result": result}
+
+
+@router.get("/computer-use/stats")
+async def computer_use_stats():
+    """Get statistics for the current/last Computer Use session."""
+    from api.computer_use import _sessions
+    session = _sessions.get("default")
+    if not session:
+        return {"active": False, "message": "Aucune session"}
+    return {"active": session.is_running, **session.get_stats()}
+
+
+@router.get("/computer-use/cost")
+async def computer_use_cost():
+    """Get cost tracking for the current Computer Use session."""
+    try:
+        from api.agent3_cost_tracker import get_cost_tracker
+        tracker = get_cost_tracker("cu_default")
+        return tracker.get()
+    except Exception:
+        return {"estimated_usd": 0, "calls": 0}
+
+
 # ── Fallback Claude direct (si OpenClaw est down) ────────────────────────────
 
 async def _fallback_claude_chat(system_prompt: str, messages: list[dict], model: str = "claude-sonnet-4-20250514", max_tokens: int = 300) -> str:
@@ -8159,7 +11055,11 @@ async def _fallback_claude_chat(system_prompt: str, messages: list[dict], model:
             lambda: client.messages.create(
                 model=model,
                 max_tokens=max_tokens,
-                system=system_prompt,
+                system=[{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }],
                 messages=messages,
             )
         )

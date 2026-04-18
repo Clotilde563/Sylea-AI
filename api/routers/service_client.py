@@ -152,7 +152,11 @@ async def service_client_chat(data: ServiceClientChatIn):
             lambda: client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=500,
-                system=system_prompt,
+                system=[{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }],
                 messages=api_messages,
             )
         )

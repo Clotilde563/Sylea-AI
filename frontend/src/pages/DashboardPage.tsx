@@ -8,7 +8,7 @@ import { useStore } from '../store/useStore'
 import { useT } from '../i18n/LanguageContext'
 import { useDeviceContext } from '../contexts/DeviceContext'
 import { api } from '../api/client'
-import { dureeFromProb } from '../utils/duration'
+import { formatJours, gaugePercent } from '../utils/duration'
 import type { ProbabiliteResult, SousObjectif, TachesQuotidiennes, TacheItem } from '../types'
 
 export function DashboardPage() {
@@ -47,7 +47,7 @@ export function DashboardPage() {
   }, [])
 
   useEffect(() => {
-    if (profil && !probCalculee && (profil.objectif?.probabilite_calculee ?? 0) === 0 && profil.objectif) {
+    if (profil && !probCalculee && profil.temps_initial_jours === 0 && profil.objectif) {
       handleCalcProb()
     }
   }, [profil, probCalculee])
@@ -128,13 +128,14 @@ export function DashboardPage() {
     } catch {}
   }
 
-  const prob = profil?.probabilite_actuelle ?? 0
-  const probCalculeeVal = profil?.objectif?.probabilite_calculee ?? 0
-
-  const { probTemps, probGauge, duree } = useMemo(() => {
-    const probTemps = Math.max(0.1, probCalculeeVal + prob)
-    return { probTemps, probGauge: probTemps, duree: dureeFromProb(probTemps) }
-  }, [probCalculeeVal, prob])
+  const tempsInitial = profil?.temps_initial_jours ?? 0
+  const tempsGagne = profil?.temps_gagne_jours ?? 0
+  const gauge = useMemo(() => {
+    const pct = gaugePercent(tempsInitial, tempsGagne)
+    const restant = formatJours(tempsInitial - tempsGagne)
+    const initial = formatJours(tempsInitial)
+    return { pct, restant, initial }
+  }, [tempsInitial, tempsGagne])
 
   if (!profil) {
     return (
@@ -226,9 +227,9 @@ export function DashboardPage() {
           <div style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.12em', color: 'var(--accent-violet-light)', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <span>{'\u25c8'}</span> Temps estimé
           </div>
-          <ProbabilityGauge value={probGauge} size={200} showDuration={true} showPercent={false} durationOverride={probTemps} />
+          <ProbabilityGauge value={gauge.pct} size={200} tempsLigne1={gauge.restant.ligne1} tempsLigne2={gauge.restant.ligne2} />
           <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', letterSpacing: '0.06em', textAlign: 'center' }}>
-            {t('dashboard.pour_objectif')} — {duree.label}
+            {t('dashboard.pour_objectif')} — Temps initial : {gauge.initial.label}
           </p>
           <div style={{ textAlign: 'center', maxWidth: '440px' }}>
             <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', fontStyle: 'italic', lineHeight: '1.5', marginBottom: '0.75rem' }}>{objectifDesc}</p>
@@ -249,9 +250,10 @@ export function DashboardPage() {
         {/* Sous-objectifs séquentiels */}
         {sousObjectifs.length > 0 && (() => {
           const activeIdx = sousObjectifs.findIndex(so => so.progression < 100)
-          // Calcul proportionnel : chaque SO affiche sa part du temps total réel
+          // Calcul proportionnel : chaque SO affiche sa part du temps INITIAL total
+          // (fixe, ne change pas a chaque decision)
           // Avec correction d'arrondi pour que la somme = total exact
-          const totalJoursObjectif = duree.totalJours
+          const totalJoursObjectif = tempsInitial
           const sumTempsEstime = sousObjectifs.reduce((s, so) => s + (so.temps_estime || 0), 0)
           // Pré-calculer les jours exacts puis ajuster le dernier pour que la somme soit exacte
           const soJoursRaw = sousObjectifs.map(so =>
@@ -263,8 +265,20 @@ export function DashboardPage() {
           const soJoursAjustes = soJoursRaw.map((j, i) =>
             i === soJoursRaw.length - 1 ? Math.round(j) + diff : Math.round(j)
           )
+          // Invariant check: sum(SO_restant) must equal objectif_restant
+          const sumSoRestant = soJoursAjustes.reduce((s, j, i) =>
+            s + Math.round(j * (1 - sousObjectifs[i].progression / 100)), 0
+          )
+          const objectifRestant = Math.round(tempsInitial - tempsGagne)
+          const invariantDelta = Math.abs(sumSoRestant - objectifRestant)
+          const invariantBroken = invariantDelta > 5 // tolerance 5 jours (arrondis)
           return (
             <div className="card animate-fade-in" style={{ marginBottom: '1.5rem', padding: '1.25rem' }}>
+              {invariantBroken && (
+                <div style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.4)', borderRadius: 'var(--radius-md)', padding: '0.6rem 0.8rem', marginBottom: '0.75rem', fontSize: '0.75rem', color: '#f87171' }}>
+                  Desynchronisation detectee : temps SO ({sumSoRestant}j) ≠ objectif ({objectifRestant}j). Recalculez pour corriger.
+                </div>
+              )}
               <h3 style={{ fontSize: '0.75rem', fontWeight: 700, letterSpacing: '0.1em', color: 'var(--accent-violet-light)', textTransform: 'uppercase', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <span>{'\u25c7'}</span> {t('dashboard.sous_objectifs')}
               </h3>
@@ -280,12 +294,15 @@ export function DashboardPage() {
                   const textColor = isCompleted ? '#4ade80' : isActive ? 'var(--text-primary)' : `${soColor}B3`
                   // Temps proportionnel ajusté (somme = total objectif exact)
                   const soJours = soJoursAjustes[idx]
-                  const tempsLabel = soJours > 0 ? (
-                    soJours >= 365 ? (() => { const ans = Math.floor(soJours / 365); const moisR = Math.round((soJours % 365) / 30); return moisR > 0 ? `${ans} an${ans > 1 ? 's' : ''} ${moisR} mois` : `${ans} an${ans > 1 ? 's' : ''}`; })()
-                    : soJours >= 30 ? (() => { const mois = Math.floor(soJours / 30); const joursR = soJours - mois * 30; return joursR > 0 ? `${mois} mois ${joursR} jour${joursR > 1 ? 's' : ''}` : `${mois} mois`; })()
-                    : soJours >= 1 ? `${soJours} jour${soJours > 1 ? 's' : ''}`
-                    : `${Math.round(soJours * 24)}h`
-                  ) : null
+                  const soJoursRestant = Math.max(0, Math.round(soJours * (1 - so.progression / 100)))
+                  const fmtJ = (j: number) => {
+                    if (j <= 0) return null
+                    if (j >= 365) { const a = Math.floor(j / 365); const m = Math.round((j % 365) / 30); return m > 0 ? `${a}a ${m}m` : `${a}a` }
+                    if (j >= 30) { const m = Math.floor(j / 30); const jr = j - m * 30; return jr > 0 ? `${m}m ${jr}j` : `${m}m` }
+                    return j >= 1 ? `${j}j` : `${Math.round(j * 24)}h`
+                  }
+                  const initialLabel = fmtJ(soJours)
+                  const restantLabel = fmtJ(soJoursRestant)
                   return (
                     <div key={so.id} style={{
                       transition: 'all 0.3s',
@@ -320,9 +337,11 @@ export function DashboardPage() {
                             }}>{t('dashboard.a_prioriser')}</span>
                           )}
                         </span>
-                        {tempsLabel && (
-                          <span style={{ fontSize: isActive ? '0.82rem' : '0.75rem', fontWeight: isActive ? 600 : 500, color: isCompleted ? '#4ade80' : isActive ? 'var(--accent-violet-light)' : `${soColor}B3`, opacity: isActive ? 1 : 0.8 }}>
-                            {tempsLabel}
+                        {initialLabel && (
+                          <span style={{ fontSize: isActive ? '0.78rem' : '0.72rem', fontWeight: isActive ? 600 : 500, color: isCompleted ? '#4ade80' : isActive ? 'var(--accent-violet-light)' : `${soColor}B3`, opacity: isActive ? 1 : 0.8, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                            <span style={{ color: isCompleted ? '#4ade80' : isActive ? 'var(--text-primary)' : `${soColor}B3` }}>{restantLabel || '0j'}</span>
+                            <span style={{ color: 'var(--text-muted)', fontSize: '0.65rem', opacity: 0.6 }}>/</span>
+                            <span style={{ color: 'var(--text-muted)', fontSize: '0.65rem', opacity: 0.6 }}>{initialLabel}</span>
                           </span>
                         )}
                       </div>

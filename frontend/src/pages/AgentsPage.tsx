@@ -11,6 +11,18 @@ const AGENT2_ENABLED = true
 // VoiceCall is only used by Agent 2 — import kept but component only rendered when AGENT2_ENABLED is true
 import VoiceCall from '../components/VoiceCall'
 
+// Agent 3 Plan Mode / Permissions / Cost UI (Claude-Code-inspired, ethically reimplemented)
+import {
+  PlanPreview,
+  PermissionPrompt,
+  CostBadge,
+  PermissionModeSwitcher,
+  useAgent3Policy,
+  type ExecutionPlan,
+  type PermissionRequest,
+  type PermissionMode,
+} from '../components/Agent3PlanMode'
+
 // ── Gold variant of the Sylea logo SVG ──────────────────────────────────────
 const CX = 190, CY = 170
 const S_PATH = `M ${CX} ${CY-105} C ${CX+90} ${CY-105}, ${CX+90} ${CY-28}, ${CX} ${CY} C ${CX-90} ${CY+28}, ${CX-90} ${CY+105}, ${CX} ${CY+105}`
@@ -1604,6 +1616,101 @@ export default function AgentsPage() {
   const [streamTools, setStreamTools] = useState<Array<{ tool: string; description: string; status: string }>>([])
   const [streamActive, setStreamActive] = useState(false)
   const [streamingText, setStreamingText] = useState('')
+  // Agent 3 native: extended thinking panel + cancel plumbing
+  const [thinkingEnabled, setThinkingEnabled] = useState<boolean>(() => {
+    try { return localStorage.getItem('sylea_agent3_thinking') === '1' } catch { return false }
+  })
+  const toggleThinking = useCallback(() => {
+    setThinkingEnabled(prev => {
+      const next = !prev
+      try { localStorage.setItem('sylea_agent3_thinking', next ? '1' : '0') } catch {}
+      return next
+    })
+  }, [])
+  const [thinkingText, setThinkingText] = useState('')
+  const [thinkingOpen, setThinkingOpen] = useState(false)
+  const [currentCancelToken, setCurrentCancelToken] = useState<string | null>(null)
+  const abortControllerRef3 = useRef<AbortController | null>(null)
+  // Agent 3 native mode toggle (tool_use API natif vs legacy parser [ACTION:X])
+  const [agent3NativeMode, setAgent3NativeMode] = useState<boolean>(() => {
+    try { return localStorage.getItem('sylea_agent3_native') === '1' } catch { return false }
+  })
+  const toggleAgent3Native = useCallback(() => {
+    setAgent3NativeMode(prev => {
+      const next = !prev
+      try { localStorage.setItem('sylea_agent3_native', next ? '1' : '0') } catch {}
+      return next
+    })
+  }, [])
+  // Pending destructive-action confirmation (native mode)
+  const [pendingConfirmation, setPendingConfirmation] = useState<{
+    resume_token: string
+    pending_tool_uses: Array<{ tool_use_id: string; name: string; action_type: string; input: Record<string, unknown> }>
+    turn: number
+    preview_text?: string
+  } | null>(null)
+  const [confirmResolving, setConfirmResolving] = useState(false)
+
+  // Approve / deny toutes les actions en attente puis reprend la boucle native
+  const resolvePendingConfirmation = useCallback(async (approveAll: boolean) => {
+    if (!pendingConfirmation || confirmResolving) return
+    const nowTime = () => new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    const approvals: Record<string, boolean> = {}
+    pendingConfirmation.pending_tool_uses.forEach(t => { approvals[t.tool_use_id] = approveAll })
+    const token = pendingConfirmation.resume_token
+    setConfirmResolving(true)
+    setPendingConfirmation(null)
+    setStreamActive(true)
+    setStreamLogs(prev => [...prev, {
+      text: approveAll ? 'Actions approuvees, reprise…' : 'Actions refusees, reprise…',
+      type: approveAll ? 'info' : 'warn', time: nowTime(),
+    }])
+    try {
+      await api.agent3ChatResumeNative(token, approvals, {
+        onTurnStart: (turn) => {
+          setStreamLogs(prev => [...prev, { text: `Tour ${turn}…`, type: 'info', time: nowTime() }])
+        },
+        onThinking: (text) => {
+          setStreamingText(prev => prev + text)
+        },
+        onToolUse: (t) => {
+          setStreamTools(prev => [...prev, { tool: t.name, description: JSON.stringify(t.input).slice(0, 120), status: 'running' }])
+          setStreamLogs(prev => [...prev, { text: `tool_use ${t.name}`, type: 'tool', time: nowTime() }])
+        },
+        onToolResult: (r) => {
+          setStreamTools(prev => prev.length ? [...prev.slice(0, -1), { ...prev[prev.length - 1], status: r.is_error ? 'error' : 'done' }] : prev)
+          setStreamLogs(prev => [...prev, {
+            text: `tool_result${r.user_approved === false ? ' (refuse)' : ''}: ${r.content.slice(0, 140)}`,
+            type: r.is_error ? 'error' : 'info', time: nowTime(),
+          }])
+        },
+        onResult: (result) => {
+          setStreamingText('')
+          setMessages3(prev => [...prev, {
+            role: 'agent', content: result.message,
+            timestamp: new Date().toISOString(), type: 'text',
+          }])
+        },
+        onAwaitingConfirmation: (payload) => {
+          // Cas en chaine : le LLM propose un nouveau destructif apres le precedent
+          setStreamingText('')
+          setStreamLogs(prev => [...prev, {
+            text: `Nouvelle confirmation requise pour ${payload.pending_tool_uses.map(t => t.action_type).join(', ')}`,
+            type: 'warn', time: nowTime(),
+          }])
+          setPendingConfirmation(payload)
+        },
+        onError: (msg) => {
+          setStreamLogs(prev => [...prev, { text: msg, type: 'error', time: nowTime() }])
+        },
+      })
+    } catch (err) {
+      setStreamLogs(prev => [...prev, { text: String(err), type: 'error', time: nowTime() }])
+    } finally {
+      setConfirmResolving(false)
+      setTimeout(() => setStreamActive(false), 3000)
+    }
+  }, [pendingConfirmation, confirmResolving])
 
   // Computer Use state
   const [computerUseActive, setComputerUseActive] = useState(false)
@@ -1611,8 +1718,19 @@ export default function AgentsPage() {
   const [computerActions, setComputerActions] = useState<Array<{ action: string; params: Record<string, any>; time: string }>>([])
   const [computerThinking, setComputerThinking] = useState('')
   const [computerConfirmation, setComputerConfirmation] = useState<{ action: string; params: Record<string, any>; reason: string } | null>(null)
-  const [computerIteration, setComputerIteration] = useState({ current: 0, max: 25 })
+  const [computerUserAction, setComputerUserAction] = useState<{ instruction: string; action_type: string } | null>(null)
+  const [computerStep, setComputerStep] = useState(0)
+  const [computerCost, setComputerCost] = useState<{ estimated_usd: number; calls: number } | null>(null)
+  const [computerCostWarning, setComputerCostWarning] = useState<string | null>(null)
   // computerUseMode removed — Computer Use is now triggered automatically by the agent
+
+  // ── Agent 3 Plan Mode / Permissions / Cost (Claude-Code-inspired) ──
+  const [activePlan, setActivePlan] = useState<ExecutionPlan | null>(null)
+  const [pendingPlan, setPendingPlan] = useState<ExecutionPlan | null>(null)
+  const [generatingPlan, setGeneratingPlan] = useState(false)
+  const [permissionRequest, setPermissionRequest] = useState<PermissionRequest | null>(null)
+  const [costSnapshot, setCostSnapshot] = useState<{ usd: number; calls: number; input_tokens: number; output_tokens: number; exhausted?: boolean; warning?: boolean } | null>(null)
+  const { mode: permissionMode, setMode: setPermissionMode } = useAgent3Policy()
 
   // Agent 3 management panels
   const [showCronPanel, setShowCronPanel] = useState(false)
@@ -1805,14 +1923,133 @@ export default function AgentsPage() {
     setLoadingMessages3(false)
   }, [])
 
-  // Computer Use handlers
+  // Computer Use handlers (enhanced with Plan Mode / Permissions / Cost)
+  const startBrowserAgentRun = async (
+    task: string, url: string, code: string,
+    options?: { planId?: string; permissionMode?: PermissionMode }
+  ) => {
+    setComputerUseActive(true)
+    setComputerScreenshot(null)
+    setComputerActions([])
+    setComputerThinking('')
+    setComputerConfirmation(null)
+    setComputerUserAction(null)
+    setComputerStep(0)
+    try {
+      await api.browserAgentStart(task, url, code, {
+        onScreenshot: async () => {
+          try {
+            const r = await api.browserAgentScreenshot()
+            if (r?.screenshot) setComputerScreenshot(r.screenshot)
+          } catch {}
+        },
+        onThinking: (text) => setComputerThinking(text),
+        onAction: (action, params) => setComputerActions(prev => [...prev.slice(-9), { action, params, time: new Date().toLocaleTimeString() }]),
+        onUserActionNeeded: (data) => setComputerUserAction(data),
+        onUserActionResult: () => setComputerUserAction(null),
+        onStep: (current) => setComputerStep(current),
+        onComplete: (text) => {
+          setComputerUseActive(false)
+          setComputerUserAction(null)
+          setActivePlan(null)
+          setMessages3(prev => [...prev, { role: 'agent', content: text, timestamp: new Date().toISOString(), type: 'text' as any }])
+        },
+        onError: (message) => {
+          setComputerUseActive(false)
+          setMessages3(prev => [...prev, { role: 'agent', content: `Erreur BrowserAgent: ${message}`, timestamp: new Date().toISOString(), type: 'text' as any }])
+        },
+        // ── Nouveaux callbacks Plan Mode / Permissions / Cost ──
+        onPermissionNeeded: (req) => setPermissionRequest(req as PermissionRequest),
+        onPermissionResult: () => setPermissionRequest(null),
+        onPermissionDenied: (d) => {
+          setComputerThinking(`Action refusee : ${d.action} (${d.risk}) - ${d.reason}`)
+        },
+        onPlanModeActive: () => {
+          setComputerThinking('Mode Plan actif : aucune action ne sera executee.')
+        },
+        onPlanAttached: (plan) => setActivePlan(plan as ExecutionPlan),
+        onCostUpdate: (c) => setCostSnapshot(prev => ({ ...prev, ...c, exhausted: false, warning: prev?.warning })),
+        onCostWarning: (c) => setCostSnapshot(prev => ({ ...(prev || { usd: 0, calls: 0, input_tokens: 0, output_tokens: 0 }), usd: c.current_usd, calls: c.calls, warning: true })),
+        onCostExhausted: (c) => {
+          setCostSnapshot(prev => ({ ...(prev || { usd: 0, calls: 0, input_tokens: 0, output_tokens: 0 }), exhausted: true }))
+          setComputerThinking(`Credits API epuises : ${c.message}`)
+        },
+      }, options)
+    } catch (err: any) {
+      setComputerUseActive(false)
+    }
+  }
+
+  // Nouvelle API publique : genere un plan d'abord si mode='plan',
+  // sinon execute directement (compat retro).
+  const handleBrowserAgent = async (task: string, url: string, code: string) => {
+    // Plan Mode : on genere le plan, on l'affiche, l'user approuve
+    if (permissionMode === 'plan') {
+      setGeneratingPlan(true)
+      try {
+        const plan = await api.browserAgentGeneratePlan(task, url, code)
+        setPendingPlan(plan as ExecutionPlan)
+      } catch (err: any) {
+        setMessages3(prev => [...prev, { role: 'agent', content: `Erreur generation plan: ${err.message}`, timestamp: new Date().toISOString(), type: 'text' as any }])
+      } finally {
+        setGeneratingPlan(false)
+      }
+      return
+    }
+    // Autres modes : exec direct
+    await startBrowserAgentRun(task, url, code, { permissionMode })
+  }
+
+  // Handler d'approbation de plan : lance l'execution
+  const handleApprovePlan = async (planId: string) => {
+    try {
+      await api.browserAgentApprovePlan(planId)
+    } catch {}
+  }
+
+  const handleStartFromPlan = async (planId: string) => {
+    const plan = pendingPlan
+    if (!plan) return
+    setPendingPlan(null)
+    setActivePlan(plan)
+    await startBrowserAgentRun(plan.task, plan.url || '', '', { planId, permissionMode: 'auto_safe' })
+  }
+
+  const handleRejectPlan = async (planId: string) => {
+    try { await api.browserAgentAbortPlan(planId) } catch {}
+    setPendingPlan(null)
+  }
+
+  const handleEditPlanStep = async (planId: string, stepId: number, changes: { description?: string; risk?: string }) => {
+    try {
+      const updated = await api.browserAgentEditPlanStep(planId, stepId, changes)
+      if (updated) setPendingPlan(updated as ExecutionPlan)
+    } catch {}
+  }
+
+  const handlePermissionResponse = async (allow: boolean) => {
+    setPermissionRequest(null)
+    try {
+      await api.browserAgentPermissionRespond(allow)
+    } catch {}
+  }
+
+  const handleCostReset = async () => {
+    try {
+      await api.browserAgentCostReset()
+      setCostSnapshot(null)
+    } catch {}
+  }
+
   const handleComputerUse = async (prompt: string) => {
     setComputerUseActive(true)
     setComputerScreenshot(null)
     setComputerActions([])
     setComputerThinking('')
     setComputerConfirmation(null)
-    setComputerIteration({ current: 0, max: 25 })
+    setComputerStep(0)
+    setComputerCost(null)
+    setComputerCostWarning(null)
 
     // Add user message to chat
     setMessages3(prev => [...prev, {
@@ -1843,12 +2080,32 @@ export default function AgentsPage() {
         onConfirmationNeeded: (data) => {
           setComputerConfirmation(data)
         },
-        onIteration: (current, max) => {
-          setComputerIteration({ current, max })
+        onUserActionNeeded: (data) => {
+          setComputerUserAction(data)
+        },
+        onUserActionResult: () => {
+          setComputerUserAction(null)
+        },
+        onStep: (current) => {
+          setComputerStep(current)
+        },
+        onCostUpdate: (data) => {
+          setComputerCost({ estimated_usd: data.estimated_usd, calls: data.calls })
+        },
+        onCostWarning: (data) => {
+          setComputerCostWarning(`Seuil $${data.threshold_usd.toFixed(2)} atteint (cout actuel: $${data.current_usd.toFixed(4)})`)
+        },
+        onCompaction: (data) => {
+          setComputerActions(prev => [...prev, {
+            action: 'compaction',
+            params: { old: data.old_count, new: data.new_count },
+            time: new Date().toLocaleTimeString(),
+          }])
         },
         onComplete: (text) => {
           setComputerUseActive(false)
           setComputerConfirmation(null)
+          setComputerUserAction(null)
           setMessages3(prev => [...prev, {
             role: 'agent',
             content: text,
@@ -1911,6 +2168,96 @@ export default function AgentsPage() {
         role: m.role === 'agent' ? 'assistant' : 'user',
         content: m.content, type: m.type,
       }))
+      if (agent3NativeMode) {
+        const nowTime = () => new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        setStreamLogs([{ text: 'Mode natif (tool_use API) — streaming tokens actif', type: 'info', time: nowTime() }])
+        // Prepare cancel plumbing
+        const genToken = (): string => {
+          try {
+            const anyCrypto = (typeof crypto !== 'undefined' ? crypto : null) as (Crypto & { randomUUID?: () => string }) | null
+            if (anyCrypto?.randomUUID) return anyCrypto.randomUUID()
+          } catch {}
+          return `tok_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+        }
+        const cancelToken = genToken()
+        setCurrentCancelToken(cancelToken)
+        const abort = new AbortController()
+        abortControllerRef3.current = abort
+        setThinkingText('')
+        await api.agent3ChatStreamNative(
+          chatHistory,
+          deviceCtx ?? undefined,
+          msgType === 'voice' ? audioBase64 : undefined,
+          {
+            onTurnStart: (turn) => {
+              setStreamLogs(prev => [...prev, { text: `Tour ${turn}…`, type: 'info', time: nowTime() }])
+            },
+            onThinking: (text) => {
+              // Legacy preview text (non-streaming thinking fallback)
+              setStreamingText(prev => prev + text)
+            },
+            onTokenDelta: (text) => {
+              // Token-level streaming from assistant (extended thinking OFF or text blocks)
+              setStreamingText(prev => prev + text)
+            },
+            onThinkingDelta: (text) => {
+              // Extended thinking stream — shown in collapsible panel
+              setThinkingText(prev => prev + text)
+              setThinkingOpen(true)
+            },
+            onThinkingBlock: () => {
+              // Final reasoning block finalized — keep text, leave panel state to user
+            },
+            onContextCompacted: (data) => {
+              setStreamLogs(prev => [...prev, {
+                text: `Contexte compacte (${data.old_count} → ${data.new_count} messages)`,
+                type: 'info', time: nowTime(),
+              }])
+            },
+            onCancelled: () => {
+              setStreamLogs(prev => [...prev, { text: 'Generation interrompue par l\'utilisateur', type: 'warn', time: nowTime() }])
+              setStreamingText('')
+            },
+            onToolUse: (t) => {
+              setStreamTools(prev => [...prev, { tool: t.name, description: JSON.stringify(t.input).slice(0, 120), status: 'running' }])
+              setStreamLogs(prev => [...prev, { text: `tool_use ${t.name}`, type: 'tool', time: nowTime() }])
+            },
+            onToolResult: (r) => {
+              setStreamTools(prev => prev.length ? [...prev.slice(0, -1), { ...prev[prev.length - 1], status: r.is_error ? 'error' : 'done' }] : prev)
+              setStreamLogs(prev => [...prev, { text: `tool_result: ${r.content.slice(0, 140)}`, type: r.is_error ? 'error' : 'info', time: nowTime() }])
+            },
+            onTurnDone: () => {},
+            onResult: (result) => {
+              setStreamingText('')
+              const agentResponseType = msgType === 'voice' ? 'voice' : 'text'
+              setMessages3(prev => [...prev, {
+                role: 'agent', content: result.message,
+                timestamp: new Date().toISOString(), type: agentResponseType,
+              }])
+            },
+            onAwaitingConfirmation: (payload) => {
+              setStreamingText('')
+              setStreamLogs(prev => [...prev, {
+                text: `Confirmation requise pour ${payload.pending_tool_uses.map(t => t.action_type).join(', ')}`,
+                type: 'warn', time: nowTime(),
+              }])
+              setPendingConfirmation(payload)
+            },
+            onError: (errMsg) => {
+              setStreamLogs(prev => [...prev, { text: errMsg, type: 'error', time: nowTime() }])
+            },
+          },
+          {
+            stream: true,
+            thinking: thinkingEnabled,
+            cancel_token: cancelToken,
+            signal: abort.signal,
+          }
+        )
+        setCurrentCancelToken(null)
+        abortControllerRef3.current = null
+        return
+      }
       const res = await api.agent3ChatStream(
         chatHistory,
         deviceCtx ?? undefined,
@@ -1953,10 +2300,15 @@ export default function AgentsPage() {
             if (cuAction?.data?.started && cuAction?.data?.prompt) {
               handleComputerUse(cuAction.data.prompt)
             }
+            // Auto-trigger Browser Agent (Playwright) pour services externes
+            const baAction = result.actions?.find((a: any) => a.type === 'BROWSER_AGENT')
+            if (baAction?.data?.started) {
+              handleBrowserAgent(baAction.data.task, baAction.data.url, baAction.data.code)
+            }
             setMessages3(prev => [...prev, {
               role: 'agent', content: result.message,
               timestamp: new Date().toISOString(), type: agentResponseType,
-              actions: result.actions?.filter((a: any) => a.type !== 'COMPUTER_USE') || undefined,
+              actions: result.actions?.filter((a: any) => a.type !== 'COMPUTER_USE' && a.type !== 'BROWSER_AGENT') || undefined,
             }])
           },
           onError: (errMsg) => {
@@ -1972,10 +2324,26 @@ export default function AgentsPage() {
     } finally {
       setSending3(false)
       setStreamingText('')
+      setCurrentCancelToken(null)
+      abortControllerRef3.current = null
       // Garder le panneau visible 5s puis masquer (pour voir les etapes terminees)
       setTimeout(() => setStreamActive(false), 5000)
     }
-  }, [inputText3, sending3, messages3, deviceCtx, voiceEnabled3])
+  }, [inputText3, sending3, messages3, deviceCtx, voiceEnabled3, agent3NativeMode, thinkingEnabled])
+
+  // Stop: annule la generation native en cours (backend asyncio.Event + AbortController)
+  const handleStopAgent3 = useCallback(async () => {
+    const tok = currentCancelToken
+    if (tok) {
+      try { await api.agent3ChatCancelNative(tok) } catch {}
+    }
+    const ctrl = abortControllerRef3.current
+    if (ctrl) {
+      try { ctrl.abort() } catch {}
+    }
+    setCurrentCancelToken(null)
+    abortControllerRef3.current = null
+  }, [currentCancelToken])
 
   // ── Voice recording for Agent 3 ──────────────────────────────────────────
   const stopVoiceRecording3 = useCallback(() => {
@@ -2408,6 +2776,55 @@ export default function AgentsPage() {
               </button>
             )}
 
+            {/* Native mode toggle (tool_use API vs legacy parser) */}
+            <button
+              onClick={toggleAgent3Native}
+              title={agent3NativeMode
+                ? 'Mode natif actif : outils via tool_use API (pas de parser regex)'
+                : 'Basculer en mode natif (tool_use API, recommande)'}
+              className={agent3NativeMode ? 'agent3-small-btn agent3-text-glow' : ''}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '0.35rem',
+                padding: '0.3rem 0.65rem', borderRadius: '999px',
+                border: agent3NativeMode ? undefined : '1px solid var(--border)',
+                background: agent3NativeMode ? undefined : 'rgba(255,255,255,0.04)',
+                color: agent3NativeMode ? undefined : 'var(--text-muted)',
+                cursor: 'pointer', fontSize: '0.72rem', fontWeight: 600,
+                transition: 'all 0.2s',
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="16 18 22 12 16 6" />
+                <polyline points="8 6 2 12 8 18" />
+              </svg>
+              {agent3NativeMode ? 'Natif' : 'Legacy'}
+            </button>
+
+            {/* Extended thinking toggle (only useful in native mode) */}
+            {agent3NativeMode && (
+              <button
+                onClick={toggleThinking}
+                title={thinkingEnabled
+                  ? 'Extended Thinking actif : le modele raisonne visiblement avant de repondre'
+                  : 'Activer Extended Thinking (raisonnement visible)'}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '0.35rem',
+                  padding: '0.3rem 0.65rem', borderRadius: '999px',
+                  border: thinkingEnabled ? '1px solid rgba(147,51,234,0.5)' : '1px solid var(--border)',
+                  background: thinkingEnabled ? 'rgba(147,51,234,0.15)' : 'rgba(255,255,255,0.04)',
+                  color: thinkingEnabled ? '#c084fc' : 'var(--text-muted)',
+                  cursor: 'pointer', fontSize: '0.72rem', fontWeight: 600,
+                  transition: 'all 0.2s',
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z" />
+                  <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z" />
+                </svg>
+                {thinkingEnabled ? 'Pensee' : 'Pensee off'}
+              </button>
+            )}
+
             {/* Voice call button */}
             <button
               onClick={() => { setChat3Open(false); setInCall3(true) }}
@@ -2626,29 +3043,28 @@ export default function AgentsPage() {
                             <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '0 0 0.5rem', lineHeight: 1.4, maxHeight: '4rem', overflow: 'hidden' }}>
                               {action.data.body?.substring(0, 200)}...
                             </p>
-                            <div style={{ display: 'flex', gap: '0.5rem' }}>
-                              <button onClick={() => handleAction(action)} style={{
-                                padding: '0.4rem 1rem', borderRadius: '8px', border: 'none',
-                                background: 'linear-gradient(135deg, #ea4335, #d93025)', color: '#fff', fontSize: '0.78rem',
-                                fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
-                                display: 'flex', alignItems: 'center', gap: '0.4rem',
-                              }}>
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 7l-10 7L2 7"/></svg>
-                                Ouvrir dans Gmail
-                              </button>
-                              <button onClick={() => {
-                                try { navigator.clipboard.writeText(action.data.body) } catch {}
-                                setActionToast('Corps du mail copie !')
-                                setTimeout(() => setActionToast(null), 3000)
-                              }} style={{
-                                padding: '0.4rem 1rem', borderRadius: '8px',
-                                background: 'rgba(255,255,255,0.08)', border: '1px solid var(--border)',
-                                color: 'var(--text-muted)', fontSize: '0.78rem',
-                                fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
-                              }}>
-                                Copier
-                              </button>
-                            </div>
+                            {action.data.sent === true ? (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.7rem', borderRadius: '8px', background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.2)' }}>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                <span style={{ fontSize: '0.78rem', color: '#22c55e', fontWeight: 600 }}>
+                                  Email envoye ({action.data.method === 'smtp' ? 'SMTP' : action.data.method === 'gmail_api' ? 'Gmail API' : 'Computer Use'})
+                                </span>
+                              </div>
+                            ) : action.data.method === 'computer_use' ? (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.7rem', borderRadius: '8px', background: 'rgba(139,92,246,0.08)', border: '1px solid rgba(139,92,246,0.2)' }}>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" strokeWidth="2.5" strokeLinecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                                <span style={{ fontSize: '0.78rem', color: '#8b5cf6', fontWeight: 600 }}>
+                                  Envoi en cours via Computer Use...
+                                </span>
+                              </div>
+                            ) : (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.7rem', borderRadius: '8px', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                                <span style={{ fontSize: '0.78rem', color: '#ef4444', fontWeight: 600 }}>
+                                  {action.data.message || 'Email non envoye — toutes les methodes ont echoue'}
+                                </span>
+                              </div>
+                            )}
                           </>
                         )}
                         {action.type === 'TEXT' && (
@@ -2942,24 +3358,134 @@ export default function AgentsPage() {
                             )}
                             <pre style={{
                               padding: '0.65rem', borderRadius: '8px',
-                              background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(167,139,250,0.15)',
-                              fontSize: '0.72rem', color: '#e2e8f0', lineHeight: 1.5,
-                              maxHeight: '12rem', overflow: 'auto', whiteSpace: 'pre-wrap',
-                              fontFamily: "'Fira Code', 'Cascadia Code', monospace",
+                              background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(167,139,250,0.15)',
+                              fontSize: '0.72rem', color: '#e2e8f0', lineHeight: 1.6,
+                              maxHeight: '24rem', overflow: 'auto', whiteSpace: 'pre',
+                              fontFamily: "'Fira Code', 'Cascadia Code', 'Consolas', monospace",
+                              counterReset: 'line',
                             }}>
-                              {action.data.content?.substring(0, 2000)}
+                              <code dangerouslySetInnerHTML={{ __html: (() => {
+                                const code = (action.data.content || '').substring(0, 3000)
+                                const lang = (action.data.language || '').toLowerCase()
+                                const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                                if (!['python', 'py', 'javascript', 'js', 'typescript', 'ts', 'html', 'css', 'json', 'bash', 'sh', 'sql', 'java', 'c', 'cpp', 'rust', 'go'].includes(lang)) {
+                                  return esc(code)
+                                }
+                                // Token-based highlighting to avoid regex interference
+                                const isPy = lang.startsWith('py') || lang === 'python'
+                                const kws = new Set(isPy
+                                  ? ['def','class','if','elif','else','for','while','return','import','from','as','try','except','finally','with','yield','lambda','pass','break','continue','raise','and','or','not','in','is','True','False','None','async','await','print']
+                                  : ['function','const','let','var','if','else','for','while','return','import','from','export','class','new','this','try','catch','finally','throw','async','await','yield','typeof','instanceof','true','false','null','undefined','switch','case','break','continue','default'])
+                                const lines = code.split('\n')
+                                return lines.map(line => {
+                                  const result: string[] = []
+                                  let i = 0
+                                  while (i < line.length) {
+                                    // Comments
+                                    if ((isPy && line[i] === '#') || (!isPy && line[i] === '/' && line[i+1] === '/')) {
+                                      result.push(`<span style="color:#6b7280;font-style:italic">${esc(line.slice(i))}</span>`)
+                                      i = line.length; break
+                                    }
+                                    // Strings
+                                    if (line[i] === '"' || line[i] === "'") {
+                                      const q = line[i]; let j = i + 1
+                                      // Triple quotes
+                                      if (line[j] === q && line[j+1] === q) {
+                                        j = line.indexOf(q+q+q, i+3)
+                                        j = j === -1 ? line.length : j + 3
+                                      } else {
+                                        while (j < line.length && line[j] !== q) { if (line[j] === '\\') j++; j++ }
+                                        if (j < line.length) j++
+                                      }
+                                      result.push(`<span style="color:#a5d6a7">${esc(line.slice(i, j))}</span>`)
+                                      i = j; continue
+                                    }
+                                    // Decorators
+                                    if (isPy && line[i] === '@' && (i === 0 || /\s/.test(line[i-1]))) {
+                                      let j = i + 1
+                                      while (j < line.length && /\w/.test(line[j])) j++
+                                      result.push(`<span style="color:#ffcb6b">${esc(line.slice(i, j))}</span>`)
+                                      i = j; continue
+                                    }
+                                    // Words (identifiers/keywords)
+                                    if (/[a-zA-Z_]/.test(line[i])) {
+                                      let j = i
+                                      while (j < line.length && /\w/.test(line[j])) j++
+                                      const word = line.slice(i, j)
+                                      if (kws.has(word)) {
+                                        result.push(`<span style="color:#c792ea;font-weight:bold">${esc(word)}</span>`)
+                                      } else if (j < line.length && line[j] === '(') {
+                                        result.push(`<span style="color:#82aaff">${esc(word)}</span>`)
+                                      } else {
+                                        result.push(esc(word))
+                                      }
+                                      i = j; continue
+                                    }
+                                    // Numbers
+                                    if (/\d/.test(line[i])) {
+                                      let j = i
+                                      while (j < line.length && /[\d.]/.test(line[j])) j++
+                                      result.push(`<span style="color:#f78c6c">${esc(line.slice(i, j))}</span>`)
+                                      i = j; continue
+                                    }
+                                    // Other characters
+                                    result.push(esc(line[i]))
+                                    i++
+                                  }
+                                  return result.join('')
+                                }).join('\n')
+                              })() }} />
                             </pre>
-                            <button onClick={() => {
-                              try { navigator.clipboard.writeText(action.data.content || '') } catch {}
-                              setActionToast('Code copie !')
-                              setTimeout(() => setActionToast(null), 3000)
-                            }} style={{
-                              marginTop: '0.35rem', padding: '0.35rem 0.8rem', borderRadius: '6px',
-                              background: 'rgba(167,139,250,0.12)', border: '1px solid rgba(167,139,250,0.2)',
-                              color: '#a78bfa', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer',
-                            }}>
-                              Copier le code
-                            </button>
+                            <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.35rem', alignItems: 'center' }}>
+                              <button onClick={() => {
+                                try { navigator.clipboard.writeText(action.data.content || '') } catch {}
+                                setActionToast('Code copie !')
+                                setTimeout(() => setActionToast(null), 3000)
+                              }} style={{
+                                padding: '0.35rem 0.8rem', borderRadius: '6px',
+                                background: 'rgba(167,139,250,0.12)', border: '1px solid rgba(167,139,250,0.2)',
+                                color: '#a78bfa', fontSize: '0.72rem', fontWeight: 600, cursor: 'pointer',
+                              }}>
+                                Copier le code
+                              </button>
+                              {action.data.executed && (
+                                <span style={{ fontSize: '0.68rem', color: action.data.exit_code === 0 ? '#22c55e' : '#ef4444', fontWeight: 600 }}>
+                                  {action.data.exit_code === 0 ? 'Execute avec succes' : `Erreur (exit ${action.data.exit_code})`}
+                                  {action.data.execution_time_ms && ` — ${action.data.execution_time_ms}ms`}
+                                </span>
+                              )}
+                            </div>
+                            {action.data.execution_output && (
+                              <div style={{ marginTop: '0.4rem' }}>
+                                <div style={{ fontSize: '0.68rem', color: '#22c55e', fontWeight: 600, marginBottom: '0.2rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                                  Sortie
+                                </div>
+                                <pre style={{
+                                  padding: '0.5rem', borderRadius: '6px',
+                                  background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.15)',
+                                  fontSize: '0.7rem', color: '#86efac', lineHeight: 1.5,
+                                  maxHeight: '8rem', overflow: 'auto', whiteSpace: 'pre-wrap',
+                                  fontFamily: "'Fira Code', monospace",
+                                }}>
+                                  {action.data.execution_output.substring(0, 2000)}
+                                </pre>
+                              </div>
+                            )}
+                            {action.data.execution_stderr && action.data.exit_code !== 0 && (
+                              <div style={{ marginTop: '0.3rem' }}>
+                                <div style={{ fontSize: '0.68rem', color: '#ef4444', fontWeight: 600, marginBottom: '0.2rem' }}>Erreur</div>
+                                <pre style={{
+                                  padding: '0.5rem', borderRadius: '6px',
+                                  background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)',
+                                  fontSize: '0.7rem', color: '#fca5a5', lineHeight: 1.5,
+                                  maxHeight: '6rem', overflow: 'auto', whiteSpace: 'pre-wrap',
+                                  fontFamily: "'Fira Code', monospace",
+                                }}>
+                                  {action.data.execution_stderr.substring(0, 1000)}
+                                </pre>
+                              </div>
+                            )}
                           </>
                         )}
                         {action.type === 'CRON' && (
@@ -3051,10 +3577,35 @@ export default function AgentsPage() {
                               </pre>
                             )}
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.35rem' }}>
-                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-                              <span style={{ fontSize: '0.68rem', color: '#22c55e', fontWeight: 500 }}>
-                                Sauvegarde dans Documents/Sylea/ via le Desktop
-                              </span>
+                              {action.data.saved && action.data.workspace_path ? (
+                                <>
+                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                  <span style={{ fontSize: '0.68rem', color: '#22c55e', fontWeight: 500 }}>
+                                    Sauvegarde dans workspace/{action.data.workspace_path} {action.data.size ? `(${(action.data.size / 1024).toFixed(1)} Ko)` : ''}
+                                  </span>
+                                </>
+                              ) : action.data.save_error ? (
+                                <>
+                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="3" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                                  <span style={{ fontSize: '0.68rem', color: '#ef4444', fontWeight: 500 }}>
+                                    Erreur : {action.data.save_error}
+                                  </span>
+                                </>
+                              ) : action.data.download_url ? (
+                                <>
+                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="3" strokeLinecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                                  <a href={action.data.download_url} download={action.data.filename} style={{ fontSize: '0.68rem', color: '#f59e0b', fontWeight: 600, textDecoration: 'underline', cursor: 'pointer' }}>
+                                    Telecharger {action.data.filename} ({action.data.size ? `${(action.data.size / 1024).toFixed(1)} Ko` : ''})
+                                  </a>
+                                </>
+                              ) : (
+                                <>
+                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                  <span style={{ fontSize: '0.68rem', color: '#22c55e', fontWeight: 500 }}>
+                                    Fichier cree
+                                  </span>
+                                </>
+                              )}
                             </div>
                           </>
                         )}
@@ -3206,19 +3757,76 @@ export default function AgentsPage() {
                                 {action.data.description}
                               </p>
                             )}
-                            {action.data.type === 'html' && action.data.content ? (
+                            {(action.data.type === 'html' || (action.data.type === 'table' && typeof action.data.content === 'string' && action.data.content.includes('<'))) && action.data.content ? (
                               <div style={{
                                 borderRadius: '8px', overflow: 'hidden', border: '1px solid rgba(139,92,246,0.2)',
-                                background: '#fff', minHeight: '200px', maxHeight: '500px',
+                                background: 'rgba(0,0,0,0.15)', maxHeight: '500px', overflowY: 'auto',
                               }}>
-                                <iframe
-                                  srcDoc={action.data.content}
-                                  style={{ width: '100%', height: '400px', border: 'none' }}
-                                  sandbox="allow-scripts"
-                                  title={action.data.title || 'Canvas'}
-                                />
+                                <div dangerouslySetInnerHTML={{ __html: `<style>table{width:100%;border-collapse:collapse;font-size:0.75rem;color:#e2e8f0}th{padding:0.5rem 0.7rem;text-align:left;background:rgba(139,92,246,0.12);color:#a78bfa;font-weight:600;border-bottom:1px solid rgba(139,92,246,0.2)}td{padding:0.4rem 0.7rem;border-bottom:1px solid rgba(255,255,255,0.06)}tr:hover td{background:rgba(139,92,246,0.04)}strong{color:#c4b5fd}</style>${action.data.content}` }} />
                               </div>
-                            ) : action.data.type === 'table' && Array.isArray(action.data.content) ? (
+                            ) : (action.data.type === 'chart' || action.data.type === 'diagram') && typeof action.data.content === 'string' ? (() => {
+                              // Parse chart data: "pie_chart:Label-Value%,..." or "bar_chart:..." or simple "Label-Value%,..."
+                              const raw = action.data.content
+                              const isPie = raw.startsWith('pie_chart:')
+                              const isBar = raw.startsWith('bar_chart:')
+                              const dataStr = raw.replace(/^(pie_chart|bar_chart|line_chart):/, '')
+                              const items = dataStr.split(',').map(s => s.trim()).filter(Boolean).map(s => {
+                                // Support formats: "Label-Value%", "Label:Value%", "Label Value%", "Label (Value%)"
+                                let label = '', val = 0
+                                const m1 = s.match(/^(.+?)\s*[-:]\s*([\d.]+)\s*%?\s*$/)
+                                const m2 = s.match(/^(.+?)\s*\(\s*([\d.]+)\s*%?\s*\)\s*$/)
+                                const m3 = s.match(/^(.+?)\s+([\d.]+)\s*%?\s*$/)
+                                const match = m1 || m2 || m3
+                                if (match) { label = match[1].trim(); val = parseFloat(match[2]) }
+                                else { label = s.replace(/[\d.%]+/g, '').trim(); val = parseFloat(s.replace(/[^\d.]/g, '') || '0') }
+                                return { label, value: isNaN(val) ? 0 : val }
+                              }).filter(i => i.value > 0)
+                              const colors = ['#3b82f6','#ef4444','#22c55e','#f59e0b','#8b5cf6','#ec4899','#06b6d4','#f97316','#14b8a6','#6366f1']
+                              const total = items.reduce((s, i) => s + i.value, 0)
+                              if (items.length === 0) return <pre style={{ padding: '0.6rem', borderRadius: '8px', background: 'rgba(0,0,0,0.25)', fontSize: '0.72rem', color: '#e2e8f0' }}>{raw}</pre>
+                              if (isPie || (!isBar && items.length <= 10)) {
+                                // Pie chart via conic-gradient
+                                let gradientParts: string[] = []; let cumul = 0
+                                items.forEach((item, idx) => {
+                                  const pct = (item.value / total) * 100
+                                  const color = colors[idx % colors.length]
+                                  gradientParts.push(`${color} ${cumul}% ${cumul + pct}%`)
+                                  cumul += pct
+                                })
+                                return (
+                                  <div style={{ display: 'flex', gap: '1.2rem', alignItems: 'center', padding: '0.8rem', borderRadius: '10px', background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(139,92,246,0.15)' }}>
+                                    <div style={{
+                                      width: 160, height: 160, borderRadius: '50%', flexShrink: 0,
+                                      background: `conic-gradient(${gradientParts.join(', ')})`,
+                                      boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
+                                    }} />
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                                      {items.map((item, idx) => (
+                                        <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.72rem' }}>
+                                          <div style={{ width: 10, height: 10, borderRadius: 2, background: colors[idx % colors.length], flexShrink: 0 }} />
+                                          <span style={{ color: '#e2e8f0' }}>{item.label}</span>
+                                          <span style={{ color: '#a78bfa', fontWeight: 600, marginLeft: 'auto' }}>{item.value}%</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )
+                              }
+                              // Bar chart fallback
+                              return (
+                                <div style={{ padding: '0.8rem', borderRadius: '10px', background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(139,92,246,0.15)' }}>
+                                  {items.map((item, idx) => (
+                                    <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.35rem' }}>
+                                      <span style={{ fontSize: '0.68rem', color: '#e2e8f0', minWidth: '5rem', textAlign: 'right' }}>{item.label}</span>
+                                      <div style={{ flex: 1, height: 18, borderRadius: 4, background: 'rgba(255,255,255,0.05)', overflow: 'hidden' }}>
+                                        <div style={{ width: `${(item.value / Math.max(...items.map(i => i.value))) * 100}%`, height: '100%', background: colors[idx % colors.length], borderRadius: 4, transition: 'width 0.5s' }} />
+                                      </div>
+                                      <span style={{ fontSize: '0.68rem', color: '#a78bfa', fontWeight: 600, minWidth: '2.5rem' }}>{item.value}%</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )
+                            })() : action.data.type === 'table' && Array.isArray(action.data.content) ? (
                               <div style={{
                                 borderRadius: '8px', overflow: 'auto', border: '1px solid rgba(139,92,246,0.15)',
                                 maxHeight: '400px',
@@ -3558,6 +4166,39 @@ export default function AgentsPage() {
                 )}
               </div>
             )}
+            {/* ── Agent 3 Extended Thinking (collapsible reasoning stream) ── */}
+            {thinkingEnabled && thinkingText && (sending3 || streamActive) && (
+              <div style={{ display: 'flex', justifyContent: 'flex-start', flexShrink: 0 }}>
+                <div style={{
+                  padding: '0.6rem 0.9rem', borderRadius: 12,
+                  background: 'rgba(147, 51, 234, 0.08)',
+                  border: '1px solid rgba(147, 51, 234, 0.25)',
+                  maxWidth: '80%', width: '100%',
+                }}>
+                  <button
+                    onClick={() => setThinkingOpen(o => !o)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 6,
+                      background: 'transparent', border: 'none', cursor: 'pointer',
+                      color: '#c084fc', fontSize: '0.78rem', fontWeight: 600,
+                      padding: 0, marginBottom: thinkingOpen ? 6 : 0,
+                    }}
+                  >
+                    <span style={{ transform: thinkingOpen ? 'rotate(90deg)' : 'rotate(0)', transition: 'transform 0.15s' }}>▸</span>
+                    Raisonnement ({thinkingText.length} chars)
+                  </button>
+                  {thinkingOpen && (
+                    <div style={{
+                      fontSize: '0.78rem', color: 'rgba(255,255,255,0.7)', lineHeight: 1.5,
+                      fontFamily: "'Fira Code', 'Cascadia Code', monospace",
+                      whiteSpace: 'pre-wrap', maxHeight: 260, overflowY: 'auto',
+                    }}>
+                      {thinkingText}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
             {/* ── Agent 3 Streaming Text (token-level) ── */}
             {streamingText && (sending3 || streamActive) && (
               <div style={{ display: 'flex', justifyContent: 'flex-start', animation: 'agent-msg-in 0.3s ease forwards', flexShrink: 0 }}>
@@ -3573,6 +4214,32 @@ export default function AgentsPage() {
                 </div>
               </div>
             )}
+            {/* ── Agent 3 Plan Preview (Claude-Code-inspired Plan Mode) ── */}
+            {pendingPlan && (
+              <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+                <PlanPreview
+                  plan={pendingPlan}
+                  onApprove={handleApprovePlan}
+                  onReject={handleRejectPlan}
+                  onEditStep={handleEditPlanStep}
+                  onStartExecution={handleStartFromPlan}
+                />
+              </div>
+            )}
+            {generatingPlan && (
+              <div style={{
+                padding: '0.75rem 1rem', background: 'rgba(255,255,255,0.04)', borderRadius: 8,
+                color: 'var(--text-secondary)', fontSize: '0.85rem',
+              }}>
+                Generation du plan d'execution...
+              </div>
+            )}
+            {/* Agent 3 Permission Prompt (modale globale) */}
+            <PermissionPrompt
+              request={permissionRequest}
+              onAllow={() => handlePermissionResponse(true)}
+              onDeny={() => handlePermissionResponse(false)}
+            />
             {/* Computer Use Live Panel */}
             {computerUseActive && (
               <div style={{
@@ -3586,7 +4253,7 @@ export default function AgentsPage() {
                 margin: '0.5rem 0',
               }}>
                 {/* Header */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                     <div style={{
                       width: 8, height: 8, borderRadius: '50%',
@@ -3594,23 +4261,56 @@ export default function AgentsPage() {
                       animation: 'agent3-cursor-blink 1s ease infinite',
                     }} />
                     <span style={{ color: '#d4a017', fontWeight: 600, fontSize: '0.85rem' }}>
-                      Computer Use — Iteration {computerIteration.current}/{computerIteration.max}
+                      Computer Use — Etape {computerStep}
                     </span>
+                    {activePlan && (
+                      <span style={{
+                        padding: '2px 8px', borderRadius: 999, fontSize: 11,
+                        background: 'rgba(5,150,105,0.15)', color: '#10b981', fontWeight: 600,
+                      }}>
+                        Plan: {activePlan.steps.length} etapes
+                      </span>
+                    )}
                   </div>
-                  <button
-                    onClick={handleComputerAbort}
-                    style={{
-                      background: 'rgba(255, 80, 80, 0.15)',
-                      border: '1px solid rgba(255, 80, 80, 0.3)',
-                      borderRadius: '6px',
-                      padding: '4px 12px',
-                      color: '#ff5050',
-                      cursor: 'pointer',
-                      fontSize: '0.8rem',
-                    }}
-                  >
-                    Arreter
-                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {/* Computer Use cost display */}
+                    {computerCost && (
+                      <span style={{
+                        padding: '2px 8px', borderRadius: 999, fontSize: 11, fontWeight: 600,
+                        background: computerCostWarning ? 'rgba(255,80,80,0.15)' : 'rgba(212,160,23,0.15)',
+                        color: computerCostWarning ? '#ff5050' : '#d4a017',
+                        cursor: 'default',
+                      }} title={computerCostWarning || `${computerCost.calls} appels API`}>
+                        ${computerCost.estimated_usd.toFixed(4)}
+                      </span>
+                    )}
+                    {/* Browser Agent cost badge */}
+                    {costSnapshot && (
+                      <CostBadge
+                        usd={costSnapshot.usd}
+                        calls={costSnapshot.calls}
+                        inputTokens={costSnapshot.input_tokens}
+                        outputTokens={costSnapshot.output_tokens}
+                        warning={costSnapshot.warning}
+                        exhausted={costSnapshot.exhausted}
+                        onReset={handleCostReset}
+                      />
+                    )}
+                    <button
+                      onClick={handleComputerAbort}
+                      style={{
+                        background: 'rgba(255, 80, 80, 0.15)',
+                        border: '1px solid rgba(255, 80, 80, 0.3)',
+                        borderRadius: '6px',
+                        padding: '4px 12px',
+                        color: '#ff5050',
+                        cursor: 'pointer',
+                        fontSize: '0.8rem',
+                      }}
+                    >
+                      Arreter
+                    </button>
+                  </div>
                 </div>
 
                 {/* Live Screenshot */}
@@ -3723,6 +4423,73 @@ export default function AgentsPage() {
                     </div>
                   </div>
                 )}
+
+                {/* User Action Needed — Pause pour login/paiement/captcha */}
+                {computerUserAction && (
+                  <div style={{
+                    padding: '1rem',
+                    background: 'rgba(139, 92, 246, 0.08)',
+                    border: '1px solid rgba(139, 92, 246, 0.3)',
+                    borderRadius: '10px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '0.6rem',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" strokeWidth="2.5" strokeLinecap="round">
+                        {computerUserAction.action_type === 'login' && <><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></>}
+                        {computerUserAction.action_type === 'captcha' && <><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></>}
+                        {computerUserAction.action_type === 'payment' && <><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></>}
+                        {!['login', 'captcha', 'payment'].includes(computerUserAction.action_type) && <><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></>}
+                      </svg>
+                      <span style={{ color: '#8b5cf6', fontWeight: 700, fontSize: '0.88rem' }}>
+                        {computerUserAction.action_type === 'login' ? 'Connexion requise' :
+                         computerUserAction.action_type === 'captcha' ? 'Verification anti-robot' :
+                         computerUserAction.action_type === 'payment' ? 'Paiement requis' :
+                         'Action requise'}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                      {computerUserAction.instruction}
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.3rem' }}>
+                      <button
+                        onClick={async () => {
+                          try { await api.browserAgentUserAction('done').catch(() => api.computerUseUserAction('done').catch(() => {})) } catch {}
+                          setComputerUserAction(null)
+                        }}
+                        style={{
+                          flex: 1, padding: '8px 16px',
+                          background: 'linear-gradient(135deg, rgba(34,197,94,0.2), rgba(34,197,94,0.1))',
+                          border: '1px solid rgba(34,197,94,0.4)',
+                          borderRadius: '8px', color: '#22c55e',
+                          cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
+                        }}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                        Effectue
+                      </button>
+                      <button
+                        onClick={async () => {
+                          try { await api.browserAgentUserAction('abandon').catch(() => api.computerUseUserAction('abandon').catch(() => {})) } catch {}
+                          setComputerUserAction(null)
+                        }}
+                        style={{
+                          flex: 1, padding: '8px 16px',
+                          background: 'rgba(239, 68, 68, 0.1)',
+                          border: '1px solid rgba(239, 68, 68, 0.3)',
+                          borderRadius: '8px', color: '#ef4444',
+                          cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
+                        }}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                        Abandonner
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
             {/* Simple spinner fallback when no steps yet */}
@@ -3739,6 +4506,32 @@ export default function AgentsPage() {
               </div>
             )}
             <div ref={messagesEndRef3} />
+          </div>
+
+          {/* ── Permission Mode + Cost bar (Claude-Code-inspired) ── */}
+          <div style={{
+            padding: '0.5rem 1.25rem', borderTop: '1px solid var(--border)',
+            background: 'rgba(3,7,15,0.5)',
+            display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap',
+            fontSize: '0.72rem',
+          }}>
+            <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Mode :</span>
+            <PermissionModeSwitcher
+              mode={permissionMode}
+              onChange={setPermissionMode}
+              disabled={computerUseActive}
+            />
+            {costSnapshot && (
+              <CostBadge
+                usd={costSnapshot.usd}
+                calls={costSnapshot.calls}
+                inputTokens={costSnapshot.input_tokens}
+                outputTokens={costSnapshot.output_tokens}
+                warning={costSnapshot.warning}
+                exhausted={costSnapshot.exhausted}
+                onReset={handleCostReset}
+              />
+            )}
           </div>
 
           {/* Input bar */}
@@ -3908,6 +4701,23 @@ export default function AgentsPage() {
               </button>
             )}
 
+            {/* Stop button (visible only during native streaming) */}
+            {agent3NativeMode && sending3 && currentCancelToken && (
+              <button
+                onClick={handleStopAgent3}
+                title="Interrompre la generation"
+                style={{
+                  width: 40, height: 40, borderRadius: '50%', border: '1px solid rgba(255,80,80,0.4)',
+                  background: 'rgba(255,80,80,0.12)', color: '#ff5050',
+                  cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  transition: 'all 0.2s', flexShrink: 0, marginRight: 6,
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="6" y="6" width="12" height="12" rx="1" />
+                </svg>
+              </button>
+            )}
             {/* Send button (GOLD gradient for Agent 3) */}
             <button
               onClick={() => handleSend3()}
@@ -4444,29 +5254,28 @@ export default function AgentsPage() {
                             <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '0 0 0.5rem', lineHeight: 1.4, maxHeight: '4rem', overflow: 'hidden' }}>
                               {action.data.body?.substring(0, 200)}...
                             </p>
-                            <div style={{ display: 'flex', gap: '0.5rem' }}>
-                              <button onClick={() => handleAction(action)} style={{
-                                padding: '0.4rem 1rem', borderRadius: '8px', border: 'none',
-                                background: 'linear-gradient(135deg, #ea4335, #d93025)', color: '#fff', fontSize: '0.78rem',
-                                fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
-                                display: 'flex', alignItems: 'center', gap: '0.4rem',
-                              }}>
-                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 7l-10 7L2 7"/></svg>
-                                Ouvrir dans Gmail
-                              </button>
-                              <button onClick={() => {
-                                try { navigator.clipboard.writeText(action.data.body) } catch {}
-                                setActionToast('Corps du mail copie !')
-                                setTimeout(() => setActionToast(null), 3000)
-                              }} style={{
-                                padding: '0.4rem 1rem', borderRadius: '8px',
-                                background: 'rgba(255,255,255,0.08)', border: '1px solid var(--border)',
-                                color: 'var(--text-muted)', fontSize: '0.78rem',
-                                fontWeight: 600, cursor: 'pointer', transition: 'all 0.15s',
-                              }}>
-                                Copier
-                              </button>
-                            </div>
+                            {action.data.sent === true ? (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.7rem', borderRadius: '8px', background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.2)' }}>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                <span style={{ fontSize: '0.78rem', color: '#22c55e', fontWeight: 600 }}>
+                                  Email envoye ({action.data.method === 'smtp' ? 'SMTP' : action.data.method === 'gmail_api' ? 'Gmail API' : 'Computer Use'})
+                                </span>
+                              </div>
+                            ) : action.data.method === 'computer_use' ? (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.7rem', borderRadius: '8px', background: 'rgba(139,92,246,0.08)', border: '1px solid rgba(139,92,246,0.2)' }}>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" strokeWidth="2.5" strokeLinecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                                <span style={{ fontSize: '0.78rem', color: '#8b5cf6', fontWeight: 600 }}>
+                                  Envoi en cours via Computer Use...
+                                </span>
+                              </div>
+                            ) : (
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.4rem 0.7rem', borderRadius: '8px', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                                <span style={{ fontSize: '0.78rem', color: '#ef4444', fontWeight: 600 }}>
+                                  {action.data.message || 'Email non envoye — toutes les methodes ont echoue'}
+                                </span>
+                              </div>
+                            )}
                           </>
                         )}
                         {action.type === 'TEXT' && (
@@ -5008,6 +5817,100 @@ export default function AgentsPage() {
           50% { opacity: 0.5; box-shadow: 0 0 12px #4ade80; }
         }
       `}</style>
+
+      {/* Modale de confirmation pour actions destructives en mode natif */}
+      {pendingConfirmation && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)',
+          zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          backdropFilter: 'blur(4px)',
+        }}>
+          <div style={{
+            maxWidth: 560, width: '90%',
+            background: 'var(--bg-panel, #1a1a1a)',
+            border: '1px solid rgba(255, 160, 0, 0.5)',
+            borderRadius: 12, padding: '1.5rem',
+            boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ffa000" strokeWidth="2">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                <line x1="12" y1="9" x2="12" y2="13"/>
+                <line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+              <h3 style={{ margin: 0, color: '#ffa000', fontSize: '1rem', fontWeight: 700 }}>
+                Confirmation requise
+              </h3>
+            </div>
+            <p style={{ margin: '0 0 0.75rem 0', fontSize: '0.88rem', color: 'var(--text-secondary)' }}>
+              L'agent souhaite exécuter {pendingConfirmation.pending_tool_uses.length === 1 ? 'une action destructive' : `${pendingConfirmation.pending_tool_uses.length} actions destructives`}.
+              Ces actions modifient l'état externe (envoi, écriture, programmation) et ne peuvent pas être annulées.
+            </p>
+            <div style={{
+              background: 'rgba(255,255,255,0.04)', borderRadius: 8,
+              padding: '0.75rem', marginBottom: '1rem', maxHeight: 220, overflowY: 'auto',
+            }}>
+              {pendingConfirmation.pending_tool_uses.map((tu, i) => (
+                <div key={tu.tool_use_id} style={{
+                  borderTop: i > 0 ? '1px solid rgba(255,255,255,0.08)' : 'none',
+                  paddingTop: i > 0 ? '0.5rem' : 0, marginTop: i > 0 ? '0.5rem' : 0,
+                }}>
+                  <div style={{ fontSize: '0.82rem', fontWeight: 600, color: '#ffa000' }}>
+                    {tu.action_type}
+                  </div>
+                  <pre style={{
+                    margin: '0.3rem 0 0 0', fontSize: '0.72rem',
+                    color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                  }}>
+                    {JSON.stringify(tu.input, null, 2).slice(0, 400)}
+                  </pre>
+                </div>
+              ))}
+            </div>
+            {pendingConfirmation.preview_text && (
+              <p style={{
+                margin: '0 0 1rem 0', fontSize: '0.8rem',
+                color: 'var(--text-tertiary)', fontStyle: 'italic',
+              }}>
+                « {pendingConfirmation.preview_text.slice(0, 200)} »
+              </p>
+            )}
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button
+                onClick={() => resolvePendingConfirmation(false)}
+                disabled={confirmResolving}
+                style={{
+                  flex: 1, padding: '10px 14px',
+                  background: 'rgba(255,255,255,0.06)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 8, color: 'var(--text-secondary)',
+                  cursor: confirmResolving ? 'not-allowed' : 'pointer',
+                  fontSize: '0.88rem', fontWeight: 600,
+                  opacity: confirmResolving ? 0.5 : 1,
+                }}
+              >
+                Refuser
+              </button>
+              <button
+                onClick={() => resolvePendingConfirmation(true)}
+                disabled={confirmResolving}
+                style={{
+                  flex: 1, padding: '10px 14px',
+                  background: 'rgba(76, 175, 80, 0.2)',
+                  border: '1px solid rgba(76, 175, 80, 0.5)',
+                  borderRadius: 8, color: '#4caf50',
+                  cursor: confirmResolving ? 'not-allowed' : 'pointer',
+                  fontSize: '0.88rem', fontWeight: 700,
+                  opacity: confirmResolving ? 0.5 : 1,
+                }}
+              >
+                {confirmResolving ? 'Reprise…' : 'Autoriser'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="container page-content" style={{ maxWidth: 680, margin: '0 auto', padding: '2rem 1rem' }}>
         {/* Page header */}
         <div style={{ textAlign: 'center', marginBottom: '1.5rem' }}>
@@ -6304,6 +7207,43 @@ export default function AgentsPage() {
                       <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: 0 }}>
                         OpenClaw est connecte. Votre agent d'elite est operationnel.
                       </p>
+                    </div>
+                  ) : setupError ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <span style={{ color: '#ef4444', fontSize: '1.2rem' }}>⚠</span>
+                      <div>
+                        <p style={{ fontSize: '0.85rem', color: '#ef4444', margin: '0 0 0.25rem', fontWeight: 600 }}>
+                          Echec de connexion
+                        </p>
+                        <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: 0 }}>
+                          {setupError}
+                        </p>
+                        <button
+                          style={{
+                            marginTop: '0.5rem', padding: '0.35rem 0.75rem', borderRadius: '0.4rem',
+                            background: 'rgba(37,99,235,0.15)', border: '1px solid rgba(37,99,235,0.3)',
+                            color: '#60a5fa', cursor: 'pointer', fontSize: '0.78rem',
+                          }}
+                          onClick={async () => {
+                            setSetupError('')
+                            setSetupLoading(true)
+                            try {
+                              const r = await fetch(`${API}/api/agent3/setup/start`, { method: 'POST' })
+                              const d = await r.json()
+                              if (d.success) {
+                                setSetupStatus((s: Record<string, any>) => ({ ...s, connected: true }))
+                              } else {
+                                setSetupError(d.error || 'Echec du demarrage')
+                              }
+                            } catch (e: any) {
+                              setSetupError(e.message)
+                            }
+                            setSetupLoading(false)
+                          }}
+                        >
+                          Reessayer
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>

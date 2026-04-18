@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS profil_utilisateur (
     genre                   TEXT DEFAULT '',
     objectif_modifie_le     TEXT,
     phrase_personnalite     TEXT DEFAULT NULL,
+    temps_initial_jours     INTEGER DEFAULT 0,
+    temps_gagne_jours       REAL DEFAULT 0.0,
     cree_le                 TEXT NOT NULL,
     mis_a_jour_le           TEXT NOT NULL
 );
@@ -60,6 +62,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     option_choisie_id   TEXT,
     probabilite_apres   REAL,
     action_agent_json   TEXT,
+    temps_gagne_avant   REAL DEFAULT 0.0,
+    temps_gagne_apres   REAL DEFAULT 0.0,
     cree_le             TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES profil_utilisateur(id)
 );
@@ -326,6 +330,24 @@ class DatabaseManager:
                 )
             except Exception:
                 pass
+            # Migration : ajouter temps_initial_jours et temps_gagne_jours dans profil_utilisateur
+            for col_temps in [
+                "ALTER TABLE profil_utilisateur ADD COLUMN temps_initial_jours INTEGER DEFAULT 0",
+                "ALTER TABLE profil_utilisateur ADD COLUMN temps_gagne_jours REAL DEFAULT 0.0",
+            ]:
+                try:
+                    self._conn.execute(col_temps)
+                except Exception:
+                    pass  # Colonne deja existante
+            # Migration : ajouter temps_gagne_avant et temps_gagne_apres dans decisions
+            for col_temps_dec in [
+                "ALTER TABLE decisions ADD COLUMN temps_gagne_avant REAL DEFAULT 0.0",
+                "ALTER TABLE decisions ADD COLUMN temps_gagne_apres REAL DEFAULT 0.0",
+            ]:
+                try:
+                    self._conn.execute(col_temps_dec)
+                except Exception:
+                    pass  # Colonne deja existante
             # Legacy migrations for competences/diplomes/langues (now in CREATE TABLE)
             for col_sql2 in [
                 "ALTER TABLE profil_utilisateur ADD COLUMN competences TEXT DEFAULT ''",

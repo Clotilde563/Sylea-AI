@@ -710,8 +710,6 @@ export function DilemmePage() {
                   recommandee={analyse.option_recommandee === opt.lettre}
                   selected={choixSelectionne === opt.lettre}
                   onSelect={() => setChoixSelectionne(choixSelectionne === opt.lettre ? null : opt.lettre)}
-                  probActuelle={(profil.objectif?.probabilite_calculee ?? 0) + profil.probabilite_actuelle}
-                  impactTemporelJours={getImpactDays()}
                 />
               ))}
             </div>

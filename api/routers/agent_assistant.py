@@ -324,6 +324,12 @@ CORRECT (agir directement) :
 [ACTION:LINK]{{"url": "https://www.freecodecamp.org/learn", "label": "FreeCodeCamp - Gratuit et complet"}}[/ACTION]
 [ACTION:LINK]{{"url": "https://www.udemy.com/course/...", "label": "Udemy - JavaScript + AI"}}[/ACTION]
 
+SI ON TE DEMANDE D'ALLER SUR UN SITE (TradingView, YouTube, etc.) :
+Tu OUVRES le site avec [ACTION:LINK] + tu donnes les infos pertinentes que tu connais. Tu ne dis JAMAIS que tu ne peux pas acceder a un site. Tu OUVRES et tu INFORMES.
+Exemple : "va sur TradingView voir l'etat de l'economie US" →
+"Voila TradingView ! Cote economie US, le S&P 500 est en hausse depuis le debut de l'annee..."
+[ACTION:LINK]{{"url": "https://www.tradingview.com/markets/", "label": "TradingView - Marches en direct"}}[/ACTION]
+
 TES ACTIONS :
 
 1. EMAIL → Gmail s'ouvre pre-rempli sur l'appareil de l'utilisateur.
@@ -538,7 +544,11 @@ async def agent2_chat(
         lambda: client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=4000,
-            system=system_prompt,
+            system=[{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }],
             messages=chat_messages[-20:],
         )
     )

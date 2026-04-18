@@ -15,8 +15,8 @@ export interface Objectif {
   description: string
   categorie: string
   deadline: string | null
-  probabilite_base: number
-  probabilite_calculee: number
+  probabilite_base?: number
+  probabilite_calculee?: number
 }
 
 export interface Profil {
@@ -45,6 +45,8 @@ export interface Profil {
   langues: string[]
   objectif: Objectif | null
   probabilite_actuelle: number
+  temps_initial_jours: number
+  temps_gagne_jours: number
   cree_le: string
   mis_a_jour_le: string
   objectif_modifie_le: string | null
@@ -88,6 +90,7 @@ export interface AnalyseOption {
   pros: string[]
   cons: string[]
   impact_probabilite: number
+  impact_jours: number
   resume: string
   impact_jours_brut?: number
 }
@@ -127,6 +130,8 @@ export interface Decision {
   probabilite_avant: number
   option_choisie_id: string | null
   probabilite_apres: number | null
+  temps_gagne_avant: number
+  temps_gagne_apres: number
   action_agent: ActionAgent | null
   cree_le: string
   option_choisie_description: string | null
@@ -138,6 +143,7 @@ export interface Decision {
 
 export interface ProbabiliteResult {
   probabilite: number
+  temps_initial_jours: number
   resume: string
   points_forts: string[]
   points_faibles: string[]
@@ -158,6 +164,7 @@ export const SITUATIONS_FAMILIALES = ['célibataire', 'en couple', 'marié(e)', 
 export interface AnalyseEvenement {
   resume: string
   impact_probabilite: number
+  impact_jours: number
   explication: string
   conseil: string
 }

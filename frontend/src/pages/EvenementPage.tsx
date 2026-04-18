@@ -4,7 +4,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store/useStore'
 import { api } from '../api/client'
-import { deltaFromImpact } from '../utils/duration'
+import { formatImpactJours } from '../utils/duration'
 import { useT } from '../i18n/LanguageContext'
 import { useDeviceContext } from '../contexts/DeviceContext'
 import { AgentSyleaLogo } from '../components/AgentSyleaLogo'
@@ -205,6 +205,7 @@ export function EvenementPage() {
       const confirmResult = await api.confirmerEvenement({
         description: description.trim(),
         impact_probabilite: analyse.impact_probabilite,
+        impact_jours: analyse.impact_jours ?? 0,
         resume: analyse.resume,
         contexte_appareil: deviceCtx ?? undefined,
       })
@@ -247,9 +248,7 @@ export function EvenementPage() {
     )
   }
 
-  const probActuelle = profil.probabilite_actuelle
-  const probCalculeeVal = profil.objectif?.probabilite_calculee ?? 0
-  const probTemps = probCalculeeVal + probActuelle
+  const _probActuelle = profil.probabilite_actuelle
 
   return (
     <div className="page animate-fade-in">
@@ -524,10 +523,10 @@ export function EvenementPage() {
             <div
               className="card"
               style={{
-                background: analyse.impact_probabilite >= 0
+                background: (analyse.impact_jours ?? analyse.impact_probabilite) >= 0
                   ? 'linear-gradient(135deg, rgba(34,197,94,0.08), rgba(34,197,94,0.02))'
                   : 'linear-gradient(135deg, rgba(239,68,68,0.08), rgba(239,68,68,0.02))',
-                border: `1px solid ${analyse.impact_probabilite >= 0 ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'}`,
+                border: `1px solid ${(analyse.impact_jours ?? analyse.impact_probabilite) >= 0 ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'}`,
                 marginBottom: '1.5rem',
               }}
             >
@@ -536,10 +535,10 @@ export function EvenementPage() {
                 <div style={{
                   fontSize: '1.8rem',
                   fontWeight: 700,
-                  color: analyse.impact_probabilite >= 0 ? '#22c55e' : '#ef4444',
+                  color: (analyse.impact_jours ?? analyse.impact_probabilite) >= 0 ? '#22c55e' : '#ef4444',
                   fontFamily: 'Inter, system-ui, sans-serif',
                 }}>
-                  {deltaFromImpact(probTemps, analyse.impact_probabilite)}
+                  {formatImpactJours(analyse.impact_jours ?? 0)}
                 </div>
                 <div>
                   <p style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
@@ -548,9 +547,9 @@ export function EvenementPage() {
                   <p style={{
                     fontSize: '0.85rem',
                     fontWeight: 600,
-                    color: analyse.impact_probabilite >= 0 ? '#4ade80' : '#fca5a5',
+                    color: (analyse.impact_jours ?? analyse.impact_probabilite) >= 0 ? '#4ade80' : '#fca5a5',
                   }}>
-                    {analyse.impact_probabilite >= 0 ? '+' : ''}{analyse.impact_probabilite.toFixed(1)}%
+                    {(analyse.impact_jours ?? 0) >= 0 ? 'temps gagne' : 'temps perdu'}
                   </p>
                 </div>
               </div>

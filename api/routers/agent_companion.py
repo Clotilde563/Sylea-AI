@@ -575,7 +575,11 @@ async def agent_chat(
         lambda: client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=300,
-            system=system_prompt,
+            system=[{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }],
             messages=chat_messages[-20:],
         )
     )

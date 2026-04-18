@@ -6,7 +6,7 @@ import { useEffect, useState, useId } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store/useStore'
 import { api } from '../api/client'
-import { dureeFromProb, buildTimeTicks } from '../utils/duration'
+import { buildTimeTicks, formatJours, gaugePercent, formatImpactJours } from '../utils/duration'
 import type { Decision, Profil, SousObjectif } from '../types'
 import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal'
 import { useT } from '../i18n/LanguageContext'
@@ -68,15 +68,13 @@ export function StatistiquesPage() {
 
   // ── Stats résumées ────────────────────────────────────────────────────────
   const probActuelle  = profil?.probabilite_actuelle ?? 0
-  const probCalculee  = profil?.objectif?.probabilite_calculee ?? 0
-  const probTemps     = probCalculee + probActuelle
-  const gainTotal     = decisions.reduce((acc, d) => acc + (d.impact_net ?? 0), 0)
-  const probInitiale  = Math.max(0, Math.min(100, probActuelle - gainTotal))
-  const dureeActuelle = dureeFromProb(probTemps)
-  const dureeInitiale = dureeFromProb(probCalculee + probInitiale)
-  const tempsGagne    = Math.max(0, dureeInitiale.totalJours - dureeActuelle.totalJours)
-  const tgAns         = Math.floor(tempsGagne / 365)
-  const tgMois        = Math.floor((tempsGagne % 365) / 30)
+  const tempsInitial  = profil?.temps_initial_jours ?? 0
+  const tempsGagneTotal = profil?.temps_gagne_jours ?? 0
+  const tempsRestant  = tempsInitial - tempsGagneTotal
+  const pctGauge      = gaugePercent(tempsInitial, tempsGagneTotal)
+  const gainTotalJours = decisions.reduce((acc, d) => acc + (d.impact_net ?? 0), 0)
+  const dureeRestante = formatJours(tempsRestant)
+  const dureeGagnee   = formatJours(tempsGagneTotal)
 
   // ── Données chart 2 (courbe réelle) ──────────────────────────────────────
   const { histPoints, totalElapsedMs } = buildHistoricalPoints(profil, decisions)
@@ -101,9 +99,9 @@ export function StatistiquesPage() {
         {/* ── Cartes stats ── */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '1rem', marginBottom: '1.75rem' }}>
           <StatCard label={t('stats.decisions_prises')} value={String(decisions.length)} sub={t('stats.depuis_debut')} color="var(--accent-violet-light)" />
-          <StatCard label={t('stats.gain_proba')} value={gainTotal >= 0 ? `+${gainTotal.toFixed(1)} %` : `${gainTotal.toFixed(1)} %`} sub={t('stats.total_cumule')} color={gainTotal >= 0 ? '#22c55e' : '#ef4444'} />
-          <StatCard label={t('stats.temps_economise')} value={tempsGagne > 0 ? (tgAns > 0 ? `${tgAns}a${tgMois > 0 ? ` ${tgMois}m` : ''}` : `${tgMois}m`) : '—'} sub={t('stats.vers_objectif')} color="#4090f0" />
-          <StatCard label={t('stats.temps_restant')} value={dureeActuelle.ligne1} sub={dureeActuelle.ligne2 || t('stats.pour_atteindre')} color="var(--accent-silver)" />
+          <StatCard label={t('stats.progression')} value={`${pctGauge.toFixed(1)}%`} sub={t('stats.vers_objectif')} color="#22c55e" />
+          <StatCard label={t('stats.temps_economise')} value={tempsGagneTotal > 0 ? dureeGagnee.label : '\u2014'} sub={t('stats.vers_objectif')} color="#4090f0" />
+          <StatCard label={t('stats.temps_restant')} value={dureeRestante.ligne1} sub={dureeRestante.ligne2 || t('stats.pour_atteindre')} color="var(--accent-silver)" />
         </div>
 
         {/* ── Card contenant les deux graphiques ── */}
@@ -294,7 +292,7 @@ export function StatistiquesPage() {
                         </td>
                         <td style={{ padding: '0.625rem 0.75rem' }}>
                           <span style={{ color: impact >= 0 ? '#22c55e' : '#ef4444', fontWeight: 600, fontSize: '0.8rem' }}>
-                            {impact >= 0 ? '+' : ''}{impact.toFixed(1)}%
+                            {formatImpactJours(impact)}
                           </span>
                         </td>
                         <td style={{ padding: '0.625rem 0.75rem', color: 'var(--text-muted)', fontSize: '0.75rem' }}>

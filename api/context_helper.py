@@ -128,11 +128,17 @@ def build_full_user_context(
             if obj.deadline:
                 lines.append(f"  Deadline : {obj.deadline}")
 
-    # 3. Probability
-    prob_calc = getattr(profil.objectif, 'probabilite_calculee', 0) if profil.objectif else 0
-    prob_totale = profil.probabilite_actuelle + prob_calc
+    # 3. Progression (time-based)
     lines.append("\nPROGRESSION :")
-    lines.append(f"  Probabilite actuelle : {prob_totale:.1f}%")
+    temps_initial = getattr(profil, 'temps_initial_jours', 0)
+    temps_gagne = getattr(profil, 'temps_gagne_jours', 0.0)
+    if temps_initial > 0:
+        pct = round(temps_gagne / temps_initial * 100, 1)
+        lines.append(f"  Temps initial estime : {temps_initial} jours")
+        lines.append(f"  Temps gagne : {temps_gagne:.1f} jours")
+        lines.append(f"  Progression : {pct}%")
+    else:
+        lines.append(f"  Probabilite actuelle : {profil.probabilite_actuelle:.1f}%")
 
     # 4. Financial info
     rev = getattr(profil, 'revenu_annuel', None)
@@ -224,12 +230,19 @@ def build_full_user_context(
                 for d in decisions[:max_decisions]:
                     chosen = d.get_option_choisie()
                     choix_desc = chosen.description if chosen else "?"
-                    impact = (
-                        (d.probabilite_apres - d.probabilite_avant)
-                        if d.probabilite_apres is not None
-                        else 0
-                    )
-                    lines.append(f"  - {d.question} -> {choix_desc} (impact: {impact:+.2f}%)")
+                    # Use time-based impact if available
+                    tga = getattr(d, 'temps_gagne_apres', 0)
+                    tgb = getattr(d, 'temps_gagne_avant', 0)
+                    if tga and tgb is not None:
+                        impact_days = tga - tgb
+                        lines.append(f"  - {d.question} -> {choix_desc} (impact: {impact_days:+.1f} jours)")
+                    else:
+                        impact = (
+                            (d.probabilite_apres - d.probabilite_avant)
+                            if d.probabilite_apres is not None
+                            else 0
+                        )
+                        lines.append(f"  - {d.question} -> {choix_desc} (impact: {impact:+.2f}%)")
         except Exception:
             pass
 

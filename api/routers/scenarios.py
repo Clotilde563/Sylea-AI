@@ -124,7 +124,11 @@ async def _claude_chat(system_prompt: str, messages: list[dict], max_tokens: int
             lambda: client.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=max_tokens,
-                system=system_prompt,
+                system=[{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }],
                 messages=messages,
             )
         )

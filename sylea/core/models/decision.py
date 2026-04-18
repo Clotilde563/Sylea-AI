@@ -138,6 +138,8 @@ class Decision:
     impact_temporel_jours: Optional[int] = None
     sous_objectif_id: Optional[str] = None
     impact_sous_objectif: float = 0.0
+    temps_gagne_avant: float = 0.0
+    temps_gagne_apres: float = 0.0
     cree_le: datetime = field(default_factory=datetime.now)
 
     def get_option_choisie(self) -> Optional[OptionDilemme]:
@@ -169,6 +171,8 @@ class Decision:
             "impact_temporel_jours": self.impact_temporel_jours,
             "sous_objectif_id": self.sous_objectif_id,
             "impact_sous_objectif": self.impact_sous_objectif,
+            "temps_gagne_avant": self.temps_gagne_avant,
+            "temps_gagne_apres": self.temps_gagne_apres,
         }
 
     @classmethod
@@ -198,6 +202,8 @@ class Decision:
             impact_temporel_jours=data.get("impact_temporel_jours"),
             sous_objectif_id=data.get("sous_objectif_id"),
             impact_sous_objectif=float(data.get("impact_sous_objectif", 0)),
+            temps_gagne_avant=float(data.get("temps_gagne_avant", 0.0)),
+            temps_gagne_apres=float(data.get("temps_gagne_apres", 0.0)),
         )
         decision.id = data["id"]
         decision.cree_le = datetime.fromisoformat(data["cree_le"])

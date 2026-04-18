@@ -5,8 +5,6 @@ Miroir des dataclasses Python existantes (ProfilUtilisateur, Decision, etc.)
 adaptés pour la sérialisation/désérialisation JSON via FastAPI.
 """
 
-from __future__ import annotations
-
 from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
@@ -37,8 +35,8 @@ class ObjectifOut(BaseModel):
     description: str
     categorie: str
     deadline: Optional[str] = None
-    probabilite_base: float
-    probabilite_calculee: float = 0.0
+    probabilite_base: Optional[float] = 0.0  # kept for backward compat
+    probabilite_calculee: Optional[float] = 0.0  # kept for backward compat
 
 
 # ── Profil ────────────────────────────────────────────────────────────────────
@@ -112,7 +110,9 @@ class ProfilOut(BaseModel):
     langues: List[str]
 
     objectif: Optional[ObjectifOut]
-    probabilite_actuelle: float
+    probabilite_actuelle: Optional[float] = 0.0  # kept for backward compat
+    temps_initial_jours: int = 0
+    temps_gagne_jours: float = 0.0
 
     cree_le: str
     mis_a_jour_le: str
@@ -136,9 +136,9 @@ class AnalyseOptionOut(BaseModel):
     description: str
     pros: List[str]
     cons: List[str]
-    impact_probabilite: float
+    impact_probabilite: float = 0.0  # kept for backward compat
+    impact_jours: float = 0.0
     resume: str
-    impact_jours_brut: float = 0.0
 
 
 class AnalyseDilemmeOut(BaseModel):
@@ -196,11 +196,16 @@ class DecisionOut(BaseModel):
     sous_objectif_id: Optional[str] = None
     impact_sous_objectif: Optional[float] = None
 
+    # Temps-based fields
+    temps_gagne_avant: float = 0.0
+    temps_gagne_apres: float = 0.0
+
 
 # ── Probabilité ───────────────────────────────────────────────────────────────
 
 class ProbabiliteOut(BaseModel):
     probabilite: float
+    temps_initial_jours: int = 0
     resume: str
     points_forts: List[str]
     points_faibles: List[str]
@@ -254,14 +259,16 @@ class EvenementIn(BaseModel):
 
 class AnalyseEvenementOut(BaseModel):
     resume: str
-    impact_probabilite: float
+    impact_probabilite: float = 0.0  # kept for backward compat
+    impact_jours: float = 0.0
     explication: str
     conseil: str
 
 
 class ConfirmerEvenementIn(BaseModel):
     description: str
-    impact_probabilite: float
+    impact_probabilite: float = 0.0  # kept for backward compat
+    impact_jours: float = 0.0
     resume: str
     contexte_appareil: Optional[DeviceContextIn] = None
 

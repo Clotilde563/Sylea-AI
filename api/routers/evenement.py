@@ -48,6 +48,13 @@ def _decision_to_out(d: Decision, sous_objectif_impacte: str | None = None) -> D
         for o in d.options
     ]
     chosen = d.get_option_choisie()
+    # Compute impact_net from temps fields if available, fallback to prob fields
+    if d.temps_gagne_apres and d.temps_gagne_avant is not None:
+        impact_net = d.temps_gagne_apres - d.temps_gagne_avant
+    elif d.probabilite_apres is not None:
+        impact_net = d.probabilite_apres - d.probabilite_avant
+    else:
+        impact_net = None
     return DecisionOut(
         id=d.id,
         user_id=d.user_id,
@@ -59,11 +66,10 @@ def _decision_to_out(d: Decision, sous_objectif_impacte: str | None = None) -> D
         action_agent=None,
         cree_le=d.cree_le.isoformat(),
         option_choisie_description=chosen.description if chosen else None,
-        impact_net=(
-            (d.probabilite_apres - d.probabilite_avant)
-            if d.probabilite_apres is not None else None
-        ),
+        impact_net=impact_net,
         sous_objectif_impacte=sous_objectif_impacte,
+        temps_gagne_avant=d.temps_gagne_avant,
+        temps_gagne_apres=d.temps_gagne_apres,
     )
 
 
@@ -115,6 +121,7 @@ def _analyser_evenement_local(description: str, objectif_desc: str) -> dict:
     return {
         "resume": resume,
         "impact_probabilite": round(impact, 2),
+        "impact_jours": round(impact * 10, 1),  # rough conversion: 0.1% ~ 1 day
         "explication": explication,
         "conseil": conseil,
     }
@@ -127,7 +134,6 @@ async def _analyser_evenement_claude(
     objectif_desc: str,
     objectif_cat: str,
     prob_actuelle: float,
-    prob_calculee: float = 0.0,
     profession: str = "",
     device_context: str = "",
     collected_context: str = "",
@@ -148,7 +154,7 @@ async def _analyser_evenement_claude(
 
     client = _anthropic.Anthropic(api_key=key)
     # Calculer le temps estime
-    prob_totale = max(0.01, min(99.99, prob_actuelle + prob_calculee))
+    prob_totale = max(0.01, min(99.99, prob_actuelle))
     temps_j = min(73000, max(1, round(900 * ((100 - prob_totale) / prob_totale) ** 0.675)))
     temps_ans = temps_j // 365
     temps_mois = (temps_j % 365) // 30
@@ -225,6 +231,7 @@ async def _analyser_evenement_claude(
     return {
         "resume": str(data.get("resume", "")),
         "impact_probabilite": impact_pct,
+        "impact_jours": round(impact_jours_val, 1),
         "explication": str(data.get("explication", "")),
         "conseil": str(data.get("conseil", "")),
     }
@@ -332,7 +339,6 @@ async def analyser_evenement(
             objectif_desc=profil.objectif.description,
             objectif_cat=profil.objectif.categorie,
             prob_actuelle=profil.probabilite_actuelle,
-            prob_calculee=profil.objectif.probabilite_calculee,
             profession=profil.profession or "",
             device_context=format_device_context(data.contexte_appareil),
             collected_context=collected_context,
@@ -380,6 +386,15 @@ async def confirmer_evenement(
     prob_apres = prob_avant + data.impact_probabilite
     prob_apres = max(0.01, min(99.9, prob_apres))
 
+    # Time-based: compute impact in days
+    temps_gagne_avant = profil.temps_gagne_jours
+    # Use impact_jours if provided, otherwise convert from impact_probabilite
+    impact_jours = data.impact_jours
+    if impact_jours == 0.0 and data.impact_probabilite != 0.0 and profil.temps_initial_jours > 0:
+        impact_jours = round(data.impact_probabilite * profil.temps_initial_jours / 100, 1)
+    temps_gagne_apres = temps_gagne_avant + impact_jours
+    temps_gagne_apres = max(0, min(profil.temps_initial_jours, temps_gagne_apres))
+
     # Creer la decision (type evenement = question prefixee)
     decision = Decision(
         user_id=profil.id,
@@ -388,12 +403,15 @@ async def confirmer_evenement(
         probabilite_avant=prob_avant,
         option_choisie_id=opt_event.id,
         probabilite_apres=prob_apres,
+        temps_gagne_avant=temps_gagne_avant,
+        temps_gagne_apres=temps_gagne_apres,
     )
 
     decision_repo.sauvegarder(decision)
 
     # Mettre a jour le profil
     profil.probabilite_actuelle = prob_apres
+    profil.temps_gagne_jours = temps_gagne_apres
     profil.marquer_modification()
     profil_repo.sauvegarder(profil)
 
@@ -401,18 +419,22 @@ async def confirmer_evenement(
     so_titre_impacte = None
     try:
         db = profil_repo._db
-        all_so = db.conn.execute(
-            "SELECT id, titre, progression, ordre, temps_estime FROM sous_objectifs WHERE user_id = ? AND progression < 100 ORDER BY ordre",
+        # Charger TOUS les SO (y compris completes) pour le calcul proportionnel
+        all_so_all = db.conn.execute(
+            "SELECT id, titre, progression, ordre, temps_estime FROM sous_objectifs WHERE user_id = ? ORDER BY ordre",
             (profil.id,),
         ).fetchall()
+        all_so = [so for so in all_so_all if so["progression"] < 100]
         if all_so:
             so_cible = await _identifier_so_pertinent(data.description, all_so)
             if so_cible is None:
                 so_cible = all_so[0]  # fallback: premier par ordre
-            total_te = sum(max(30, so["temps_estime"] or 180) for so in all_so)
+            # Invariant: sum(SO_restant) = objectif_restant
+            # Use proportional SO time: (te / sum_te_ALL) * temps_initial
+            total_te_all = sum(max(30, so["temps_estime"] or 180) for so in all_so_all)
             te = max(30, so_cible["temps_estime"] if so_cible["temps_estime"] else 180)
-            # Impact signé : positif = progression, négatif = régression
-            impact_so = data.impact_probabilite * (total_te / te)  # amplifie proportionnellement
+            so_initial_jours = (te / total_te_all) * profil.temps_initial_jours if total_te_all > 0 else te
+            impact_so = (impact_jours / so_initial_jours) * 100 if so_initial_jours > 0 else 0
             new_prog = so_cible["progression"] + impact_so
 
             # Plafonner entre 0 et 100

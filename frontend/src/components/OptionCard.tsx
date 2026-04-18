@@ -1,8 +1,8 @@
 // Carte d'analyse d'une option de dilemme
-// L'impact est affiché en durée estimée (ex. "+45j", "-1a 3m", "+12h")
+// L'impact est affiché en jours (ex. "+45 jours", "-1a 3m")
 
 import type { AnalyseOption } from '../types'
-import { deltaFromImpact } from '../utils/duration'
+import { formatImpactJours } from '../utils/duration'
 
 interface OptionCardProps {
   lettre:        string
@@ -10,9 +10,9 @@ interface OptionCardProps {
   recommandee?:  boolean
   selected?:     boolean
   onSelect?:     () => void
-  /** Probabilité actuelle du profil — nécessaire pour calculer le delta de durée */
+  /** @deprecated Kept for backward compat */
   probActuelle?: number
-  /** Plafond temporel en jours — le gain/perte affiché ne peut pas dépasser cette valeur */
+  /** @deprecated Kept for backward compat */
   impactTemporelJours?: number
 }
 
@@ -22,17 +22,10 @@ export function OptionCard({
   recommandee,
   selected,
   onSelect,
-  probActuelle,
-  impactTemporelJours,
 }: OptionCardProps) {
-  const impactPos = (option.impact_jours_brut ?? option.impact_probabilite) >= 0
-
-  // Affichage : durée si probActuelle fournie, sinon % en fallback
-  // Pour les cadres courts, utilise impact_jours_brut pour la précision
-  const impactLabel =
-    probActuelle !== undefined
-      ? deltaFromImpact(probActuelle, option.impact_probabilite, impactTemporelJours, option.impact_jours_brut)
-      : `${impactPos ? '+' : ''}${option.impact_probabilite.toFixed(3)}%`
+  const impactJours = option.impact_jours ?? option.impact_jours_brut ?? 0
+  const impactPos = impactJours >= 0
+  const impactLabel = formatImpactJours(impactJours)
 
   return (
     <div

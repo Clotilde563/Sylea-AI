@@ -1,46 +1,38 @@
 // Jauge circulaire SVG — Luxe Futuriste
-// Mode "durée estimée" ou mode "pourcentage" selon prop showDuration
-
-import { dureeFromProb } from '../utils/duration'
+// L'arc represente le pourcentage de temps gagne
+// Le texte au centre affiche le temps restant
 
 interface ProbabilityGaugeProps {
-  value:        number   // 0 à 100 (probabilité %)
+  value:        number   // 0 a 100 (pourcentage de la jauge)
   size?:        number
   label?:       string
-  showPercent?: boolean
-  /** Si true, affiche la durée estimée au lieu du % */
-  showDuration?: boolean
-  /** Prob séparée pour calcul durée (si différente de value) */
-  durationOverride?: number
+  tempsLigne1?: string   // ex. "2 ans"
+  tempsLigne2?: string   // ex. "6 mois"
 }
 
 export function ProbabilityGauge({
   value,
   size         = 180,
   label,
-  showPercent  = true,
-  showDuration = false,
-  durationOverride,
+  tempsLigne1,
+  tempsLigne2,
 }: ProbabilityGaugeProps) {
-  const clamped     = Math.max(0, Math.min(100, value))
   const radius      = size * 0.38
   const cx          = size / 2
   const cy          = size / 2
   const circumference = 2 * Math.PI * radius
-  const dashOffset  = circumference * (1 - clamped / 100)
 
-  // Couleur dynamique selon la valeur — palette chrome électrique
-  const color =
-    clamped >= 50 ? '#22c55e'   /* Vert succès */
-    : clamped >= 25 ? '#4090f0' /* Bleu électrique */
-    : clamped >= 10 ? '#1a6fd8' /* Bleu cobalt */
-    : '#ef4444'                 /* Rouge danger */
+  const arcPercent = Math.max(0, Math.min(100, value))
 
+  // Couleur basee sur le pourcentage
+  const arcColor =
+    arcPercent >= 50 ? '#22c55e'    /* Vert */
+    : arcPercent >= 25 ? '#4090f0'  /* Bleu electrique */
+    : arcPercent >= 10 ? '#1a6fd8'  /* Bleu cobalt */
+    : '#ef4444'                     /* Rouge */
+
+  const dashOffset = circumference * (1 - arcPercent / 100)
   const trackColor = 'rgba(255,255,255,0.06)'
-
-  // Durée estimée si mode activé (utilise durationOverride si fourni)
-  const durProb = durationOverride !== undefined ? Math.max(0, Math.min(100, durationOverride)) : clamped
-  const duree = showDuration ? dureeFromProb(durProb) : null
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
@@ -56,14 +48,14 @@ export function ProbabilityGauge({
         <circle
           cx={cx} cy={cy} r={radius}
           fill="none"
-          stroke={color}
+          stroke={arcColor}
           strokeWidth={size * 0.06}
           strokeDasharray={circumference}
           strokeDashoffset={dashOffset}
           strokeLinecap="round"
           transform={`rotate(-90 ${cx} ${cy})`}
           style={{
-            filter: `drop-shadow(0 0 6px ${color}80)`,
+            filter: `drop-shadow(0 0 6px ${arcColor}80)`,
             transition: 'stroke-dashoffset 0.8s ease, stroke 0.4s',
           }}
         />
@@ -75,23 +67,23 @@ export function ProbabilityGauge({
           strokeWidth="1"
         />
 
-        {/* ── Mode durée estimée ── */}
-        {showDuration && duree && (
+        {/* Texte temps restant */}
+        {tempsLigne1 && (
           <>
             <text
               x={cx}
-              y={duree.ligne2 ? cy - size * 0.08 : cy - size * 0.04}
+              y={tempsLigne2 ? cy - size * 0.08 : cy - size * 0.04}
               textAnchor="middle"
               dominantBaseline="middle"
               fontSize={size * 0.13}
               fontWeight="700"
-              fill={color}
+              fill={arcColor}
               fontFamily="Inter, system-ui, sans-serif"
               letterSpacing="0.04em"
             >
-              {duree.ligne1}
+              {tempsLigne1}
             </text>
-            {duree.ligne2 && (
+            {tempsLigne2 && (
               <text
                 x={cx}
                 y={cy + size * 0.1}
@@ -102,14 +94,14 @@ export function ProbabilityGauge({
                 fontFamily="Inter, system-ui, sans-serif"
                 letterSpacing="0.04em"
               >
-                {duree.ligne2}
+                {tempsLigne2}
               </text>
             )}
           </>
         )}
 
-        {/* ── Mode pourcentage (par défaut) ── */}
-        {showPercent && !showDuration && (
+        {/* Fallback: afficher le pourcentage si pas de texte temps */}
+        {!tempsLigne1 && (
           <>
             <text
               x={cx} y={cy - 6}
@@ -117,10 +109,10 @@ export function ProbabilityGauge({
               dominantBaseline="middle"
               fontSize={size * 0.17}
               fontWeight="700"
-              fill={color}
+              fill={arcColor}
               fontFamily="Inter, system-ui, sans-serif"
             >
-              {clamped.toFixed(1)}
+              {arcPercent.toFixed(1)}
             </text>
             <text
               x={cx} y={cy + size * 0.1}

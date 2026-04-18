@@ -161,6 +161,7 @@ export const api = {
   confirmerEvenement: (data: {
     description: string
     impact_probabilite: number
+    impact_jours?: number
     resume: string
     contexte_appareil?: DeviceContext
   }): Promise<Decision> =>
@@ -482,6 +483,228 @@ export const api = {
     })
   },
 
+  /** Agent 3 Chat NATIVE — tool_use via Anthropic native tools API (pas de parser regex) */
+  agent3ChatStreamNative: (
+    messages: Array<{ role: string; content: string; type?: string }>,
+    contexte_appareil?: DeviceContext,
+    audioData?: string,
+    callbacks?: {
+      onTurnStart?: (turn: number) => void
+      onThinking?: (text: string) => void
+      onTokenDelta?: (text: string, turn: number) => void
+      onThinkingDelta?: (text: string, turn: number) => void
+      onThinkingBlock?: (payload: { text: string; length: number; turn: number }) => void
+      onContextCompacted?: (payload: { chars_saved: number; turn: number }) => void
+      onCancelled?: (payload: { turn: number; phase: string }) => void
+      onToolUse?: (tool: { id: string; name: string; input: Record<string, unknown> }) => void
+      onToolResult?: (result: { tool_use_id: string; content: string; is_error: boolean }) => void
+      onTurnDone?: (turn: number) => void
+      onResult?: (result: { message: string; turns: number; actions_count: number; tools_used?: any[] }) => void
+      onError?: (message: string) => void
+      onAwaitingConfirmation?: (payload: {
+        resume_token: string
+        pending_tool_uses: Array<{ tool_use_id: string; name: string; action_type: string; input: Record<string, unknown> }>
+        turn: number
+        preview_text?: string
+      }) => void
+    },
+    options?: {
+      stream?: boolean
+      thinking?: boolean
+      thinking_budget?: number
+      cancel_token?: string
+      signal?: AbortSignal
+    }
+  ): Promise<{ message: string; turns: number; actions_count: number; tools_used?: any[] }> => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const resp = await fetch(`${BASE}/agent3/chat/native`, {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          signal: options?.signal,
+          body: JSON.stringify({
+            messages, contexte_appareil, audio_data: audioData,
+            stream: options?.stream,
+            thinking: options?.thinking,
+            thinking_budget: options?.thinking_budget,
+            cancel_token: options?.cancel_token,
+          }),
+        })
+
+        if (!resp.ok || !resp.body) {
+          reject(new Error(`HTTP ${resp.status}`))
+          return
+        }
+
+        const reader = resp.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+
+          let currentEvent = ''
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              currentEvent = line.slice(7).trim()
+            } else if (line.startsWith('data: ') && currentEvent) {
+              try {
+                const data = JSON.parse(line.slice(6))
+                switch (currentEvent) {
+                  case 'turn_start':
+                    callbacks?.onTurnStart?.(data.turn)
+                    break
+                  case 'thinking':
+                    callbacks?.onThinking?.(data.text)
+                    break
+                  case 'token_delta':
+                    callbacks?.onTokenDelta?.(data.text || '', data.turn ?? 0)
+                    break
+                  case 'thinking_delta':
+                    callbacks?.onThinkingDelta?.(data.text || '', data.turn ?? 0)
+                    break
+                  case 'thinking_block':
+                    callbacks?.onThinkingBlock?.(data)
+                    break
+                  case 'context_compacted':
+                    callbacks?.onContextCompacted?.(data)
+                    break
+                  case 'cancelled':
+                    callbacks?.onCancelled?.(data)
+                    break
+                  case 'tool_use':
+                    callbacks?.onToolUse?.(data)
+                    break
+                  case 'tool_result':
+                    callbacks?.onToolResult?.(data)
+                    break
+                  case 'turn_llm_done':
+                  case 'done':
+                    callbacks?.onTurnDone?.(data.turn ?? 0)
+                    break
+                  case 'result':
+                    callbacks?.onResult?.(data)
+                    resolve(data)
+                    break
+                  case 'awaiting_confirmation':
+                    callbacks?.onAwaitingConfirmation?.(data)
+                    resolve({ message: data.preview_text || '', turns: data.turn ?? 0, actions_count: 0, tools_used: [] })
+                    break
+                  case 'error':
+                    callbacks?.onError?.(data.message)
+                    reject(new Error(data.message))
+                    break
+                }
+              } catch { /* skip malformed JSON */ }
+              currentEvent = ''
+            } else if (line === '') {
+              currentEvent = ''
+            }
+          }
+        }
+      } catch (err) {
+        reject(err)
+      }
+    })
+  },
+
+  /** Agent 3 Native — annuler un stream en cours via son cancel_token. */
+  agent3ChatCancelNative: async (cancelToken: string): Promise<{ cancelled: boolean; reason?: string }> => {
+    try {
+      const resp = await fetch(`${BASE}/agent3/chat/native/cancel`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ cancel_token: cancelToken }),
+      })
+      if (!resp.ok) return { cancelled: false, reason: `HTTP ${resp.status}` }
+      return await resp.json()
+    } catch (err) {
+      return { cancelled: false, reason: (err as Error).message }
+    }
+  },
+
+  /** Agent 3 Native — reprendre une boucle apres confirmation utilisateur d'une action destructive */
+  agent3ChatResumeNative: (
+    resumeToken: string,
+    approvals: Record<string, boolean>,
+    callbacks?: {
+      onTurnStart?: (turn: number) => void
+      onThinking?: (text: string) => void
+      onToolUse?: (tool: { id: string; name: string; input: Record<string, unknown> }) => void
+      onToolResult?: (result: { tool_use_id: string; content: string; is_error: boolean; user_approved?: boolean }) => void
+      onResult?: (result: { message: string; turns: number; actions_count: number }) => void
+      onAwaitingConfirmation?: (payload: {
+        resume_token: string
+        pending_tool_uses: Array<{ tool_use_id: string; name: string; action_type: string; input: Record<string, unknown> }>
+        turn: number
+        preview_text?: string
+      }) => void
+      onError?: (message: string) => void
+    }
+  ): Promise<{ message: string; turns: number; actions_count: number }> => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const resp = await fetch(`${BASE}/agent3/chat/native/resume`, {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          body: JSON.stringify({ resume_token: resumeToken, approvals }),
+        })
+        if (!resp.ok || !resp.body) {
+          reject(new Error(`HTTP ${resp.status}`))
+          return
+        }
+        const reader = resp.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+          let currentEvent = ''
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              currentEvent = line.slice(7).trim()
+            } else if (line.startsWith('data: ') && currentEvent) {
+              try {
+                const data = JSON.parse(line.slice(6))
+                switch (currentEvent) {
+                  case 'turn_start': callbacks?.onTurnStart?.(data.turn); break
+                  case 'thinking': callbacks?.onThinking?.(data.text); break
+                  case 'tool_use': callbacks?.onToolUse?.(data); break
+                  case 'tool_result': callbacks?.onToolResult?.(data); break
+                  case 'result':
+                    callbacks?.onResult?.(data)
+                    resolve(data)
+                    break
+                  case 'awaiting_confirmation':
+                    callbacks?.onAwaitingConfirmation?.(data)
+                    resolve({ message: data.preview_text || '', turns: data.turn ?? 0, actions_count: 0 })
+                    break
+                  case 'error':
+                    callbacks?.onError?.(data.message)
+                    reject(new Error(data.message))
+                    break
+                }
+              } catch { /* skip malformed JSON */ }
+              currentEvent = ''
+            } else if (line === '') {
+              currentEvent = ''
+            }
+          }
+        }
+      } catch (err) {
+        reject(err)
+      }
+    })
+  },
+
   getAgent3Messages: (): Promise<Array<{ id: string; role: string; content: string; type: string; created_at: string; audioData?: string }>> =>
     request('/agent3/messages'),
 
@@ -630,9 +853,14 @@ export const api = {
       onAction?: (action: string, params: Record<string, any>) => void
       onThinking?: (text: string) => void
       onConfirmationNeeded?: (data: { action: string; params: Record<string, any>; reason: string }) => void
-      onIteration?: (current: number, max: number) => void
+      onUserActionNeeded?: (data: { instruction: string; action_type: string }) => void
+      onUserActionResult?: (data: { result: string }) => void
+      onStep?: (current: number) => void
       onComplete?: (text: string) => void
       onError?: (message: string) => void
+      onCostUpdate?: (data: { estimated_usd: number; calls: number; input_tokens: number; output_tokens: number }) => void
+      onCostWarning?: (data: { threshold_usd: number; current_usd: number; calls: number }) => void
+      onCompaction?: (data: { old_count: number; new_count: number }) => void
     }
   ): Promise<void> => {
     return new Promise(async (resolve, reject) => {
@@ -668,9 +896,14 @@ export const api = {
                   case 'action': callbacks?.onAction?.(data.action, data.params); break
                   case 'thinking': callbacks?.onThinking?.(data.text); break
                   case 'confirmation_needed': callbacks?.onConfirmationNeeded?.(data); break
-                  case 'iteration': callbacks?.onIteration?.(data.current, data.max); break
+                  case 'user_action_needed': callbacks?.onUserActionNeeded?.(data); break
+                  case 'user_action_result': callbacks?.onUserActionResult?.(data); break
+                  case 'step': callbacks?.onStep?.(data.current); break
                   case 'complete': callbacks?.onComplete?.(data.text); resolve(); break
                   case 'error': callbacks?.onError?.(data.message); break
+                  case 'cost_update': callbacks?.onCostUpdate?.(data); break
+                  case 'cost_warning': callbacks?.onCostWarning?.(data); break
+                  case 'compaction': callbacks?.onCompaction?.(data); break
                 }
               } catch {}
               currentEvent = ''
@@ -696,6 +929,159 @@ export const api = {
 
   computerUseAbort: (): Promise<{ success: boolean }> =>
     request('/agent3/computer-use/abort', { method: 'POST' }),
+
+  computerUseUserAction: (result: string): Promise<{ success: boolean }> =>
+    request('/agent3/computer-use/user-action', {
+      method: 'POST',
+      body: JSON.stringify({ result }),
+    }),
+
+  // ── Browser Agent (Playwright) ───────────────────────────────────────────
+  browserAgentStart: (
+    task: string, url: string, code: string,
+    callbacks?: {
+      onScreenshot?: () => void
+      onThinking?: (text: string) => void
+      onAction?: (action: string, params: Record<string, any>) => void
+      onUserActionNeeded?: (data: { instruction: string; action_type: string }) => void
+      onUserActionResult?: (data: { result: string }) => void
+      onStep?: (current: number) => void
+      onComplete?: (text: string) => void
+      onError?: (message: string) => void
+      // ── Claude-Code-inspired events ──
+      onPermissionNeeded?: (data: { prompt: string; action: string; params: Record<string, any>; risk: string }) => void
+      onPermissionDenied?: (data: { action: string; reason: string; risk: string }) => void
+      onPermissionResult?: (data: { decision: string }) => void
+      onPlanModeActive?: (data: { reason: string; action: string }) => void
+      onPlanAttached?: (plan: any) => void
+      onCostUpdate?: (data: { usd: number; input_tokens: number; output_tokens: number; calls: number }) => void
+      onCostWarning?: (data: { threshold_usd: number; current_usd: number; calls: number }) => void
+      onCostExhausted?: (data: { message: string }) => void
+    },
+    options?: { planId?: string; permissionMode?: 'default' | 'plan' | 'auto_safe' | 'bypass' }
+  ): Promise<void> => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const body: any = { task, url, code }
+        if (options?.planId) body.plan_id = options.planId
+        if (options?.permissionMode) body.permission_mode = options.permissionMode
+        const response = await fetch(`${BASE}/agent3/browser-agent/start`, {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          body: JSON.stringify(body),
+        })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        if (!response.body) throw new Error('No response body')
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        let currentEvent = ''
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              currentEvent = line.slice(7).trim()
+            } else if (line.startsWith('data: ') && currentEvent) {
+              try {
+                const data = JSON.parse(line.slice(6))
+                switch (currentEvent) {
+                  case 'screenshot': callbacks?.onScreenshot?.(); break
+                  case 'thinking': callbacks?.onThinking?.(data.text); break
+                  case 'action': callbacks?.onAction?.(data.action, data.params); break
+                  case 'user_action_needed': callbacks?.onUserActionNeeded?.(data); break
+                  case 'user_action_result': callbacks?.onUserActionResult?.(data); break
+                  case 'step': callbacks?.onStep?.(data.current); break
+                  case 'complete': callbacks?.onComplete?.(data.text); resolve(); break
+                  case 'error': callbacks?.onError?.(data.message); break
+                  case 'permission_needed': callbacks?.onPermissionNeeded?.(data); break
+                  case 'permission_denied': callbacks?.onPermissionDenied?.(data); break
+                  case 'permission_result': callbacks?.onPermissionResult?.(data); break
+                  case 'plan_mode_active': callbacks?.onPlanModeActive?.(data); break
+                  case 'plan_attached': callbacks?.onPlanAttached?.(data); break
+                  case 'cost_update': callbacks?.onCostUpdate?.(data); break
+                  case 'cost_warning': callbacks?.onCostWarning?.(data); break
+                  case 'cost_exhausted': callbacks?.onCostExhausted?.(data); break
+                }
+              } catch {}
+              currentEvent = ''
+            }
+          }
+        }
+        resolve()
+      } catch (err: any) {
+        callbacks?.onError?.(err.message)
+        reject(err)
+      }
+    })
+  },
+
+  browserAgentScreenshot: (): Promise<{ screenshot: string }> =>
+    request('/agent3/browser-agent/screenshot'),
+
+  browserAgentUserAction: (result: string): Promise<{ success: boolean }> =>
+    request('/agent3/browser-agent/user-action', {
+      method: 'POST',
+      body: JSON.stringify({ result }),
+    }),
+
+  browserAgentAbort: (): Promise<{ success: boolean }> =>
+    request('/agent3/browser-agent/abort', { method: 'POST' }),
+
+  // ── Plan Mode / Permissions / Cost (Claude-Code-inspired) ────────────────
+  browserAgentGeneratePlan: (task: string, url: string, code: string): Promise<any> =>
+    request('/agent3/browser-agent/plan', {
+      method: 'POST',
+      body: JSON.stringify({ task, url, code }),
+    }),
+
+  browserAgentApprovePlan: (planId: string): Promise<any> =>
+    request(`/agent3/browser-agent/plan/${planId}/approve`, { method: 'POST' }),
+
+  browserAgentEditPlanStep: (planId: string, stepId: number, changes: { description?: string; risk?: string }): Promise<any> =>
+    request(`/agent3/browser-agent/plan/${planId}/edit-step`, {
+      method: 'POST',
+      body: JSON.stringify({ step_id: stepId, ...changes }),
+    }),
+
+  browserAgentAbortPlan: (planId: string): Promise<any> =>
+    request(`/agent3/browser-agent/plan/${planId}/abort`, { method: 'POST' }),
+
+  browserAgentGetPlan: (planId: string): Promise<any> =>
+    request(`/agent3/browser-agent/plan/${planId}`),
+
+  browserAgentPermissionRespond: (allow: boolean): Promise<{ success: boolean; decision: string }> =>
+    request('/agent3/browser-agent/permission/respond', {
+      method: 'POST',
+      body: JSON.stringify({ allow }),
+    }),
+
+  browserAgentGetPolicy: (): Promise<any> =>
+    request('/agent3/browser-agent/permission/policy'),
+
+  browserAgentSetPolicy: (policy: {
+    mode?: 'default' | 'bypass'
+    always_ask_domains?: string[]
+    trusted_domains?: string[]
+    blocked_domains?: string[]
+    destructive_quota?: number
+  }): Promise<any> =>
+    request('/agent3/browser-agent/permission/policy', {
+      method: 'POST',
+      body: JSON.stringify(policy),
+    }),
+
+  browserAgentCost: (): Promise<{
+    input_tokens: number; output_tokens: number; cache_read_tokens: number;
+    calls: number; errors: number; estimated_usd: number;
+    model_breakdown: Record<string, any>; session_duration_seconds: number;
+  }> => request('/agent3/browser-agent/cost'),
+
+  browserAgentCostReset: (): Promise<{ success: boolean }> =>
+    request('/agent3/browser-agent/cost/reset', { method: 'POST' }),
 
   // ── Workspace ──────────────────────────────────────────────────────────────
   getProjects: () => request<any[]>('/workspace/projects'),

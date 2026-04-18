@@ -124,6 +124,10 @@ class ProfilUtilisateur:
     objectif: Optional[Objectif] = None
     probabilite_actuelle: float = 0.0
 
+    # ── Système temporel ─────────────────────────────────────────────────
+    temps_initial_jours: int = 0
+    temps_gagne_jours: float = 0.0
+
     # ── Métadonnées ─────────────────────────────────────────────────────────
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     cree_le: datetime = field(default_factory=datetime.now)
@@ -194,6 +198,8 @@ class ProfilUtilisateur:
                 self.objectif.probabilite_calculee if self.objectif else None
             ),
             "probabilite_actuelle": self.probabilite_actuelle,
+            "temps_initial_jours": self.temps_initial_jours,
+            "temps_gagne_jours": self.temps_gagne_jours,
             "cree_le": self.cree_le.isoformat(),
             "mis_a_jour_le": self.mis_a_jour_le.isoformat(),
             "objectif_modifie_le": self.objectif_modifie_le.isoformat() if self.objectif_modifie_le else None,
@@ -244,6 +250,8 @@ class ProfilUtilisateur:
             langues=[l for l in data.get("langues", "").split(",") if l],
             objectif=objectif,
             probabilite_actuelle=float(data.get("probabilite_actuelle", 0.0)),
+            temps_initial_jours=int(data.get("temps_initial_jours", 0)),
+            temps_gagne_jours=float(data.get("temps_gagne_jours", 0.0)),
         )
         profil.id = data["id"]
         profil.cree_le = datetime.fromisoformat(data["cree_le"])

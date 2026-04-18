@@ -47,6 +47,13 @@ def _option_to_out(opt: OptionDilemme) -> OptionDilemmeOut:
 def _decision_to_out(d: Decision, sous_objectif_impacte: str | None = None) -> DecisionOut:
     opts = [_option_to_out(o) for o in d.options]
     chosen = d.get_option_choisie()
+    # Compute impact_net from temps fields if available, fallback to prob fields
+    if d.temps_gagne_apres and d.temps_gagne_avant is not None:
+        impact_net = d.temps_gagne_apres - d.temps_gagne_avant
+    elif d.probabilite_apres is not None:
+        impact_net = d.probabilite_apres - d.probabilite_avant
+    else:
+        impact_net = None
     return DecisionOut(
         id=d.id,
         user_id=d.user_id,
@@ -58,11 +65,10 @@ def _decision_to_out(d: Decision, sous_objectif_impacte: str | None = None) -> D
         action_agent=None,
         cree_le=d.cree_le.isoformat(),
         option_choisie_description=chosen.description if chosen else None,
-        impact_net=(
-            (d.probabilite_apres - d.probabilite_avant)
-            if d.probabilite_apres is not None else None
-        ),
+        impact_net=impact_net,
         sous_objectif_impacte=sous_objectif_impacte,
+        temps_gagne_avant=d.temps_gagne_avant,
+        temps_gagne_apres=d.temps_gagne_apres,
     )
 
 
@@ -182,7 +188,7 @@ async def analyser_dilemme(
                     pros=opt.pros if opt else [],
                     cons=opt.cons if opt else [],
                     impact_probabilite=opt.impact_probabilite if opt else 0.0,
-                    impact_jours_brut=opt.impact_jours_brut if opt else 0.0,
+                    impact_jours=getattr(opt, 'impact_jours_brut', 0.0) if opt else 0.0,
                     resume=opt.resume if opt else "",
                 ))
             return AnalyseDilemmeOut(
@@ -207,6 +213,7 @@ async def analyser_dilemme(
             pros=["Option à explorer"],
             cons=["Analyse IA non disponible"],
             impact_probabilite=0.0,
+            impact_jours=0.0,
             resume="Configurez votre clé API pour une analyse détaillée.",
         ))
     return AnalyseDilemmeOut(
@@ -333,6 +340,15 @@ async def choisir_option(
     prob_apres = prob_avant + analyse_choisie.impact_probabilite
     prob_apres = max(0.01, min(99.9, prob_apres))
 
+    # Time-based: compute impact in days
+    temps_gagne_avant = profil.temps_gagne_jours
+    # Use impact_jours if available, otherwise convert from impact_probabilite
+    impact_jours = analyse_choisie.impact_jours
+    if impact_jours == 0.0 and analyse_choisie.impact_probabilite != 0.0 and profil.temps_initial_jours > 0:
+        impact_jours = round(analyse_choisie.impact_probabilite * profil.temps_initial_jours / 100, 1)
+    temps_gagne_apres = temps_gagne_avant + impact_jours
+    temps_gagne_apres = max(0, min(profil.temps_initial_jours, temps_gagne_apres))
+
     # Créer la décision
     decision = Decision(
         user_id=profil.id,
@@ -342,6 +358,8 @@ async def choisir_option(
         option_choisie_id=opt_choisie_id,
         probabilite_apres=prob_apres,
         impact_temporel_jours=data.impact_temporel_jours,
+        temps_gagne_avant=temps_gagne_avant,
+        temps_gagne_apres=temps_gagne_apres,
     )
 
     # Sauvegarder
@@ -349,6 +367,7 @@ async def choisir_option(
 
     # Mettre à jour le profil
     profil.probabilite_actuelle = prob_apres
+    profil.temps_gagne_jours = temps_gagne_apres
     profil.marquer_modification()
     profil_repo.sauvegarder(profil)
 
@@ -356,19 +375,24 @@ async def choisir_option(
     so_titre_impacte = None
     try:
         db = profil_repo._db
-        all_so = db.conn.execute(
-            "SELECT id, titre, progression, ordre, temps_estime FROM sous_objectifs WHERE user_id = ? AND progression < 100 ORDER BY ordre",
+        # Charger TOUS les SO (y compris completes) pour le calcul proportionnel
+        all_so_all = db.conn.execute(
+            "SELECT id, titre, progression, ordre, temps_estime FROM sous_objectifs WHERE user_id = ? ORDER BY ordre",
             (profil.id,),
         ).fetchall()
+        all_so = [so for so in all_so_all if so["progression"] < 100]
         if all_so:
             # Construire la description du choix pour le matching
             choix_desc = f"{data.question} - Choix: {analyse_choisie.description}"
             so_cible = await _identifier_so_pertinent(choix_desc, all_so)
             if so_cible is None:
                 so_cible = all_so[0]  # fallback: premier par ordre
-            total_te = sum(max(30, so["temps_estime"] or 180) for so in all_so)
+            # Invariant: sum(SO_restant) = objectif_restant
+            # Use proportional SO time: (te / sum_te_ALL) * temps_initial
+            total_te_all = sum(max(30, so["temps_estime"] or 180) for so in all_so_all)
             te = max(30, so_cible["temps_estime"] if so_cible["temps_estime"] else 180)
-            impact_so = analyse_choisie.impact_probabilite * (total_te / te)  # signé : positif = progression, négatif = régression
+            so_initial_jours = (te / total_te_all) * profil.temps_initial_jours if total_te_all > 0 else te
+            impact_so = (impact_jours / so_initial_jours) * 100 if so_initial_jours > 0 else 0
             new_prog = min(100, max(0, so_cible["progression"] + impact_so))
             db.conn.execute(
                 "UPDATE sous_objectifs SET progression = ? WHERE id = ?",

@@ -38,8 +38,6 @@ def _to_profil_out(profil: ProfilUtilisateur) -> ProfilOut:
                 profil.objectif.deadline.strftime("%Y-%m-%d")
                 if profil.objectif.deadline else None
             ),
-            probabilite_base=profil.objectif.probabilite_base,
-            probabilite_calculee=profil.objectif.probabilite_calculee,
         )
     return ProfilOut(
         id=profil.id,
@@ -66,6 +64,8 @@ def _to_profil_out(profil: ProfilUtilisateur) -> ProfilOut:
         langues=profil.langues,
         objectif=obj_out,
         probabilite_actuelle=profil.probabilite_actuelle,
+        temps_initial_jours=profil.temps_initial_jours,
+        temps_gagne_jours=profil.temps_gagne_jours,
         cree_le=profil.cree_le.isoformat(),
         mis_a_jour_le=profil.mis_a_jour_le.isoformat(),
         objectif_modifie_le=profil.objectif_modifie_le.isoformat() if profil.objectif_modifie_le else None,
@@ -118,6 +118,8 @@ def _profil_in_to_model(data: ProfilIn, existing: Optional[ProfilUtilisateur] = 
         langues=data.langues,
         objectif=objectif,
         probabilite_actuelle=(existing.probabilite_actuelle if existing else 0.0),
+        temps_initial_jours=(existing.temps_initial_jours if existing else 0),
+        temps_gagne_jours=(existing.temps_gagne_jours if existing else 0.0),
     )
 
     # Conserver l'ID existant si mise à jour
@@ -168,6 +170,8 @@ async def upsert_profil(
     if data.reset_historique and existing:
         decision_repo.effacer_decisions_utilisateur(existing.id)
         profil.probabilite_actuelle = 0.0
+        profil.temps_initial_jours = 0
+        profil.temps_gagne_jours = 0.0
         from datetime import datetime as _dt
         profil.objectif_modifie_le = _dt.now()
         # Supprimer aussi les sous-objectifs et tâches (reset complet)
@@ -218,13 +222,27 @@ async def recalculer_probabilite(
                 device_context=device_context,
                 full_context=full_ctx,
             )
-            # Stocker dans probabilite_calculee (interne pour calcul temps)
+            # Stocker le résultat IA dans probabilite_actuelle (valeur totale unique)
+            # probabilite_calculee garde la base IA (invisible au frontend, utilisé pour recalcul historique)
+            profil.probabilite_actuelle = analyse.probabilite
             profil.objectif.probabilite_calculee = analyse.probabilite
-            profil.objectif.probabilite_base = 0.1  # cosmetique (jauge)
+            profil.objectif.probabilite_base = 0
+            # Convert probability to initial time estimate (one last use of the formula)
+            prob_for_time = max(0.01, min(99.99, analyse.probabilite))
+            temps_initial = round(900 * ((100 - prob_for_time) / prob_for_time) ** 0.675)
+            old_initial = profil.temps_initial_jours or 0
+            profil.temps_initial_jours = temps_initial
+            # Scale temps_gagne proportionally to keep the same gauge percentage
+            if old_initial > 0 and profil.temps_gagne_jours:
+                ratio = profil.temps_gagne_jours / old_initial
+                profil.temps_gagne_jours = round(ratio * temps_initial, 1)
+            elif profil.temps_gagne_jours is None:
+                profil.temps_gagne_jours = 0.0
             profil.marquer_modification()
             repo.sauvegarder(profil, auth_user_id=user_id)
             return ProbabiliteOut(
                 probabilite=analyse.probabilite,
+                temps_initial_jours=temps_initial,
                 resume=analyse.resume,
                 points_forts=analyse.points_forts,
                 points_faibles=analyse.points_faibles,
@@ -234,13 +252,27 @@ async def recalculer_probabilite(
         except Exception:
             pass  # Fallback sur calcul local
 
-    # Fallback local
+    # Fallback local — stocker dans probabilite_actuelle
+    # probabilite_calculee garde la base (invisible au frontend, utilisé pour recalcul historique)
+    profil.probabilite_actuelle = prob_locale
     profil.objectif.probabilite_calculee = prob_locale
-    profil.objectif.probabilite_base = 0.1  # cosmetique (jauge)
+    profil.objectif.probabilite_base = 0
+    # Convert probability to initial time estimate (one last use of the formula)
+    prob_for_time_local = max(0.01, min(99.99, prob_locale))
+    temps_initial_local = round(900 * ((100 - prob_for_time_local) / prob_for_time_local) ** 0.675)
+    old_initial_local = profil.temps_initial_jours or 0
+    profil.temps_initial_jours = temps_initial_local
+    # Scale temps_gagne proportionally to keep the same gauge percentage
+    if old_initial_local > 0 and profil.temps_gagne_jours:
+        ratio = profil.temps_gagne_jours / old_initial_local
+        profil.temps_gagne_jours = round(ratio * temps_initial_local, 1)
+    elif profil.temps_gagne_jours is None:
+        profil.temps_gagne_jours = 0.0
     profil.marquer_modification()
     repo.sauvegarder(profil, auth_user_id=user_id)
     return ProbabiliteOut(
         probabilite=prob_locale,
+        temps_initial_jours=temps_initial_local,
         resume="Probabilité calculée localement (mode sans IA).",
         points_forts=[],
         points_faibles=[],
