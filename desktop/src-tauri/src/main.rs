@@ -284,11 +284,24 @@ fn install_openclaw(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Genere un token gateway securise (32 hex chars) et l'enregistre dans
-/// ~/.openclaw/openclaw.json. Cree le fichier et le dossier si absents.
+/// Genere un token gateway securise (48 hex chars = 24 bytes) et l'enregistre
+/// dans ~/.openclaw/openclaw.json a la cle `gateway.auth.token`. Preserve un
+/// token existant (si l'utilisateur a deja configure son gateway via
+/// `openclaw configure`) pour ne pas invalider sa session.
+///
+/// Structure resultante (conforme a la convention OpenClaw 2026.3.x) :
+///   {
+///     "gateway": {
+///       "port": 18789,      // prefere l'existant, sinon 18789 par defaut
+///       "mode": "local",    // prefere l'existant, sinon "local"
+///       "auth": {
+///         "mode": "token",
+///         "token": "<48 hex>"
+///       }
+///     }
+///   }
 #[tauri::command]
 fn generate_gateway_token() -> Result<String, String> {
-    let token = random_hex_token(32);
     let config_path = openclaw_config_path()?;
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Erreur creation ~/.openclaw: {}", e))?;
@@ -302,24 +315,40 @@ fn generate_gateway_token() -> Result<String, String> {
     } else {
         serde_json::json!({})
     };
-
-    // Injecter le token dans gateway.token (et creer la section si absente)
     if !config.is_object() {
         config = serde_json::json!({});
     }
+
+    // Si un token existe deja, on le reutilise : l'onboarding ne casse pas
+    // une configuration manuelle ou precedente. Utile aussi pour la
+    // re-ouverture du wizard apres suppression du flag onboarded.
+    let existing_token = config
+        .get("gateway")
+        .and_then(|g| g.get("auth"))
+        .and_then(|a| a.get("token"))
+        .and_then(|t| t.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    let token = existing_token.unwrap_or_else(|| random_hex_token(48));
+
+    // S'assurer que gateway + gateway.auth existent
     let obj = config.as_object_mut().unwrap();
     let gateway = obj
         .entry("gateway")
         .or_insert_with(|| serde_json::json!({}));
     if let Some(g) = gateway.as_object_mut() {
-        g.insert("token".to_string(), serde_json::json!(token));
-        g.insert(
-            "url".to_string(),
-            serde_json::json!("http://localhost:18789"),
-        );
+        // Preserve les valeurs existantes pour port/mode/bind
+        g.entry("port").or_insert_with(|| serde_json::json!(18789));
+        g.entry("mode").or_insert_with(|| serde_json::json!("local"));
+        g.entry("bind").or_insert_with(|| serde_json::json!("loopback"));
+        let auth = g.entry("auth").or_insert_with(|| serde_json::json!({}));
+        if let Some(a) = auth.as_object_mut() {
+            a.insert("mode".to_string(), serde_json::json!("token"));
+            a.insert("token".to_string(), serde_json::json!(token));
+        }
     }
 
-    // Ecrire avec indent pour que l'utilisateur puisse le lire facilement
     let serialized = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Erreur serialisation: {}", e))?;
     fs::write(&config_path, serialized).map_err(|e| format!("Erreur ecriture: {}", e))?;
