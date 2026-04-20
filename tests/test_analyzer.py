@@ -242,14 +242,18 @@ class TestAgentExecutant:
         assert len(action.resultat) > 0
 
     def test_lister_skills(self):
-        """lister_skills() doit retourner 5 skills avec descriptions."""
+        """lister_skills() doit retourner les 7 skills (v1 + phase 2) avec descriptions."""
         skills = self.agent.lister_skills()
-        assert len(skills) == 5
+        # v1 : email, document, recherche, calendrier, todo (5)
+        # Phase 2 : openclaw, clawhub (+2) — integration marketplace ClawHub
+        assert len(skills) == 7
         assert "email" in skills
         assert "document" in skills
         assert "recherche" in skills
         assert "calendrier" in skills
         assert "todo" in skills
+        assert "openclaw" in skills
+        assert "clawhub" in skills
         for nom, desc in skills.items():
             assert isinstance(desc, str)
             assert len(desc) > 5
