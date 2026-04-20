@@ -367,6 +367,11 @@ fn mark_onboarded(skills: Vec<String>) -> Result<(), String> {
 
 /// Installe un skill ClawHub via la CLI OpenClaw. Stream le log via
 /// les evenements "clawhub:install:log" / ":done:<slug>" / ":error:<slug>".
+///
+/// Note : la sous-commande est `openclaw skills install <slug>` (et non
+/// `openclaw clawhub install` qui n'existe pas — le binaire `clawhub`
+/// autonome est publie separement mais l'install d'un skill passe par
+/// l'alias `skills` de l'OpenClaw CLI qui reifie le registre ClawHub).
 #[tauri::command]
 fn install_clawhub_skill(app: AppHandle, slug: String) -> Result<(), String> {
     let slug_for_events = slug.clone();
@@ -375,10 +380,10 @@ fn install_clawhub_skill(app: AppHandle, slug: String) -> Result<(), String> {
             let _ = app.emit("clawhub:install:log", line);
         };
 
-        emit_log(format!("▶ openclaw clawhub install {}", slug));
+        emit_log(format!("▶ openclaw skills install {}", slug));
 
         let mut child = match Command::new(npm_bin("openclaw"))
-            .args(["clawhub", "install", &slug])
+            .args(["skills", "install", &slug])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -445,11 +450,14 @@ fn install_clawhub_skill(app: AppHandle, slug: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Liste les skills installes localement via `openclaw clawhub list`.
+/// Liste les slugs des skills declares/installes via `openclaw skills list --json`.
+///
+/// Parse le JSON retourne : `{ workspaceDir, managedSkillsDir, skills: [{ name, ... }] }`
+/// et renvoie uniquement les `name` (= slugs).
 #[tauri::command]
 fn list_installed_clawhub_skills() -> Result<Vec<String>, String> {
     let output = Command::new(npm_bin("openclaw"))
-        .args(["clawhub", "list", "--format=slugs"])
+        .args(["skills", "list", "--json"])
         .output()
         .map_err(|e| format!("OpenClaw echoue: {}", e))?;
     if !output.status.success() {
@@ -459,13 +467,18 @@ fn list_installed_clawhub_skills() -> Result<Vec<String>, String> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let skills: Vec<String> = text
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("Parse JSON openclaw skills list: {}", e))?;
+    let arr = parsed
+        .get("skills")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "Champ skills[] absent du JSON".to_string())?;
+    let slugs: Vec<String> = arr
+        .iter()
+        .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(String::from))
         .collect();
-    Ok(skills)
+    Ok(slugs)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

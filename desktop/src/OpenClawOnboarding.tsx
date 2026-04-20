@@ -31,43 +31,47 @@ interface ClawHubSkill {
 }
 
 // ── Catalogue des 5 skills pre-selectionnes ────────────────────────────────
-// Selection curee : utilitaires quotidiens gratuits couvrant les 5
-// "piliers" d'une vie pro (calendrier, email, notes, communication, taches).
+// Slugs reels validees contre `openclaw skills search <mot-cle>` (avr. 2026).
+// Selection curee : utilitaires quotidiens couvrant les 5 "piliers" d'une
+// vie pro (calendrier, email, notes, communication, taches).
+// NOTE : les slugs ci-dessous correspondent a des skills publies sur le
+// marketplace ClawHub — `openclaw skills install <slug>` les telecharge
+// et les place dans ~/.openclaw/skills/<slug>/.
 
 const CURATED_SKILLS: ClawHubSkill[] = [
   {
-    slug: 'calendar',
+    slug: 'gws-calendar-agenda',
     name: 'Google Calendar',
     emoji: '📅',
-    description: 'Creer, lister et modifier vos evenements Google Calendar',
+    description: 'Lister et consulter vos evenements Google Calendar a venir',
     preselected: true,
   },
   {
     slug: 'gmail',
     name: 'Gmail',
     emoji: '📧',
-    description: 'Lire, rediger, archiver et repondre a vos emails Gmail',
+    description: 'Lire, rediger et gerer vos emails Gmail via l\'API managee',
     preselected: true,
   },
   {
     slug: 'notion',
     name: 'Notion',
     emoji: '📓',
-    description: 'Acceder a vos pages, bases de donnees et blocs Notion',
+    description: 'Creer et gerer pages, bases de donnees et blocs Notion',
     preselected: true,
   },
   {
     slug: 'slack',
     name: 'Slack',
     emoji: '💬',
-    description: 'Lire et envoyer des messages dans vos workspaces Slack',
+    description: 'Envoyer des messages et reagir dans vos canaux Slack',
     preselected: true,
   },
   {
-    slug: 'todoist',
+    slug: 'todoist-cli',
     name: 'Todoist',
     emoji: '✅',
-    description: 'Gerer vos taches, projets et sections Todoist',
+    description: 'Gerer vos taches, projets et labels Todoist en CLI',
     preselected: true,
   },
 ]
