@@ -143,6 +143,100 @@ export default function HelpPage() {
         </p>
       </div>
 
+      {/* ── Telecharger Syléa Desktop (cible de l'ancre #telecharger-desktop) ── */}
+      <section id="telecharger-desktop" style={{
+        background: 'linear-gradient(135deg, rgba(6,182,212,0.08), rgba(139,92,246,0.08))',
+        border: '1px solid rgba(99,102,241,0.28)',
+        borderRadius: 16,
+        padding: '1.5rem 1.5rem 1.25rem',
+        marginBottom: '2rem',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.75rem' }}>
+          <div style={{ fontSize: '1.75rem' }}>&#x1F4BB;</div>
+          <h2 style={{
+            margin: 0,
+            fontSize: '1.1rem',
+            fontWeight: 700,
+            color: 'var(--text-primary)',
+            letterSpacing: '0.01em',
+          }}>
+            Installer Syléa Desktop
+          </h2>
+        </div>
+        <p style={{
+          fontSize: '0.85rem',
+          color: 'var(--text-secondary)',
+          lineHeight: 1.6,
+          margin: '0 0 1rem',
+        }}>
+          L'app desktop est ce qui permet a Syléa d'agir concretement :
+          ecrire tes emails, planifier ton agenda, creer des pages Notion.
+          Tes donnees restent sur ton ordinateur — Syléa les utilise mais ne
+          les envoie nulle part. Installation en 2 minutes, sans commande
+          a taper.
+        </p>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
+          <a
+            href="https://github.com/Clotilde563/Sylea-AI/releases/latest"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center',
+              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid rgba(99,102,241,0.3)',
+              borderRadius: 12,
+              padding: '1rem',
+              textDecoration: 'none',
+              color: 'var(--text-primary)',
+              fontSize: '0.82rem',
+              fontWeight: 600,
+              gap: '0.35rem',
+              transition: 'background 0.2s',
+            }}
+          >
+            <span style={{ fontSize: '1.5rem' }}>&#x1FA9F;</span>
+            <span>Windows</span>
+            <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 400 }}>
+              .exe / .msi
+            </span>
+          </a>
+          <a
+            href="https://github.com/Clotilde563/Sylea-AI/releases/latest"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center',
+              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid rgba(99,102,241,0.15)',
+              borderRadius: 12,
+              padding: '1rem',
+              textDecoration: 'none',
+              color: 'var(--text-muted)',
+              fontSize: '0.82rem',
+              fontWeight: 600,
+              gap: '0.35rem',
+            }}
+          >
+            <span style={{ fontSize: '1.5rem' }}>&#x1F34F;</span>
+            <span>Mac / Linux</span>
+            <span style={{ fontSize: '0.7rem', fontWeight: 400 }}>
+              bientot
+            </span>
+          </a>
+        </div>
+        <div style={{
+          fontSize: '0.75rem',
+          color: 'var(--text-muted)',
+          lineHeight: 1.5,
+        }}>
+          &#x1F511; <b>Apres installation :</b> lance l'app, laisse le wizard
+          installer OpenClaw (1-2 minutes), choisis tes skills (calendrier,
+          email...), puis clique sur &laquo; Ouvrir Syléa sur le web &raquo;.
+          Tu verras apparaitre un point vert en haut du site &mdash; c'est
+          gagne.
+        </div>
+      </section>
+
       {/* ── Premiers pas ────────────────────────────────────────────── */}
       <CategorySection icon="&#x1F4F1;" title="Premiers pas">
         <Accordion title="Comment creer un profil" defaultOpen>

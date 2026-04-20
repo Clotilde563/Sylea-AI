@@ -966,52 +966,159 @@ export default function OpenClawOnboarding({ onComplete }: OpenClawOnboardingPro
     const installedCount = Object.values(skillInstallProgress).filter(
       (s) => s === 'done'
     ).length
+    // URL du site web Syléa — sylea-ai.com en prod, localhost:5173 en dev.
+    // On laisse l'utilisateur customiser si besoin via localStorage.
+    // Detection dev : hostname de la page Tauri (en dev Vite sert sur localhost,
+    // en prod le bundle est charge via tauri://).
+    const isDev =
+      typeof window !== 'undefined' &&
+      (window.location.hostname === 'localhost' ||
+        window.location.hostname === '127.0.0.1')
+    const SYLEA_WEB_URL =
+      (typeof localStorage !== 'undefined' && localStorage.getItem('sylea_web_url')) ||
+      (isDev ? 'http://localhost:5173' : 'https://sylea-ai.com')
+
+    const openWebApp = async () => {
+      try {
+        await invoke('open_url', { url: SYLEA_WEB_URL })
+      } catch (err) {
+        console.error('open_url failed:', err)
+      }
+    }
+
     return (
       <div style={containerStyle}>
         <div style={cardStyle}>
           {renderProgressBar()}
-          <div style={{ fontSize: 48, textAlign: 'center', marginBottom: 16 }}>🎉</div>
-          <div style={{ ...titleStyle, textAlign: 'center' }}>
-            Syléa est prete a vous accompagner
-          </div>
-          <div style={{ ...subtitleStyle, textAlign: 'center' }}>
-            Votre assistant AI est installe et configure. Vous pouvez
-            maintenant vous connecter a votre compte Syléa et commencer
-            a deleguer.
-          </div>
 
+          {/* Celebration : confetti + logo anime */}
           <div
             style={{
-              background: 'rgba(99,102,241,0.05)',
-              border: '1px solid rgba(99,102,241,0.2)',
-              borderRadius: 12,
-              padding: 16,
-              marginBottom: 24,
-              fontSize: 13,
-              lineHeight: 1.8,
+              fontSize: 64,
+              textAlign: 'center',
+              marginBottom: 8,
+              animation: 'bounce 1.2s ease-out',
             }}
           >
-            <div style={{ fontWeight: 600, marginBottom: 8 }}>Recapitulatif</div>
-            <div>
-              ✓ OpenClaw{' '}
-              {openclawVersion ? <>v{openclawVersion}</> : null} installe
-            </div>
-            <div>✓ Token gateway genere et securise</div>
-            <div>✓ {installedCount} skill(s) ClawHub installe(s)</div>
+            🎉
+          </div>
+          <div style={{ ...titleStyle, textAlign: 'center', fontSize: 22 }}>
+            C'est pret ! Bienvenue dans Syléa
+          </div>
+          <div style={{ ...subtitleStyle, textAlign: 'center' }}>
+            Ton assistant est installe sur ton ordinateur. Il peut maintenant
+            agir pour toi : ecrire des emails, prendre des notes, gerer ton
+            calendrier.
           </div>
 
-          <div style={{ textAlign: 'center' }}>
-            <button style={{ ...primaryButton, padding: '14px 32px' }} onClick={finishOnboarding}>
-              Lancer Syléa
+          {/* Recapitulatif visuel des installations */}
+          <div
+            style={{
+              background:
+                'linear-gradient(135deg, rgba(6,182,212,0.06), rgba(139,92,246,0.06))',
+              border: '1px solid rgba(99,102,241,0.25)',
+              borderRadius: 14,
+              padding: '16px 18px',
+              marginBottom: 22,
+              fontSize: 13,
+              lineHeight: 1.9,
+            }}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 10, fontSize: 14 }}>
+              Ce que Syléa a installe pour toi
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ color: '#10b981', fontWeight: 700 }}>✓</span>
+              <span>
+                Le moteur <b>OpenClaw</b>
+                {openclawVersion ? <span style={{ opacity: 0.6 }}> (v{openclawVersion})</span> : null} — 38 outils de base
+              </span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ color: '#10b981', fontWeight: 700 }}>✓</span>
+              <span>Une cle de securite unique pour ta machine</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ color: '#10b981', fontWeight: 700 }}>✓</span>
+              <span>
+                <b>{installedCount}</b> skill{installedCount > 1 ? 's' : ''} pour agir concretement
+                (calendrier, email, notes...)
+              </span>
+            </div>
+          </div>
+
+          {/* Carte pedagogique : pourquoi ouvrir le site */}
+          <div
+            style={{
+              background: 'rgba(99,102,241,0.08)',
+              border: '1px dashed rgba(99,102,241,0.35)',
+              borderRadius: 12,
+              padding: '14px 16px',
+              marginBottom: 20,
+              fontSize: 13,
+              lineHeight: 1.6,
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>
+              🔗 Derniere etape : relie ton compte
+            </div>
+            <div style={{ opacity: 0.85 }}>
+              Ouvre Syléa sur le web et connecte-toi. Des que c'est fait, un
+              petit point vert apparaitra en haut du site : ca veut dire que
+              Syléa et ton ordinateur se parlent.
+            </div>
+          </div>
+
+          {/* Double CTA : bouton principal (web) + secondaire (lancer app) */}
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 10,
+              alignItems: 'stretch',
+            }}
+          >
+            <button
+              style={{
+                ...primaryButton,
+                padding: '15px 32px',
+                fontSize: 15,
+                background:
+                  'linear-gradient(135deg, #06b6d4 0%, #6366f1 50%, #8b5cf6 100%)',
+                boxShadow: '0 4px 14px rgba(99,102,241,0.35)',
+              }}
+              onClick={openWebApp}
+            >
+              🌐 Ouvrir Syléa sur le web
+            </button>
+            <button
+              style={{
+                background: 'transparent',
+                border: '1px solid rgba(99,102,241,0.3)',
+                color: 'rgba(255,255,255,0.85)',
+                padding: '10px 24px',
+                borderRadius: 10,
+                cursor: 'pointer',
+                fontSize: 13,
+                fontWeight: 500,
+              }}
+              onClick={finishOnboarding}
+            >
+              Ou ouvrir directement l'app Syléa Agent
             </button>
           </div>
         </div>
 
-        {/* Animation de spinner globale */}
+        {/* Animation de spinner globale + bounce pour le confetti */}
         <style>{`
           @keyframes spin {
             from { transform: rotate(0deg); }
             to { transform: rotate(360deg); }
+          }
+          @keyframes bounce {
+            0%   { transform: scale(0); opacity: 0; }
+            50%  { transform: scale(1.25); opacity: 1; }
+            100% { transform: scale(1); }
           }
         `}</style>
       </div>

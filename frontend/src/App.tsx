@@ -13,6 +13,7 @@ import { EvenementPage }    from './pages/EvenementPage'
 import { BilanPage }        from './pages/BilanPage'
 import { HistoriquePage }   from './pages/HistoriquePage'
 import { ServiceChatbot }   from './components/ServiceChatbot'
+import { DesktopStatusBanner } from './components/DesktopStatusBanner'
 import ParametresPage       from './pages/ParametresPage'
 import AgentsPage           from './pages/AgentsPage'
 import LoginPage            from './pages/LoginPage'
@@ -69,6 +70,8 @@ function AppContent() {
             element={
               <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
                 <NavBar onOpenChatbot={() => setChatbotOpen(true)} />
+                {/* Phase 2c — bandeau pont desktop <-> web (vert si OK, rouge sinon) */}
+                <DesktopStatusBanner />
                 <main style={{ flex: 1 }}>
                   <Routes>
                     <Route path="/"             element={<DashboardPage />} />

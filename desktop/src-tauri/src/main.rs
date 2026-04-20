@@ -639,6 +639,50 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  Phase 2c — Ouverture d'URL dans le navigateur par defaut
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Ouvre une URL dans le navigateur par defaut de l'utilisateur.
+///
+/// Utilise par le wizard pour amener l'utilisateur sur sylea-ai.com
+/// une fois l'onboarding OpenClaw termine : il trouve alors son compte,
+/// voit le statut "Desktop connecte" en vert, et peut commencer a
+/// deleguer des actions.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    // Garde-fou : on n'ouvre que http(s)
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(format!("URL non supportee : {}", url));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // "start" est une commande interne de cmd, pas un executable.
+        // L'argument vide "" est le titre de la fenetre (requis par start).
+        Command::new("cmd")
+            .args(["/c", "start", "", &url])
+            .spawn()
+            .map_err(|e| format!("Impossible d'ouvrir le navigateur : {}", e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Impossible d'ouvrir le navigateur : {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Impossible d'ouvrir le navigateur : {}", e))?;
+    }
+
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  Main — Enregistrement des commandes Tauri
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -671,6 +715,8 @@ fn main() {
             mark_onboarded,
             install_clawhub_skill,
             list_installed_clawhub_skills,
+            // Phase 2c — Bridge desktop -> web
+            open_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
