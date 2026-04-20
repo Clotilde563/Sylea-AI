@@ -30,6 +30,7 @@ import ScenariosPage        from './pages/ScenariosPage'
 import CoachingPage         from './pages/CoachingPage'
 import IntegrationsPage     from './pages/IntegrationsPage'
 import NetworkPage          from './pages/NetworkPage'
+import MarketplacePage      from './pages/MarketplacePage'
 import AuthCallbackPage     from './pages/AuthCallbackPage'
 
 // ── Application ───────────────────────────────────────────────────────────────
@@ -84,6 +85,7 @@ function AppContent() {
                     <Route path="/coaching"     element={<CoachingPage />} />
                     <Route path="/integrations" element={<IntegrationsPage />} />
                     <Route path="/network"      element={<NetworkPage />} />
+                    <Route path="/marketplace"  element={<MarketplacePage />} />
                     <Route path="*"             element={<Navigate to="/" replace />} />
                   </Routes>
                 </main>

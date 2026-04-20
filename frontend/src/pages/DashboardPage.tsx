@@ -190,6 +190,73 @@ export function DashboardPage() {
           </p>
         )}
 
+        {/* Bandeau Syléa sur ClawHub — Phase 2 marketing */}
+        <a
+          href="https://clawhub.ai/clotilde563/sylea"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="animate-fade-in"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.85rem',
+            width: '100%',
+            padding: '0.75rem 1.15rem',
+            marginBottom: '1rem',
+            borderRadius: 'var(--radius-lg)',
+            background: 'linear-gradient(135deg, rgba(59,130,246,0.08), rgba(139,92,246,0.06), rgba(245,158,11,0.05))',
+            border: '1px solid rgba(139,92,246,0.32)',
+            textDecoration: 'none',
+            cursor: 'pointer',
+            transition: 'all 0.2s',
+            boxShadow: '0 0 18px rgba(139,92,246,0.08)',
+          }}
+          onMouseEnter={e => {
+            e.currentTarget.style.borderColor = 'rgba(139,92,246,0.55)'
+            e.currentTarget.style.boxShadow = '0 0 24px rgba(139,92,246,0.22)'
+          }}
+          onMouseLeave={e => {
+            e.currentTarget.style.borderColor = 'rgba(139,92,246,0.32)'
+            e.currentTarget.style.boxShadow = '0 0 18px rgba(139,92,246,0.08)'
+          }}
+        >
+          <span style={{ fontSize: '1.35rem' }}>{'\ud83c\udf1f'}</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <p style={{
+              margin: 0,
+              fontSize: '0.82rem',
+              fontWeight: 600,
+              color: 'var(--accent-violet-light)',
+              letterSpacing: '0.02em',
+            }}>
+              {'Syl\u00e9a est publi\u00e9e sur ClawHub'}
+            </p>
+            <p style={{
+              margin: '0.15rem 0 0',
+              fontSize: '0.72rem',
+              color: 'var(--text-muted)',
+              lineHeight: 1.4,
+            }}>
+              {'Votre coach de vie fait partie des 52\u202f700+ skills de l\u2019\u00e9cosyst\u00e8me ClawHub \u2014 cliquez pour voir la fiche.'}
+            </p>
+          </div>
+          <span style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            padding: '0.25rem 0.6rem',
+            borderRadius: '999px',
+            background: 'rgba(139,92,246,0.15)',
+            color: 'var(--accent-violet-light)',
+            fontSize: '0.7rem',
+            fontWeight: 600,
+            letterSpacing: '0.04em',
+            textTransform: 'uppercase',
+            whiteSpace: 'nowrap',
+          }}>
+            {'v0.1.0 \u2192'}
+          </span>
+        </a>
+
         {/* Bandeau bilan quotidien */}
         {!bilanFait && (
           <button onClick={() => {

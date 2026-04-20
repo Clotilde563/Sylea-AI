@@ -26,6 +26,8 @@ from sylea.agent.skills.document_skill import SkillDocument
 from sylea.agent.skills.research_skill import SkillRecherche
 from sylea.agent.skills.calendar_skill import SkillCalendrier
 from sylea.agent.skills.todo_skill import SkillTodo
+from sylea.agent.skills.openclaw_skill import SkillOpenClaw
+from sylea.agent.skills.clawhub_skill import SkillClawHub
 from sylea.core.models.decision import ActionAgent
 
 
@@ -56,6 +58,29 @@ _MOTS_TODO = frozenset([
     "priorise", "étapes", "actions à", "checklist",
 ])
 
+# Phase 2 — Integration OpenClaw Gateway + ClawHub Marketplace.
+# Ces mots-cles detectent les intentions qui gagnent a etre deleguees a
+# l'Agent 3 OpenClaw ou au marketplace ClawHub. Le skill correspondant
+# produit un rapport-guide (pas d'execution reelle : elle passe par
+# l'Agent 3 native dispatcher ou le router /api/marketplace/*).
+
+_MOTS_OPENCLAW = frozenset([
+    "openclaw", "open claw", "gateway", "tool openclaw",
+    "recherche web", "web search", "x_search", "web_fetch",
+    "exécute la commande", "run command", "bash", "shell openclaw",
+    "lis le fichier", "écris le fichier", "apply_patch",
+    "sub-agent", "sous-agent", "spawn session",
+    "mémoire openclaw", "memory_search", "cron openclaw",
+    "image_generate", "llm_task",
+])
+
+_MOTS_CLAWHUB = frozenset([
+    "clawhub", "claw hub", "marketplace", "skill marketplace",
+    "cherche un skill", "installe le skill", "désinstalle le skill",
+    "liste mes skills", "mes skills installés", "skills installées",
+    "publier mon skill", "publish skill", "sylea sur clawhub",
+])
+
 
 def _detecter_skill(instruction: str) -> str:
     """
@@ -68,22 +93,48 @@ def _detecter_skill(instruction: str) -> str:
         instruction: Texte de l'instruction normalisée
 
     Returns:
-        Nom du skill : 'email' | 'document' | 'recherche' | 'calendrier' | 'todo'
+        Nom du skill parmi :
+        email | document | recherche | calendrier | todo | openclaw | clawhub
     """
     inst = instruction.lower()
+
+    def _score(mots) -> int:
+        # Les expressions multi-mots (ex: "recherche web", "installe le skill")
+        # sont plus spécifiques qu'un mot isolé et doivent peser plus lourd.
+        # Sinon "cherche" (sous-chaîne de "recherche") empile deux points
+        # en faveur du skill Recherche et supplante "recherche web" d'Openclaw.
+        total = 0
+        for m in mots:
+            if m in inst:
+                total += 3 if " " in m else 1
+        return total
+
     scores = {
-        "email": sum(1 for m in _MOTS_EMAIL if m in inst),
-        "document": sum(1 for m in _MOTS_DOCUMENT if m in inst),
-        "recherche": sum(1 for m in _MOTS_RECHERCHE if m in inst),
-        "calendrier": sum(1 for m in _MOTS_CALENDRIER if m in inst),
-        "todo": sum(1 for m in _MOTS_TODO if m in inst),
+        "email":      _score(_MOTS_EMAIL),
+        "document":   _score(_MOTS_DOCUMENT),
+        "recherche":  _score(_MOTS_RECHERCHE),
+        "calendrier": _score(_MOTS_CALENDRIER),
+        "todo":       _score(_MOTS_TODO),
+        "openclaw":   _score(_MOTS_OPENCLAW),
+        "clawhub":    _score(_MOTS_CLAWHUB),
     }
-    # Retourner le skill avec le score le plus haut
-    meilleur = max(scores, key=lambda k: scores[k])
-    # Si aucun mot-clé ne correspond, utiliser Document par défaut
-    if scores[meilleur] == 0:
+    max_score = max(scores.values())
+    # Si aucun mot-clé ne correspond, utiliser Document par défaut (v1 legacy)
+    if max_score == 0:
         return "document"
-    return meilleur
+    # En cas d'égalité, on privilégie les skills les plus spécifiques :
+    # openclaw/clawhub (phrases composées) > email/calendrier/todo
+    # (spécifiques) > recherche/document (fourre-tout).
+    priorite = [
+        "openclaw", "clawhub",
+        "email", "calendrier", "todo",
+        "recherche", "document",
+    ]
+    for k in priorite:
+        if scores[k] == max_score:
+            return k
+    # Filet de sécurité (ne devrait jamais arriver)
+    return max(scores, key=lambda k: scores[k])
 
 
 class AgentExecutant:
@@ -103,11 +154,13 @@ class AgentExecutant:
     def __init__(self) -> None:
         self._validateur = ValidateurInstruction()
         self._skills = {
-            "email": SkillEmail(),
-            "document": SkillDocument(),
-            "recherche": SkillRecherche(),
+            "email":      SkillEmail(),
+            "document":   SkillDocument(),
+            "recherche":  SkillRecherche(),
             "calendrier": SkillCalendrier(),
-            "todo": SkillTodo(),
+            "todo":       SkillTodo(),
+            "openclaw":   SkillOpenClaw(),
+            "clawhub":    SkillClawHub(),
         }
 
     def valider_instruction(self, instruction: str) -> ResultatValidation:

@@ -1158,4 +1158,69 @@ export const api = {
 
   agent3DeleteTask: (taskId: string): Promise<{ success: boolean }> =>
     request(`/agent3/tasks/${taskId}`, { method: 'DELETE' }),
+
+  // ── ClawHub Marketplace (/api/marketplace/*) ──────────────────────────────
+  // Phase 2 : consommation du marketplace ClawHub depuis l'UI Syléa.
+
+  marketplaceFeatured: (): Promise<{
+    featured: Array<{
+      slug: string
+      owner: string
+      name: string
+      description: string
+      url: string
+      tags: string[]
+      highlight?: boolean
+      homepage?: string
+    }>
+  }> =>
+    request('/marketplace/featured'),
+
+  marketplaceListInstalled: (): Promise<{
+    success: boolean
+    skills: Array<any>
+    error?: string | null
+  }> =>
+    request('/marketplace/installed'),
+
+  marketplaceSearch: (query: string, limit = 20): Promise<{
+    success: boolean
+    query: string
+    skills: Array<any>
+    error?: string | null
+  }> =>
+    request('/marketplace/search', {
+      method: 'POST',
+      body: JSON.stringify({ query, limit }),
+    }),
+
+  marketplaceSkillInfo: (slug: string): Promise<{
+    success: boolean
+    slug: string
+    data: any
+  }> =>
+    request(`/marketplace/skill/${encodeURIComponent(slug)}`),
+
+  marketplaceInstall: (slug: string): Promise<{
+    success: boolean
+    slug: string
+    data: any
+    error?: string | null
+  }> =>
+    request(`/marketplace/install/${encodeURIComponent(slug)}`, { method: 'POST' }),
+
+  marketplaceUninstall: (slug: string): Promise<{
+    success: boolean
+    slug: string
+    data: any
+    error?: string | null
+  }> =>
+    request(`/marketplace/skill/${encodeURIComponent(slug)}`, { method: 'DELETE' }),
+
+  marketplaceCheck: (): Promise<{
+    success: boolean
+    data: any
+    error?: string | null
+  }> =>
+    request('/marketplace/check', { method: 'POST' }),
 }
