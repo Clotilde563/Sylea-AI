@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import OpenClawOnboarding from './OpenClawOnboarding'
 
 const API_BASE = 'http://localhost:8000'
 
@@ -120,6 +122,25 @@ const AGENT3_BLUE = '#3b82f6'
 const AGENT3_GOLD = '#f59e0b'
 
 function App() {
+  // Phase 2b — Onboarding OpenClaw au 1er lancement.
+  // null = verification en cours, false = afficher wizard, true = passer au login.
+  // On verifie le flag ~/.sylea-agent/onboarded.json via la commande Rust
+  // `is_onboarded`. Si Tauri n'est pas disponible (dev web), on considere
+  // l'onboarding comme deja fait pour ne pas bloquer le developpement.
+  const [isOnboarded, setIsOnboarded] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const done = await invoke<boolean>('is_onboarded')
+        setIsOnboarded(done)
+      } catch {
+        // Tauri indisponible (mode dev hors-Tauri) → ne pas bloquer
+        setIsOnboarded(true)
+      }
+    })()
+  }, [])
+
   const [token, setToken] = useState<string | null>(localStorage.getItem('sylea_desktop_token'))
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -247,7 +268,7 @@ function App() {
         ws.addEventListener('close', () => clearInterval(ping))
       }
 
-      ws.onmessage = (event) => {
+      ws.onmessage = async (event) => {
         if (event.data === 'pong') return
         try {
           const data = JSON.parse(event.data)
@@ -720,6 +741,23 @@ function App() {
     setSteps([])
     setPlan([])
     setWsConnected(false)
+  }
+
+  // ── ONBOARDING OPENCLAW (Phase 2b) ──
+  // Affichage bloquant au 1er lancement : wizard qui installe OpenClaw,
+  // genere le token gateway et propose 5 skills ClawHub pre-coches.
+  if (isOnboarded === null) {
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        minHeight: '100vh', background: '#050810', color: '#a78bfa', fontSize: '0.85rem',
+      }}>
+        Initialisation…
+      </div>
+    )
+  }
+  if (isOnboarded === false) {
+    return <OpenClawOnboarding onComplete={() => setIsOnboarded(true)} />
   }
 
   // ── LOGIN ──

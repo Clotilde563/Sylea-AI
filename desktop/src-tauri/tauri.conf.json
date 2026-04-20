@@ -12,8 +12,10 @@
     "windows": [
       {
         "title": "Sylea Agent",
-        "width": 500,
-        "height": 700,
+        "width": 720,
+        "height": 820,
+        "minWidth": 480,
+        "minHeight": 620,
         "resizable": true,
         "center": true
       }
@@ -24,6 +26,10 @@
     "targets": "all",
     "icon": [
       "icons/icon.ico"
-    ]
+    ],
+    "shortDescription": "Assistant AI Syléa — moteur OpenClaw local",
+    "longDescription": "Syléa installe son moteur AI OpenClaw (licence MIT, 38 outils) et connecte vos skills ClawHub preferes — calendrier, email, notes, communication, taches — pour vous accompagner dans vos decisions au quotidien.",
+    "category": "Productivity",
+    "copyright": "(c) 2026 Syléa"
   }
 }
