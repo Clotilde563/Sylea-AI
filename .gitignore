@@ -8,11 +8,15 @@ build/
 *.egg
 
 # Venv files (accidentally in project root)
-Include/
-Lib/
-Scripts/
+/Include/
+/Lib/
+/Scripts/
 pyvenv.cfg
 nul
+
+# ...mais pas le repertoire scripts/ du desktop Tauri
+!desktop/scripts/
+!desktop/scripts/**
 
 # Data (SQLite user data)
 data/
