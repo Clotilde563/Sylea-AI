@@ -912,8 +912,10 @@ async def generate_proactive_message(
     ).fetchone()
 
     # Check last decision (indicates app usage)
+    # Bug fix : col `profil_id` n'existe pas dans `decisions`. Use `user_id`
+    # qui pointe vers profil_utilisateur.id.
     last_decision = db.conn.execute(
-        "SELECT cree_le FROM decisions WHERE profil_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1) ORDER BY cree_le DESC LIMIT 1",
+        "SELECT cree_le FROM decisions WHERE user_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1) ORDER BY cree_le DESC LIMIT 1",
         (user_id,),
     ).fetchone()
 
