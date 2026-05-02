@@ -83,7 +83,7 @@ JSON UNIQUEMENT, pas de markdown.""",
                     "content-type": "application/json",
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
+                    "model": "claude-sonnet-4-6",
                     "max_tokens": 400,
                     "messages": [{"role": "user", "content": content}],
                 },
@@ -117,7 +117,7 @@ def fix_pine_code(code: str, error: str) -> str | None:
                     "content-type": "application/json",
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
+                    "model": "claude-sonnet-4-6",
                     "max_tokens": 3000,
                     "messages": [{
                         "role": "user",

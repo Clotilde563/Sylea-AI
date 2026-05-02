@@ -18,3 +18,12 @@ passlib[bcrypt]>=1.7.4
 
 # WebSocket (desktop app)
 websockets>=12.0
+
+# Computer Use (Agent 3 — controle natif de l'ordinateur)
+pyautogui>=0.9.54
+Pillow>=10.0.0
+mss>=9.0.0
+pyperclip>=1.8.0
+
+# Stripe (Agent 3 — Phase 13 — paiements Pro/Team)
+stripe>=10.0.0

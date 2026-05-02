@@ -22,6 +22,7 @@ interface DeviceContextState {
   loading: boolean
   retryGeo: () => void
   useFallbackCity: (city: string) => void
+  skipGeo: () => void
 }
 
 const DeviceCtx = createContext<DeviceContextState>({
@@ -31,7 +32,10 @@ const DeviceCtx = createContext<DeviceContextState>({
   loading: true,
   retryGeo: () => {},
   useFallbackCity: () => {},
+  skipGeo: () => {},
 })
+
+const GEO_SKIP_KEY = 'sylea_geo_skipped'
 
 export const useDeviceContext = () => useContext(DeviceCtx)
 
@@ -106,6 +110,10 @@ const CACHE_MS = 30 * 60 * 1000 // 30 minutes
 export function DeviceContextProvider({ children }: { children: ReactNode }) {
   const [ctx, setCtx] = useState<DeviceContextData | null>(null)
   const [geoDenied, setGeoDenied] = useState(false)
+  // Si l'user a skippe precedemment, on considere la geoloc comme "non requise"
+  const [geoSkipped, setGeoSkipped] = useState<boolean>(() => {
+    try { return localStorage.getItem(GEO_SKIP_KEY) === '1' } catch { return false }
+  })
   const [loading, setLoading] = useState(true)
   const profil = useStore(s => s.profil)
 
@@ -177,6 +185,14 @@ export function DeviceContextProvider({ children }: { children: ReactNode }) {
     })
   }, [buildContext])
 
+  // Skip la geoloc : l'agent fonctionne sans contexte geo (awareness simplement incomplet)
+  const skipGeo = useCallback(() => {
+    try { localStorage.setItem(GEO_SKIP_KEY, '1') } catch {}
+    setGeoSkipped(true)
+    setGeoDenied(false)
+    setLoading(false)
+  }, [])
+
   // Initial load + refresh every 30 min
   useEffect(() => {
     requestGeo()
@@ -188,10 +204,12 @@ export function DeviceContextProvider({ children }: { children: ReactNode }) {
     <DeviceCtx.Provider value={{
       ctx,
       ready: ctx !== null,
-      geoDenied,
+      // Si skip precedemment, on masque le modal (geoDenied=false cote UI)
+      geoDenied: geoDenied && !geoSkipped,
       loading,
       retryGeo: requestGeo,
       useFallbackCity,
+      skipGeo,
     }}>
       {children}
     </DeviceCtx.Provider>

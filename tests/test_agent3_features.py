@@ -344,9 +344,9 @@ class TestSlashCommandSkills:
         result = asyncio.get_event_loop().run_until_complete(
             parser.execute("/skills", {})
         )
-        # Should show 30 total (4 internal + 26 OpenClaw)
-        assert "30 skill" in result.response or "skills internes" in result.response
-        assert "26 outils OpenClaw" in result.response
+        # Should show skills internes + outils OpenClaw (compteur evolue avec les ajouts)
+        assert "skills internes" in result.response
+        assert "outils OpenClaw" in result.response
 
 
 class TestSlashCommandHooks:

@@ -122,7 +122,7 @@ async def _claude_chat(system_prompt: str, messages: list[dict], max_tokens: int
         client = anthropic.Anthropic(api_key=key)
         msg = await asyncio.to_thread(
             lambda: client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-sonnet-4-6",
                 max_tokens=max_tokens,
                 system=[{
                     "type": "text",

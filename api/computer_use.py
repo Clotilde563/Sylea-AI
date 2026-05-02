@@ -91,7 +91,11 @@ def _require_desktop() -> None:
         )
 
 # --- Configuration ---
-ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+# NOTE : claude-sonnet-4-6 NE SUPPORTE PAS le tool type `computer_20250124`
+# (verifie via API : "'claude-sonnet-4-6' does not support tool types:
+# computer_20250124"). On utilise donc claude-sonnet-4-5-20250929 pour
+# Computer Use uniquement. Haiku 4.5 supporte aussi (low-cost pre-checks).
+ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929"
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 BETA_FLAG = "computer-use-2025-01-24"
 TOOL_TYPE = "computer_20250124"

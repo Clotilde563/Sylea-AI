@@ -406,6 +406,42 @@ async def _extract_handler(args: str, context: dict) -> SlashCommandResult:
     return SlashCommandResult(handled=True, response="Aucun nouveau fait extrait.")
 
 
+async def _export_handler(args: str, context: dict) -> SlashCommandResult:
+    """Export l'historique de conversation en TXT ou JSON."""
+    db = context.get("db")
+    user_id = context.get("user_id", "")
+    if not db or not user_id:
+        return SlashCommandResult(handled=True, error="Non authentifie")
+
+    fmt = (args or "").strip().lower()
+    if fmt not in ("txt", "json"):
+        fmt = "txt"
+
+    # Compte le nombre de messages a exporter (preview)
+    try:
+        n_rows = db.conn.execute(
+            "SELECT COUNT(*) FROM agent3_messages WHERE auth_user_id = ?",
+            (user_id,),
+        ).fetchone()[0] or 0
+    except Exception:
+        n_rows = 0
+
+    url = f"/api/agent3/export?format={fmt}"
+    lines = [
+        f"**Export conversation ({fmt.upper()})**",
+        f"  - {n_rows} message(s) disponible(s)",
+        f"  - Telecharge ici : `{url}`",
+        "",
+        "Astuce : `/export json` pour le format JSON, `/export txt` (defaut) pour le texte.",
+    ]
+    return SlashCommandResult(
+        handled=True,
+        response="\n".join(lines),
+        data={"format": fmt, "url": url, "messages_count": n_rows},
+        actions=[{"type": "DOWNLOAD", "url": url, "format": fmt}],
+    )
+
+
 async def _todo_handler(args: str, context: dict) -> SlashCommandResult:
     """Affiche les todos en cours."""
     user_id = context.get("user_id", "")
@@ -445,6 +481,7 @@ def get_slash_parser() -> SlashCommandParser:
             SlashCommand("hooks", "Liste les hooks actifs", "/hooks", _hooks_handler, category="info"),
             SlashCommand("extract", "Force l'extraction de memoires", "/extract", _extract_handler, category="memoire"),
             SlashCommand("todo", "Affiche les todos en cours", "/todo", _todo_handler, aliases=["todos"], category="actions"),
+            SlashCommand("export", "Export conversation (txt|json)", "/export [txt|json]", _export_handler, category="general"),
         ]
         for cmd in commands:
             _parser.register(cmd)

@@ -23,9 +23,101 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from typing import Any, Optional
 
 logger = logging.getLogger("sylea.agent3.compaction")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 8D : observabilite compaction
+# ─────────────────────────────────────────────────────────────────────────────
+
+_compaction_metrics_lock = threading.Lock()
+_compaction_metrics: dict[str, Any] = {
+    "total_compactions": 0,
+    "total_tokens_before": 0,
+    "total_tokens_after": 0,
+    "total_messages_before": 0,
+    "total_messages_after": 0,
+    "total_duration_s": 0.0,
+    "failures": 0,
+    "last_compaction_at": None,
+    "by_user": {},  # user_id -> {count, tokens_saved, last_at}
+}
+
+
+def _record_compaction(
+    user_id: str | None,
+    *,
+    tokens_before: int,
+    tokens_after: int,
+    messages_before: int,
+    messages_after: int,
+    duration_s: float,
+    success: bool = True,
+) -> None:
+    """Enregistre une compaction pour metrics."""
+    with _compaction_metrics_lock:
+        _compaction_metrics["total_compactions"] += 1
+        _compaction_metrics["total_tokens_before"] += tokens_before
+        _compaction_metrics["total_tokens_after"] += tokens_after
+        _compaction_metrics["total_messages_before"] += messages_before
+        _compaction_metrics["total_messages_after"] += messages_after
+        _compaction_metrics["total_duration_s"] += duration_s
+        if not success:
+            _compaction_metrics["failures"] += 1
+        _compaction_metrics["last_compaction_at"] = time.time()
+
+        if user_id:
+            bucket = _compaction_metrics["by_user"].setdefault(
+                user_id, {"count": 0, "tokens_saved": 0, "last_at": None},
+            )
+            bucket["count"] += 1
+            bucket["tokens_saved"] += max(0, tokens_before - tokens_after)
+            bucket["last_at"] = time.time()
+
+
+def get_compaction_metrics() -> dict[str, Any]:
+    """Snapshot des metrics (thread-safe copy)."""
+    with _compaction_metrics_lock:
+        total_before = _compaction_metrics["total_tokens_before"]
+        total_after = _compaction_metrics["total_tokens_after"]
+        saved = max(0, total_before - total_after)
+        ratio = (total_after / total_before) if total_before > 0 else 1.0
+        return {
+            "total_compactions": _compaction_metrics["total_compactions"],
+            "total_tokens_saved": saved,
+            "compression_ratio": round(ratio, 3),
+            "avg_duration_s": round(
+                _compaction_metrics["total_duration_s"]
+                / max(1, _compaction_metrics["total_compactions"]),
+                3,
+            ),
+            "failures": _compaction_metrics["failures"],
+            "last_compaction_at": _compaction_metrics["last_compaction_at"],
+            "total_messages_before": _compaction_metrics["total_messages_before"],
+            "total_messages_after": _compaction_metrics["total_messages_after"],
+            "users_with_compactions": len(_compaction_metrics["by_user"]),
+            "by_user": {
+                u: dict(v) for u, v in _compaction_metrics["by_user"].items()
+            },
+        }
+
+
+def reset_compaction_metrics() -> None:
+    """Reset pour tests."""
+    with _compaction_metrics_lock:
+        _compaction_metrics["total_compactions"] = 0
+        _compaction_metrics["total_tokens_before"] = 0
+        _compaction_metrics["total_tokens_after"] = 0
+        _compaction_metrics["total_messages_before"] = 0
+        _compaction_metrics["total_messages_after"] = 0
+        _compaction_metrics["total_duration_s"] = 0.0
+        _compaction_metrics["failures"] = 0
+        _compaction_metrics["last_compaction_at"] = None
+        _compaction_metrics["by_user"] = {}
 
 
 SUMMARIZATION_SYSTEM = """Tu resumes l'historique d'un agent qui navigue un site web.
@@ -65,16 +157,41 @@ class ContextCompactor:
         self.target_messages = target_messages
         self.keep_last = keep_last
 
-    async def maybe_compact(self, messages: list[dict]) -> list[dict]:
+    async def maybe_compact(
+        self, messages: list[dict], *, user_id: str | None = None,
+    ) -> list[dict]:
         """Compacte si necessaire. Retourne la nouvelle liste.
 
         Non destructif : retourne messages inchange si sous le seuil.
+        Enregistre des metrics (Phase 8D) quand une compaction a lieu.
         """
         if len(messages) <= self.max_messages:
             return messages
 
         logger.info(f"Compacting {len(messages)} messages -> target {self.target_messages}")
-        return await self._compact(messages)
+        tokens_before = estimate_tokens(messages)
+        messages_before = len(messages)
+        start = time.time()
+        success = True
+        try:
+            new_messages = await self._compact(messages)
+        except Exception as e:
+            logger.exception(f"Compaction crashed : {e}")
+            success = False
+            new_messages = messages  # fallback : retourne inchange
+        duration_s = time.time() - start
+        tokens_after = estimate_tokens(new_messages) if success else tokens_before
+
+        _record_compaction(
+            user_id,
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+            messages_before=messages_before,
+            messages_after=len(new_messages),
+            duration_s=duration_s,
+            success=success,
+        )
+        return new_messages
 
     async def _compact(self, messages: list[dict]) -> list[dict]:
         if len(messages) <= self.keep_last + 1:

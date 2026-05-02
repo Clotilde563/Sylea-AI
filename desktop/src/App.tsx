@@ -1,95 +1,31 @@
 import { useState, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import OpenClawOnboarding from './OpenClawOnboarding'
+import { SyleaLogo, SyleaWordmark, AgentSyleaLogo, type AgentVariant } from './SyleaLogo'
 
 const API_BASE = 'http://localhost:8000'
 
-// ── Syléa S logo path (identique a l'app web) ──────────────────────────────
-const CX = 190, CY = 170
-const S_PATH = `M ${CX} ${CY-105} C ${CX+90} ${CY-105}, ${CX+90} ${CY-28}, ${CX} ${CY} C ${CX-90} ${CY+28}, ${CX-90} ${CY+105}, ${CX} ${CY+105}`
-
-// Logo Syléa SVG — logo original (violet/indigo par defaut)
-function SyleaLogo({ size = 30, color1 = '#60a5fa', color2 = '#818cf8', color3 = '#a78bfa' }: { size?: number; color1?: string; color2?: string; color3?: string }) {
-  const id = `logo-${Math.random().toString(36).slice(2, 6)}`
-  return (
-    <svg width={size} height={size} viewBox="0 0 380 380" fill="none">
-      <defs>
-        <linearGradient id={`${id}-g`} x1="0%" y1="100%" x2="100%" y2="0%">
-          <stop offset="0%" stopColor={color1} />
-          <stop offset="50%" stopColor={color2} />
-          <stop offset="100%" stopColor={color3} />
-        </linearGradient>
-        <filter id={`${id}-blur`} x="-50%" y="-50%" width="200%" height="200%">
-          <feGaussianBlur stdDeviation="20" />
-        </filter>
-      </defs>
-      <path d={S_PATH} stroke={`url(#${id}-g)`} strokeWidth="90" fill="none" strokeLinecap="round"
-        style={{ filter: `url(#${id}-blur)`, opacity: 0.18 }} />
-      <path d={S_PATH} stroke="rgba(2,4,16,0.98)" strokeWidth="58" fill="none" strokeLinecap="round" />
-      <path d={S_PATH} stroke={`url(#${id}-g)`} strokeWidth="46" fill="none" strokeLinecap="round" />
-      <path d={S_PATH} stroke="rgba(255,230,240,0.35)" strokeWidth="2.5" fill="none" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-// Logo Agent 3 — bleu & or scintillant avec animations SVG natives
-// Les couleurs du gradient bougent reellement (animate sur les stops)
-function Agent3Logo({ size = 30 }: { size?: number }) {
-  const id = `a3-${Math.random().toString(36).slice(2, 6)}`
-  return (
-    <svg width={size} height={size} viewBox="0 0 380 380" fill="none" style={{ overflow: 'visible' }}>
-      <defs>
-        {/* Gradient principal — les stops s'animent entre bleu et or */}
-        <linearGradient id={`${id}-g`} x1="0%" y1="100%" x2="100%" y2="0%">
-          <stop offset="0%">
-            <animate attributeName="stop-color" values="#1e3a5f;#d4a017;#1e3a5f" dur="3s" repeatCount="indefinite" />
-          </stop>
-          <stop offset="35%">
-            <animate attributeName="stop-color" values="#2563eb;#fbbf24;#2563eb" dur="3s" repeatCount="indefinite" />
-          </stop>
-          <stop offset="65%">
-            <animate attributeName="stop-color" values="#d4a017;#2563eb;#d4a017" dur="3s" repeatCount="indefinite" />
-          </stop>
-          <stop offset="100%">
-            <animate attributeName="stop-color" values="#fbbf24;#1e3a5f;#fbbf24" dur="3s" repeatCount="indefinite" />
-          </stop>
-        </linearGradient>
-        {/* Gradient du halo — meme animation */}
-        <linearGradient id={`${id}-glow`} x1="0%" y1="100%" x2="100%" y2="0%">
-          <stop offset="0%">
-            <animate attributeName="stop-color" values="#1e3a5f;#d4a017;#1e3a5f" dur="3s" repeatCount="indefinite" />
-          </stop>
-          <stop offset="50%">
-            <animate attributeName="stop-color" values="#2563eb;#fbbf24;#2563eb" dur="3s" repeatCount="indefinite" />
-          </stop>
-          <stop offset="100%">
-            <animate attributeName="stop-color" values="#fbbf24;#1e3a5f;#fbbf24" dur="3s" repeatCount="indefinite" />
-          </stop>
-        </linearGradient>
-        <filter id={`${id}-blur`} x="-50%" y="-50%" width="200%" height="200%">
-          <feGaussianBlur stdDeviation="20" />
-        </filter>
-        {/* Reflet blanc anime */}
-        <linearGradient id={`${id}-shine`} x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%">
-            <animate attributeName="stop-color" values="rgba(255,230,200,0.6);rgba(200,220,255,0.3);rgba(255,230,200,0.6)" dur="3s" repeatCount="indefinite" />
-          </stop>
-          <stop offset="100%">
-            <animate attributeName="stop-color" values="rgba(200,220,255,0.3);rgba(255,230,200,0.6);rgba(200,220,255,0.3)" dur="3s" repeatCount="indefinite" />
-          </stop>
-        </linearGradient>
-      </defs>
-      {/* Halo diffus */}
-      <path d={S_PATH} stroke={`url(#${id}-glow)`} strokeWidth="90" fill="none" strokeLinecap="round"
-        style={{ filter: `url(#${id}-blur)`, opacity: 0.22 }} />
-      {/* Fond noir interieur */}
-      <path d={S_PATH} stroke="rgba(2,4,16,0.98)" strokeWidth="58" fill="none" strokeLinecap="round" />
-      {/* Trait principal colore — anime */}
-      <path d={S_PATH} stroke={`url(#${id}-g)`} strokeWidth="46" fill="none" strokeLinecap="round" />
-      {/* Reflet brillant anime */}
-      <path d={S_PATH} stroke={`url(#${id}-shine)`} strokeWidth="2.5" fill="none" strokeLinecap="round" />
-    </svg>
-  )
+// ── Palette officielle tech ────────────────────────────────────────────────
+// Source de verite : desktop/index.html (variables CSS --sy-*)
+const SY = {
+  cyan:     '#00c8ff',
+  cyanSoft: '#7ad9ff',
+  blue:     '#0090e0',
+  indigo:   '#1848d8',
+  violet:   '#5520b8',
+  text:     '#e6f0ff',
+  textMute: 'rgba(230, 240, 255, 0.60)',
+  textDim:  'rgba(230, 240, 255, 0.35)',
+  border:   'rgba(0, 200, 255, 0.12)',
+  borderHi: 'rgba(0, 200, 255, 0.25)',
+  surface:  'rgba(0, 200, 255, 0.03)',
+  surfaceHi:'rgba(0, 200, 255, 0.06)',
+  bg:       '#050810',
+  bgElev:   '#070c1a',
+  success:  '#10b981',
+  warn:     '#f59e0b',
+  error:    '#ef4444',
+  mono:     '"JetBrains Mono","Fira Code","Cascadia Code","Consolas",monospace',
 }
 
 interface ActionStep {
@@ -106,20 +42,100 @@ interface AgentInfo {
   name: string
   color: string
   colorLight: string
+  logoVariant: AgentVariant
   status: 'active' | 'inactive' | 'locked'
   unread: number
 }
 
+// Agents & couleurs alignees sur frontend/src/pages/AgentsPage.tsx (source de
+// verite web). Chaque agent a son logo colore + sa couleur d'accent :
+//   Agent 1  — or (assistant personnel du quotidien)
+//   Agent 2  — rouge (emails / rappels / voix)
+//   Agent 3  — bleu-or anime (agent d'elite, OpenClaw)
+//   Super Agent — violet (verrouille)
 const AGENTS: AgentInfo[] = [
-  { id: 'agent1', name: 'Sylea 1', color: '#f59e0b', colorLight: '#fbbf24', status: 'active', unread: 0 },
-  { id: 'agent2', name: 'Sylea 2', color: '#ef4444', colorLight: '#f87171', status: 'inactive', unread: 0 },
-  { id: 'agent3', name: 'Sylea 3', color: '#3b82f6', colorLight: '#60a5fa', status: 'inactive', unread: 0 },
-  { id: 'agent4', name: 'Super Agent', color: '#8b5cf6', colorLight: '#a78bfa', status: 'locked', unread: 0 },
+  { id: 'agent1', name: 'Syléa 1',   color: '#f59e0b', colorLight: '#fbbf24', logoVariant: 'gold',   status: 'active',   unread: 0 },
+  { id: 'agent2', name: 'Syléa 2',   color: '#ef4444', colorLight: '#f87171', logoVariant: 'red',    status: 'inactive', unread: 0 },
+  { id: 'agent3', name: 'Syléa 3',   color: '#38bdf8', colorLight: '#a5b4fc', logoVariant: 'agent3', status: 'inactive', unread: 0 },
+  { id: 'agent4', name: 'Super Agent', color: '#8b5cf6', colorLight: '#c4b5fd', logoVariant: 'violet', status: 'locked',   unread: 0 },
 ]
 
-// Agent 3 color constants
-const AGENT3_BLUE = '#3b82f6'
-const AGENT3_GOLD = '#f59e0b'
+// Agent 3 conserve sa signature visuelle (cyan -> indigo) pour rester reperable
+const AGENT3_CYAN   = '#38bdf8'
+const AGENT3_INDIGO = '#818cf8'
+
+// ── Helpers UI tech ─────────────────────────────────────────────────────────
+
+/** Coin techniques ┌ ┐ ┘ └ — decorent les cartes */
+function CornerBrackets({ color = SY.cyan, size = 10 }: { color?: string; size?: number }) {
+  const s: React.CSSProperties = {
+    position: 'absolute', width: size, height: size,
+    borderColor: color, pointerEvents: 'none',
+  }
+  return (
+    <>
+      <span style={{ ...s, top: 4, left: 4, borderTop: `1px solid ${color}`, borderLeft: `1px solid ${color}` }} />
+      <span style={{ ...s, top: 4, right: 4, borderTop: `1px solid ${color}`, borderRight: `1px solid ${color}` }} />
+      <span style={{ ...s, bottom: 4, left: 4, borderBottom: `1px solid ${color}`, borderLeft: `1px solid ${color}` }} />
+      <span style={{ ...s, bottom: 4, right: 4, borderBottom: `1px solid ${color}`, borderRight: `1px solid ${color}` }} />
+    </>
+  )
+}
+
+/** Label technique en mono caps */
+function TechLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.16em',
+      color: SY.textMute, marginBottom: 6,
+      textTransform: 'uppercase',
+    }}>
+      {children}
+    </div>
+  )
+}
+
+/** Input technique — bord cyan discret, focus glow */
+function TechInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
+  return (
+    <input
+      {...props}
+      style={{
+        width: '100%', padding: '10px 12px',
+        borderRadius: 6,
+        border: `1px solid ${SY.border}`,
+        background: 'rgba(5, 8, 16, 0.6)',
+        color: SY.text,
+        fontSize: 13,
+        fontFamily: 'inherit',
+        transition: 'all 0.15s',
+      }}
+      onFocus={e => {
+        e.currentTarget.style.borderColor = SY.cyan
+        e.currentTarget.style.boxShadow = `0 0 0 2px rgba(0,200,255,0.1)`
+      }}
+      onBlur={e => {
+        e.currentTarget.style.borderColor = SY.border
+        e.currentTarget.style.boxShadow = 'none'
+      }}
+    />
+  )
+}
+
+/** Pastille de statut — cyan/vert/orange/rouge selon l'etat */
+function StatusDot({ color, pulsing = false, size = 7 }: { color: string; pulsing?: boolean; size?: number }) {
+  return (
+    <span
+      style={{
+        display: 'inline-block', width: size, height: size, borderRadius: '50%',
+        background: color,
+        boxShadow: `0 0 ${size}px ${color}, 0 0 2px ${color}`,
+        animation: pulsing ? 'sy-pulse 1.5s ease-in-out infinite' : 'none',
+        flexShrink: 0,
+      }}
+    />
+  )
+}
 
 function App() {
   // Phase 2b — Onboarding OpenClaw au 1er lancement.
@@ -717,11 +733,6 @@ function App() {
         updatePlan(planIdx, 'done')
         break
       }
-      case 'SEARCH': {
-        addStep('SEARCH', `${tag}Recherche: ${action.data?.query || 'web'}`, 'done', sourceAgent)
-        updatePlan(planIdx, 'done')
-        break
-      }
       case 'X_SEARCH': {
         const xPosts = action.data?.posts?.length || 0
         addStep('X_SEARCH', `${tag}Recherche X/Twitter: ${action.data?.query || ''} (${xPosts} posts)`, 'done', sourceAgent)
@@ -749,10 +760,24 @@ function App() {
   if (isOnboarded === null) {
     return (
       <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        minHeight: '100vh', background: '#050810', color: '#a78bfa', fontSize: '0.85rem',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        minHeight: '100vh', gap: 18,
       }}>
-        Initialisation…
+        <SyleaLogo size={48} animated />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{
+            display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+            background: SY.cyan,
+            boxShadow: `0 0 10px ${SY.cyan}`,
+            animation: 'sy-pulse 1.2s ease-in-out infinite',
+          }} />
+          <span style={{
+            fontFamily: SY.mono, fontSize: 11, letterSpacing: '0.18em',
+            color: SY.textMute, textTransform: 'uppercase',
+          }}>
+            Initialisation du systeme
+          </span>
+        </div>
       </div>
     )
   }
@@ -766,172 +791,320 @@ function App() {
       <div style={{
         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
         minHeight: '100vh', padding: '2rem',
-        background: 'radial-gradient(ellipse at 50% 30%, rgba(139,92,246,0.06) 0%, #050810 70%)',
       }}>
-        <div style={{ marginBottom: '1rem' }}>
-          <SyleaLogo size={50} color1="#818cf8" color2="#a78bfa" color3="#c4b5fd" />
-        </div>
-        <h1 style={{ fontSize: '1.4rem', fontWeight: 800, letterSpacing: '0.12em', marginBottom: '0.2rem' }}>
-          <span style={{ color: '#a5b4fc' }}>SYLEA</span>
-          <span style={{ color: '#818cf8', marginLeft: '0.3rem' }}>AGENT</span>
-        </h1>
-        <p style={{ color: '#555', marginBottom: '2rem', fontSize: '0.72rem', letterSpacing: '0.08em' }}>DESKTOP COMPANION</p>
+        {/* Logo officiel + wordmark */}
+        <SyleaWordmark logoSize={48} fontSize={20} gap={14} animated />
 
+        {/* Sous-titre mono */}
         <div style={{
-          background: 'rgba(139,92,246,0.03)', border: '1px solid rgba(139,92,246,0.1)',
-          borderRadius: '16px', padding: '1.5rem', width: '100%', maxWidth: '340px',
+          marginTop: 10,
+          fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.28em',
+          color: SY.textDim, textTransform: 'uppercase',
         }}>
-          {error && <div style={{ color: '#fca5a5', fontSize: '0.78rem', marginBottom: '1rem', padding: '0.5rem', background: 'rgba(239,68,68,0.08)', borderRadius: '8px', textAlign: 'center' }}>{error}</div>}
+          <span style={{ color: SY.cyan }}>▸</span> Desktop runtime · v1.0
+        </div>
 
-          <label style={{ fontSize: '0.68rem', color: '#666', display: 'block', marginBottom: '0.2rem', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Email</label>
-          <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="votre@email.com"
-            style={{ width: '100%', padding: '0.6rem 0.8rem', borderRadius: '10px', border: '1px solid rgba(139,92,246,0.12)', background: 'rgba(255,255,255,0.03)', color: '#e8e8f0', marginBottom: '0.7rem', fontSize: '0.85rem' }} />
+        {/* Carte login */}
+        <div style={{
+          marginTop: 32,
+          background: SY.surface,
+          border: `1px solid ${SY.border}`,
+          borderRadius: 10,
+          padding: '28px 26px 22px',
+          width: '100%', maxWidth: 360,
+          position: 'relative',
+          backdropFilter: 'blur(8px)',
+          boxShadow: `0 0 0 1px ${SY.border} inset, 0 8px 30px rgba(0,0,0,0.45)`,
+        }}>
+          {/* Corners techniques */}
+          <CornerBrackets color={SY.cyan} />
 
-          <label style={{ fontSize: '0.68rem', color: '#666', display: 'block', marginBottom: '0.2rem', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Mot de passe</label>
-          <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="••••••••"
+          {/* Label section */}
+          <div style={{
+            fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.2em',
+            color: SY.cyan, marginBottom: 20, textTransform: 'uppercase',
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <span style={{ opacity: 0.6 }}>[</span>
+            authentification
+            <span style={{ opacity: 0.6 }}>]</span>
+          </div>
+
+          {error && (
+            <div style={{
+              color: '#fca5a5', fontSize: 12, marginBottom: 16, padding: '8px 10px',
+              background: 'rgba(239,68,68,0.08)',
+              border: '1px solid rgba(239,68,68,0.25)',
+              borderRadius: 6,
+              fontFamily: SY.mono,
+            }}>
+              <span style={{ color: SY.error }}>✗</span> {error}
+            </div>
+          )}
+
+          <TechLabel>Email</TechLabel>
+          <TechInput
+            type="email"
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            placeholder="votre@email.com"
+          />
+
+          <div style={{ height: 12 }} />
+
+          <TechLabel>Mot de passe</TechLabel>
+          <TechInput
+            type="password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="••••••••"
             onKeyDown={e => e.key === 'Enter' && handleLogin()}
-            style={{ width: '100%', padding: '0.6rem 0.8rem', borderRadius: '10px', border: '1px solid rgba(139,92,246,0.12)', background: 'rgba(255,255,255,0.03)', color: '#e8e8f0', marginBottom: '1.25rem', fontSize: '0.85rem' }} />
+          />
 
           <button onClick={handleLogin} style={{
-            width: '100%', padding: '0.7rem', borderRadius: '10px', border: 'none',
-            background: 'linear-gradient(135deg, #7c3aed, #6d28d9)', color: 'white',
-            fontWeight: 700, fontSize: '0.88rem', cursor: 'pointer', letterSpacing: '0.04em',
-          }}>Se connecter</button>
+            marginTop: 22, width: '100%',
+            padding: '11px 14px', borderRadius: 8,
+            background: `linear-gradient(135deg, ${SY.violet} 0%, ${SY.indigo} 40%, ${SY.blue} 75%, ${SY.cyan} 100%)`,
+            color: '#fff',
+            fontWeight: 700, fontSize: 13, letterSpacing: '0.12em',
+            textTransform: 'uppercase',
+            cursor: 'pointer',
+            boxShadow: `0 0 0 1px rgba(0,200,255,0.3), 0 6px 20px rgba(0,200,255,0.18)`,
+            fontFamily: SY.mono,
+          }}>
+            ▸ Connexion
+          </button>
+
+          <div style={{
+            marginTop: 16, fontSize: 10, fontFamily: SY.mono,
+            color: SY.textDim, textAlign: 'center', letterSpacing: '0.1em',
+          }}>
+            Secure · End-to-end · <span style={{ color: SY.cyan }}>localhost:8000</span>
+          </div>
         </div>
       </div>
     )
   }
 
   // ── DASHBOARD 3 COLONNES ──
-  const statusDot = wsConnected ? '#4ade80' : '#f87171'
+  const wsColor = wsConnected ? SY.success : SY.error
 
   return (
-    <div style={{ display: 'flex', height: '100vh', background: '#050810', overflow: 'hidden' }}>
+    <div style={{
+      display: 'flex', height: '100vh',
+      background: SY.bg, overflow: 'hidden',
+      position: 'relative',
+    }}>
 
-      {/* CSS animations — Agent 3 shimmer bleu & or */}
+      {/* Animations tech */}
       <style>{`
-        @keyframes agent3-border-glow {
+        @keyframes a3-flow {
+          0%   { background-position: 0% 50%; }
+          50%  { background-position: 100% 50%; }
+          100% { background-position: 0% 50%; }
+        }
+        @keyframes a3-border {
           0%, 100% {
-            border-color: rgba(37,99,235,0.3);
-            box-shadow: 0 0 8px rgba(37,99,235,0.12), inset 0 0 6px rgba(212,160,23,0.04);
+            border-color: rgba(56,189,248,0.3);
+            box-shadow: 0 0 10px rgba(56,189,248,0.15), inset 0 0 6px rgba(129,140,248,0.05);
           }
           50% {
-            border-color: rgba(212,160,23,0.35);
-            box-shadow: 0 0 12px rgba(245,158,11,0.15), inset 0 0 10px rgba(37,99,235,0.06);
+            border-color: rgba(129,140,248,0.4);
+            box-shadow: 0 0 14px rgba(129,140,248,0.2), inset 0 0 10px rgba(56,189,248,0.07);
           }
         }
         .agent3-name-shimmer {
-          background: linear-gradient(90deg, #2563eb, #d4a017, #fbbf24, #2563eb, #1e3a5f, #2563eb);
+          background: linear-gradient(90deg, ${AGENT3_CYAN}, ${AGENT3_INDIGO}, ${SY.cyan}, ${AGENT3_CYAN});
           background-size: 300% 100%;
           -webkit-background-clip: text;
           -webkit-text-fill-color: transparent;
-          animation: agent3-name-flow 3s ease-in-out infinite;
-        }
-        @keyframes agent3-name-flow {
-          0% { background-position: 0% 50%; }
-          50% { background-position: 100% 50%; }
-          100% { background-position: 0% 50%; }
+          background-clip: text;
+          animation: a3-flow 3s ease-in-out infinite;
         }
         .agent3-status-shimmer {
-          animation: agent3-status-pulse 3s ease-in-out infinite;
+          animation: a3-status 3s ease-in-out infinite;
         }
-        @keyframes agent3-status-pulse {
-          0%, 100% { color: rgba(37,99,235,0.5); }
-          50% { color: rgba(212,160,23,0.6); }
+        @keyframes a3-status {
+          0%, 100% { color: ${AGENT3_CYAN}; opacity: 0.7; }
+          50%      { color: ${AGENT3_INDIGO}; opacity: 0.9; }
         }
-        @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
+        @keyframes scan-line {
+          0%   { top: 0;    opacity: 0; }
+          10%  { opacity: 0.6; }
+          90%  { opacity: 0.6; }
+          100% { top: 100%; opacity: 0; }
+        }
+        .tech-card {
+          position: relative;
+          background: ${SY.surface};
+          border: 1px solid ${SY.border};
+          border-radius: 8px;
+        }
+        .tech-btn-hover {
+          transition: all 0.15s;
+        }
+        .tech-btn-hover:hover {
+          border-color: ${SY.borderHi} !important;
+          background: ${SY.surfaceHi} !important;
         }
       `}</style>
 
       {/* ── SIDEBAR GAUCHE : Agents ── */}
       <div style={{
-        width: 200, borderRight: '1px solid rgba(255,255,255,0.05)',
+        width: 220, borderRight: `1px solid ${SY.border}`,
         display: 'flex', flexDirection: 'column',
-        background: 'rgba(255,255,255,0.01)',
+        background: 'rgba(7, 12, 26, 0.45)',
+        backdropFilter: 'blur(10px)',
+        position: 'relative', zIndex: 2,
       }}>
-        {/* Header sidebar */}
-        <div style={{ padding: '0.75rem', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-          <SyleaLogo size={18} />
-          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#a5b4fc', letterSpacing: '0.08em' }}>SYLEA AGENT</span>
-          <div style={{ width: 6, height: 6, borderRadius: '50%', background: statusDot, marginLeft: 'auto' }} />
+        {/* Header sidebar : logo officiel + wordmark + point connexion */}
+        <div style={{
+          padding: '14px 14px 12px',
+          borderBottom: `1px solid ${SY.border}`,
+          display: 'flex', alignItems: 'center', gap: 10,
+        }}>
+          <SyleaLogo size={22} animated={false} />
+          <div style={{ flex: 1, minWidth: 0, lineHeight: 1.1 }}>
+            <div style={{
+              fontSize: 11, fontWeight: 800, letterSpacing: '0.14em',
+              color: SY.text,
+            }}>
+              SYLEA <span style={{ color: SY.cyanSoft, textShadow: `0 0 6px rgba(0,200,255,0.4)` }}>AGENT</span>
+            </div>
+            <div style={{
+              fontSize: 8, fontFamily: SY.mono, letterSpacing: '0.18em',
+              color: SY.textDim, marginTop: 2, textTransform: 'uppercase',
+            }}>
+              Desktop · v1.0
+            </div>
+          </div>
+          <StatusDot color={wsColor} pulsing={!wsConnected} size={7} />
+        </div>
+
+        {/* Label section agents */}
+        <div style={{
+          padding: '12px 14px 6px',
+          fontFamily: SY.mono, fontSize: 9, letterSpacing: '0.2em',
+          color: SY.textDim, textTransform: 'uppercase',
+          display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span style={{ color: SY.cyan }}>▸</span> Agents
+          <div style={{ flex: 1, height: 1, background: SY.border }} />
+          <span style={{ fontFamily: SY.mono }}>{AGENTS.filter(a => a.status !== 'locked').length}/{AGENTS.length}</span>
         </div>
 
         {/* Agent list */}
-        <div style={{ flex: 1, padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+        <div style={{ flex: 1, padding: '4px 10px 10px', display: 'flex', flexDirection: 'column', gap: 4 }}>
           {AGENTS.map(agent => {
             const isAgent3 = agent.id === 'agent3'
             const isSelected = selectedAgent === agent.id
+            const statusSymbol =
+              agent.status === 'active'   ? '●' :
+              agent.status === 'locked'   ? '■' : '○'
+            const statusLabel =
+              agent.status === 'active'   ? 'ACTIF' :
+              agent.status === 'locked'   ? 'LOCK'  : 'IDLE'
             return (
               <button
                 key={agent.id}
                 onClick={() => agent.status !== 'locked' && setSelectedAgent(agent.id)}
-                className={isAgent3 && isSelected ? 'agent3-sidebar-btn' : undefined}
+                className="tech-btn-hover"
                 style={{
-                  display: 'flex', alignItems: 'center', gap: '0.5rem',
-                  padding: '0.5rem 0.6rem', borderRadius: '8px',
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  padding: '8px 10px', borderRadius: 6,
                   background: isSelected
                     ? (isAgent3
-                      ? 'linear-gradient(135deg, rgba(37,99,235,0.08), rgba(212,160,23,0.04), rgba(5,8,16,0.9))'
-                      : `${agent.color}12`)
+                      ? `linear-gradient(135deg, rgba(56,189,248,0.08), rgba(129,140,248,0.05), transparent)`
+                      : `${agent.color}14`)
                     : 'transparent',
                   border: isSelected
-                    ? (isAgent3 ? '1px solid rgba(37,99,235,0.25)' : `1px solid ${agent.color}30`)
+                    ? (isAgent3 ? `1px solid ${AGENT3_CYAN}40` : `1px solid ${agent.color}40`)
                     : '1px solid transparent',
                   cursor: agent.status === 'locked' ? 'not-allowed' : 'pointer',
-                  opacity: agent.status === 'locked' ? 0.3 : 1,
-                  transition: 'all 0.15s', width: '100%', textAlign: 'left',
-                  ...(isAgent3 && isSelected ? { animation: 'agent3-border-glow 3s ease-in-out infinite' } : {}),
+                  opacity: agent.status === 'locked' ? 0.35 : 1,
+                  width: '100%', textAlign: 'left',
+                  position: 'relative',
+                  ...(isAgent3 && isSelected ? { animation: 'a3-border 3s ease-in-out infinite' } : {}),
                 }}
               >
-                {/* Logo avatar */}
-                {isAgent3 ? (
-                  <div style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                    <Agent3Logo size={22} />
-                  </div>
-                ) : (
-                  <div style={{
-                    width: 24, height: 24, borderRadius: '50%',
-                    background: `${agent.color}20`, border: `1.5px solid ${agent.color}40`,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: '0.65rem', fontWeight: 700, color: agent.color,
-                  }}>
-                    {agent.id === 'agent4' ? '★' : agent.name.slice(-1)}
-                  </div>
+                {/* Barre verticale gauche active */}
+                {isSelected && (
+                  <span style={{
+                    position: 'absolute', left: -10, top: 6, bottom: 6,
+                    width: 2, borderRadius: 2,
+                    background: isAgent3
+                      ? `linear-gradient(to bottom, ${AGENT3_CYAN}, ${AGENT3_INDIGO})`
+                      : agent.color,
+                    boxShadow: `0 0 8px ${isAgent3 ? AGENT3_CYAN : agent.color}`,
+                  }} />
                 )}
+
+                {/* Logo colore par agent — meme geometrie que le logo officiel,
+                    gradient adapte (or / rouge / bleu-or anime / violet) */}
+                <div style={{
+                  width: 26, height: 26, borderRadius: 5,
+                  background: isSelected ? `${agent.color}18` : 'rgba(0, 200, 255, 0.04)',
+                  border: `1px solid ${isSelected ? agent.color + '50' : SY.border}`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flexShrink: 0,
+                }}>
+                  <AgentSyleaLogo
+                    size={18}
+                    variant={agent.logoVariant}
+                    animated={isSelected || isAgent3}
+                  />
+                </div>
+
                 <div style={{ flex: 1, minWidth: 0 }}>
                   {isAgent3 ? (
-                    <div className={isSelected ? 'agent3-name-shimmer' : undefined}
+                    <div
+                      className={isSelected ? 'agent3-name-shimmer' : undefined}
                       style={{
-                        fontSize: '0.72rem', fontWeight: 700,
-                        ...(isSelected ? {} : { color: '#888' }),
+                        fontSize: 12, fontWeight: 700,
+                        ...(isSelected ? {} : { color: SY.textMute }),
                       }}>
                       {agent.name}
                     </div>
                   ) : (
-                    <div style={{ fontSize: '0.72rem', fontWeight: 600, color: isSelected ? agent.colorLight : '#888' }}>
+                    <div style={{
+                      fontSize: 12, fontWeight: 600,
+                      color: isSelected ? agent.colorLight : SY.textMute,
+                    }}>
                       {agent.name}
                     </div>
                   )}
-                  <div className={isAgent3 ? 'agent3-status-shimmer' : undefined}
-                    style={{ fontSize: '0.58rem', color: isAgent3 ? undefined : '#444', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                    {agent.status === 'active' ? '● Actif' : agent.status === 'locked' ? '🔒 Verrouille' : '○ Inactif'}
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 4,
+                    fontFamily: SY.mono, fontSize: 8.5, letterSpacing: '0.12em',
+                    color: isAgent3
+                      ? undefined
+                      : (agent.status === 'active' ? SY.success : SY.textDim),
+                    marginTop: 2,
+                  }}
+                  className={isAgent3 && !isSelected ? 'agent3-status-shimmer' : undefined}
+                  >
+                    <span>{statusSymbol}</span>
+                    <span>{statusLabel}</span>
                     {isAgent3 && (
-                      <span style={{
-                        width: 5, height: 5, borderRadius: '50%',
-                        background: openclawConnected ? '#4ade80' : '#f59e0b',
-                        display: 'inline-block', marginLeft: '0.15rem',
-                        boxShadow: openclawConnected ? '0 0 4px rgba(74,222,128,0.5)' : 'none',
-                      }} title={openclawConnected ? 'OpenClaw connecte' : 'OpenClaw — fallback Claude'} />
+                      <span
+                        title={openclawConnected ? 'OpenClaw connecte' : 'OpenClaw — fallback Claude'}
+                        style={{
+                          display: 'inline-block', marginLeft: 2,
+                          width: 4, height: 4, borderRadius: '50%',
+                          background: openclawConnected ? SY.success : SY.warn,
+                          boxShadow: openclawConnected ? `0 0 4px ${SY.success}` : 'none',
+                        }}
+                      />
                     )}
                   </div>
                 </div>
+
                 {agent.unread > 0 && (
                   <span style={{
-                    width: 16, height: 16, borderRadius: '50%', background: agent.color,
+                    minWidth: 16, height: 16, padding: '0 4px', borderRadius: 8,
+                    background: agent.color, color: '#fff',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: '0.55rem', fontWeight: 700, color: 'white',
+                    fontSize: 10, fontWeight: 700, fontFamily: SY.mono,
                   }}>{agent.unread}</span>
                 )}
               </button>
@@ -940,37 +1113,103 @@ function App() {
         </div>
 
         {/* Footer sidebar */}
-        <div style={{ padding: '0.5rem', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+        <div style={{
+          padding: '10px 12px', borderTop: `1px solid ${SY.border}`,
+          display: 'flex', flexDirection: 'column', gap: 8,
+        }}>
+          {/* Mini status system */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            fontFamily: SY.mono, fontSize: 9, letterSpacing: '0.14em',
+            color: SY.textDim, textTransform: 'uppercase',
+            padding: '4px 2px',
+          }}>
+            <StatusDot color={wsColor} pulsing={!wsConnected} size={5} />
+            <span>WS {wsConnected ? 'OK' : 'OFF'}</span>
+            <span style={{ opacity: 0.4 }}>·</span>
+            <StatusDot color={openclawConnected ? SY.success : SY.warn} size={5} />
+            <span>CLAW</span>
+          </div>
           <button onClick={handleLogout} style={{
-            width: '100%', padding: '0.35rem', borderRadius: '6px',
-            background: 'none', border: '1px solid rgba(239,68,68,0.15)',
-            color: '#f87171', fontSize: '0.65rem', cursor: 'pointer',
-          }}>Deconnexion</button>
+            width: '100%', padding: '7px 10px', borderRadius: 6,
+            background: 'transparent', border: `1px solid ${SY.border}`,
+            color: SY.textMute, fontSize: 10, fontFamily: SY.mono,
+            letterSpacing: '0.16em', textTransform: 'uppercase',
+            cursor: 'pointer', transition: 'all 0.15s',
+          }}
+          onMouseEnter={e => {
+            e.currentTarget.style.borderColor = 'rgba(239,68,68,0.4)'
+            e.currentTarget.style.color = SY.error
+          }}
+          onMouseLeave={e => {
+            e.currentTarget.style.borderColor = SY.border
+            e.currentTarget.style.color = SY.textMute
+          }}
+          >
+            ▸ Deconnexion
+          </button>
         </div>
       </div>
 
       {/* ── CENTRE : Actions en cours / Agent 3 Log ── */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', borderRight: '1px solid rgba(255,255,255,0.05)' }}>
+      <div style={{
+        flex: 1, display: 'flex', flexDirection: 'column',
+        borderRight: `1px solid ${SY.border}`,
+        position: 'relative', zIndex: 2,
+      }}>
         {/* Header centre */}
         <div style={{
-          padding: '0.6rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.05)',
-          display: 'flex', alignItems: 'center', gap: '0.5rem',
+          padding: '12px 18px',
+          borderBottom: `1px solid ${SY.border}`,
+          display: 'flex', alignItems: 'center', gap: 10,
+          background: 'rgba(7, 12, 26, 0.35)',
         }}>
           {selectedAgent === 'agent3' && agent3Logs.length > 0 ? (
             <>
-              <span className="agent3-name-shimmer" style={{ fontSize: '0.8rem', fontWeight: 700 }}>Agent 3 — Execution</span>
-              <span style={{ fontSize: '0.6rem', color: AGENT3_BLUE, background: 'rgba(59,130,246,0.08)', padding: '0.1rem 0.4rem', borderRadius: '8px' }}>
+              <span style={{
+                fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.18em',
+                color: SY.cyan, textTransform: 'uppercase',
+              }}>▸ STREAM</span>
+              <span className="agent3-name-shimmer" style={{
+                fontSize: 13, fontWeight: 700, letterSpacing: '0.04em',
+              }}>
+                Agent 3 — Execution
+              </span>
+              <span style={{
+                fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.1em',
+                color: AGENT3_CYAN, background: 'rgba(56,189,248,0.08)',
+                padding: '2px 8px', borderRadius: 4,
+                border: `1px solid ${AGENT3_CYAN}30`,
+              }}>
                 {agent3Logs.length} log{agent3Logs.length > 1 ? 's' : ''}
               </span>
               <div style={{ flex: 1 }} />
               <button onClick={() => setAgent3Logs([])} style={{
-                background: 'none', border: 'none', color: '#555', fontSize: '0.6rem', cursor: 'pointer',
+                background: 'transparent', border: `1px solid ${SY.border}`,
+                color: SY.textMute, fontSize: 10, fontFamily: SY.mono,
+                padding: '4px 8px', borderRadius: 4,
+                letterSpacing: '0.14em', textTransform: 'uppercase',
+                cursor: 'pointer',
               }}>Effacer</button>
             </>
           ) : (
             <>
-              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#ccc' }}>Actions en cours</span>
-              <span style={{ fontSize: '0.6rem', color: '#555', background: 'rgba(255,255,255,0.03)', padding: '0.1rem 0.4rem', borderRadius: '8px' }}>
+              <span style={{
+                fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.18em',
+                color: SY.cyan, textTransform: 'uppercase',
+              }}>▸ ACTIONS</span>
+              <span style={{
+                fontSize: 13, fontWeight: 700, letterSpacing: '0.04em',
+                color: SY.text,
+              }}>
+                Flux en temps reel
+              </span>
+              <span style={{
+                fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.1em',
+                color: SY.textMute, background: SY.surface,
+                padding: '2px 8px', borderRadius: 4,
+                border: `1px solid ${SY.border}`,
+              }}>
                 {steps.length} etape{steps.length > 1 ? 's' : ''}
               </span>
             </>
@@ -980,34 +1219,44 @@ function App() {
         {/* Agent 3 Claude Code-like log panel */}
         {selectedAgent === 'agent3' && agent3Logs.length > 0 && (
           <div style={{
-            flex: 1, overflow: 'auto', padding: '0.5rem 0.75rem',
-            background: 'rgba(0,0,0,0.3)',
-            fontFamily: "'Fira Code', 'Cascadia Code', 'Consolas', monospace",
+            flex: 1, overflow: 'auto', padding: '8px 14px',
+            background: 'rgba(0, 4, 12, 0.55)',
+            fontFamily: SY.mono,
+            position: 'relative',
           }}>
             {agent3Logs.map((log, i) => (
               <div key={i} style={{
-                display: 'flex', alignItems: 'flex-start', gap: '0.5rem',
-                padding: '0.2rem 0.4rem', borderRadius: '4px',
-                fontSize: '0.72rem', lineHeight: 1.5,
-                background: log.type === 'tool' ? 'rgba(212,160,23,0.03)' : 'transparent',
-                borderLeft: log.type === 'tool' ? `2px solid ${AGENT3_GOLD}`
-                  : log.type === 'success' ? '2px solid #10b981'
-                  : log.type === 'error' ? '2px solid #ef4444'
-                  : '2px solid transparent',
+                display: 'flex', alignItems: 'flex-start', gap: 10,
+                padding: '4px 8px', borderRadius: 4,
+                fontSize: 12, lineHeight: 1.55,
+                background:
+                  log.type === 'tool'    ? 'rgba(56,189,248,0.04)' :
+                  log.type === 'success' ? 'rgba(16,185,129,0.04)' :
+                  log.type === 'error'   ? 'rgba(239,68,68,0.05)' :
+                  'transparent',
+                borderLeft:
+                  log.type === 'tool'    ? `2px solid ${AGENT3_CYAN}` :
+                  log.type === 'success' ? `2px solid ${SY.success}` :
+                  log.type === 'error'   ? `2px solid ${SY.error}` :
+                  '2px solid transparent',
               }}>
-                <span style={{ color: 'rgba(255,255,255,0.2)', flexShrink: 0, fontSize: '0.62rem', minWidth: '5rem' }}>
+                <span style={{
+                  color: SY.textDim, flexShrink: 0,
+                  fontSize: 10, minWidth: '5.2rem',
+                }}>
                   {log.time}
                 </span>
                 <span style={{
-                  color: log.type === 'success' ? '#10b981'
-                    : log.type === 'tool' ? AGENT3_GOLD
-                    : log.type === 'warning' ? '#f59e0b'
-                    : log.type === 'error' ? '#ef4444'
-                    : 'rgba(255,255,255,0.55)',
+                  color:
+                    log.type === 'success' ? SY.success :
+                    log.type === 'tool'    ? AGENT3_CYAN :
+                    log.type === 'warning' ? SY.warn :
+                    log.type === 'error'   ? SY.error :
+                    SY.textMute,
                 }}>
-                  {log.type === 'tool' && <span style={{ color: AGENT3_BLUE, marginRight: '0.3rem' }}>⚡</span>}
-                  {log.type === 'success' && <span style={{ marginRight: '0.3rem' }}>✓</span>}
-                  {log.type === 'error' && <span style={{ marginRight: '0.3rem' }}>✗</span>}
+                  {log.type === 'tool'    && <span style={{ color: AGENT3_CYAN, marginRight: 6 }}>▸</span>}
+                  {log.type === 'success' && <span style={{ color: SY.success, marginRight: 6 }}>✓</span>}
+                  {log.type === 'error'   && <span style={{ color: SY.error,   marginRight: 6 }}>✗</span>}
                   {log.text}
                 </span>
               </div>
@@ -1017,39 +1266,94 @@ function App() {
         )}
 
         {/* Steps list — hidden when Agent 3 log is shown */}
-        <div style={{ flex: 1, overflow: 'auto', padding: '0.75rem', display: (selectedAgent === 'agent3' && agent3Logs.length > 0) ? 'none' : 'block' }}>
+        <div style={{
+          flex: 1, overflow: 'auto', padding: 14,
+          display: (selectedAgent === 'agent3' && agent3Logs.length > 0) ? 'none' : 'block',
+        }}>
           {steps.length === 0 ? (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#333' }}>
-              <div style={{ opacity: 0.2, marginBottom: '0.75rem' }}>
-                <SyleaLogo size={35} />
+            <div style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+              height: '100%', gap: 14, position: 'relative',
+            }}>
+              {/* Halo logo */}
+              <div style={{
+                position: 'relative',
+                width: 120, height: 120,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <div style={{
+                  position: 'absolute', inset: 0, borderRadius: '50%',
+                  background: 'radial-gradient(circle, rgba(0,200,255,0.08), transparent 60%)',
+                }} />
+                <div style={{ opacity: 0.55 }}>
+                  <SyleaLogo size={80} animated />
+                </div>
               </div>
-              <p style={{ fontSize: '0.78rem', color: '#555' }}>En attente d'instructions...</p>
-              <p style={{ fontSize: '0.62rem', color: '#333', marginTop: '0.25rem' }}>Envoyez une commande depuis l'app web</p>
+              <div style={{
+                fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.2em',
+                color: SY.textDim, textTransform: 'uppercase',
+                display: 'flex', alignItems: 'center', gap: 8,
+              }}>
+                <StatusDot color={SY.cyan} pulsing size={5} />
+                Standby — En attente d'instructions
+              </div>
+              <p style={{
+                fontSize: 12, color: SY.textDim, margin: 0,
+                maxWidth: 360, textAlign: 'center', lineHeight: 1.5,
+              }}>
+                Envoie une commande depuis la version web de Syléa.
+                L'agent executera les actions sur cet ordinateur en temps reel.
+              </p>
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               {steps.map((step) => {
-                const icons: Record<string, string> = { EMAIL: '📧', TEXT: '📝', LINK: '🔗', COPY: '📋', REMINDER: '⏰', SEARCH: '🔍', X_SEARCH: '𝕏', ANALYSIS: '📊', info: 'ℹ️', action: '⚡' }
-                const statusColors: Record<string, string> = { done: '#4ade80', running: '#fbbf24', error: '#f87171', pending: '#666' }
-                const agentBorderColor = step.agent === 'agent3' ? 'rgba(59,130,246,0.15)' : step.agent === 'agent2' ? 'rgba(239,68,68,0.08)' : 'rgba(255,255,255,0.03)'
-                const agentBg = step.agent === 'agent3'
-                  ? (step.status === 'error' ? 'rgba(239,68,68,0.05)' : step.status === 'done' ? 'rgba(59,130,246,0.04)' : 'rgba(59,130,246,0.02)')
-                  : (step.status === 'error' ? 'rgba(239,68,68,0.05)' : step.status === 'done' ? 'rgba(34,197,94,0.03)' : 'rgba(255,255,255,0.02)')
+                const icons: Record<string, string> = {
+                  EMAIL: '✉', TEXT: '▤', LINK: '↗', COPY: '⎘', REMINDER: '◷',
+                  SEARCH: '⌕', X_SEARCH: '𝕏', ANALYSIS: '◫', FILE: '⬚',
+                  PDF: '▥', CODE: '⌁', EXEC: '>_', AGENT: '◈', WEBPAGE: '◉',
+                  IMAGE: '▣', SCREENSHOT: '▢', CANVAS: '◧', CRON: '◑',
+                  MEMORY: '◊', ACTION: '▸', info: 'ℹ', action: '▸',
+                }
+                const statusColors: Record<string, string> = {
+                  done: SY.success, running: SY.warn, error: SY.error, pending: SY.textDim,
+                }
+                const isA3 = step.agent === 'agent3'
                 return (
                   <div key={step.id} style={{
-                    display: 'flex', alignItems: 'flex-start', gap: '0.5rem',
-                    padding: '0.4rem 0.6rem', borderRadius: '8px',
-                    background: agentBg,
-                    border: `1px solid ${step.status === 'error' ? 'rgba(239,68,68,0.1)' : agentBorderColor}`,
+                    display: 'flex', alignItems: 'flex-start', gap: 10,
+                    padding: '8px 12px', borderRadius: 6,
+                    background: step.status === 'error'
+                      ? 'rgba(239,68,68,0.05)'
+                      : (isA3 ? 'rgba(56,189,248,0.03)' : SY.surface),
+                    border: `1px solid ${
+                      step.status === 'error' ? 'rgba(239,68,68,0.2)'
+                        : isA3 ? `${AGENT3_CYAN}22`
+                        : SY.border
+                    }`,
                   }}>
-                    <span style={{ fontSize: '0.75rem', marginTop: '0.05rem' }}>{icons[step.action] || '•'}</span>
+                    <span style={{
+                      fontFamily: SY.mono, fontSize: 13,
+                      color: isA3 ? AGENT3_CYAN : SY.cyan,
+                      marginTop: 1, minWidth: 14,
+                    }}>{icons[step.action] || '▸'}</span>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <p style={{ fontSize: '0.75rem', color: '#bbb', lineHeight: 1.4, margin: 0 }}>{step.detail}</p>
+                      <p style={{
+                        fontSize: 12, color: SY.text, lineHeight: 1.45, margin: 0,
+                        wordBreak: 'break-word',
+                      }}>{step.detail}</p>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', flexShrink: 0 }}>
-                      {step.agent === 'agent3' && <div style={{ width: 4, height: 4, borderRadius: '50%', background: AGENT3_BLUE, opacity: 0.6 }} />}
-                      <div style={{ width: 5, height: 5, borderRadius: '50%', background: statusColors[step.status] }} />
-                      <span style={{ fontSize: '0.55rem', color: '#444' }}>{step.time}</span>
+                    <div style={{
+                      display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
+                      fontFamily: SY.mono,
+                    }}>
+                      {isA3 && <span style={{
+                        fontSize: 8, color: AGENT3_CYAN, letterSpacing: '0.1em',
+                        padding: '1px 4px', borderRadius: 3,
+                        border: `1px solid ${AGENT3_CYAN}40`, background: 'rgba(56,189,248,0.06)',
+                      }}>A3</span>}
+                      <StatusDot color={statusColors[step.status]} pulsing={step.status === 'running'} size={6} />
+                      <span style={{ fontSize: 9, color: SY.textDim, letterSpacing: '0.08em' }}>{step.time}</span>
                     </div>
                   </div>
                 )
@@ -1060,25 +1364,54 @@ function App() {
         </div>
       </div>
 
-      {/* ── DROITE : Plan d'exécution / Taches Agent 3 ── */}
-      <div style={{ width: 220, display: 'flex', flexDirection: 'column' }}>
+      {/* ── DROITE : Plan d'execution / Taches Agent 3 ── */}
+      <div style={{
+        width: 260, display: 'flex', flexDirection: 'column',
+        background: 'rgba(7, 12, 26, 0.45)',
+        position: 'relative', zIndex: 2,
+      }}>
         {/* Header droite */}
         <div style={{
-          padding: '0.6rem 0.75rem', borderBottom: '1px solid rgba(255,255,255,0.05)',
-          display: 'flex', alignItems: 'center', gap: '0.4rem',
+          padding: '12px 14px',
+          borderBottom: `1px solid ${SY.border}`,
+          display: 'flex', alignItems: 'center', gap: 8,
         }}>
           {selectedAgent === 'agent3' && agent3StreamSteps.length > 0 ? (
             <>
-              <span className="agent3-name-shimmer" style={{ fontSize: '0.8rem', fontWeight: 700 }}>Taches</span>
-              <span style={{ fontSize: '0.6rem', color: AGENT3_BLUE, background: 'rgba(59,130,246,0.08)', padding: '0.1rem 0.4rem', borderRadius: '8px' }}>
+              <span style={{
+                fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.18em',
+                color: AGENT3_CYAN, textTransform: 'uppercase',
+              }}>▸ TASKS</span>
+              <span className="agent3-name-shimmer" style={{ fontSize: 12, fontWeight: 700 }}>
+                Agent 3
+              </span>
+              <div style={{ flex: 1 }} />
+              <span style={{
+                fontFamily: SY.mono, fontSize: 10,
+                color: AGENT3_CYAN, background: 'rgba(56,189,248,0.08)',
+                padding: '2px 7px', borderRadius: 4,
+                border: `1px solid ${AGENT3_CYAN}30`,
+              }}>
                 {agent3StreamSteps.filter(s => s.status === 'done').length}/{agent3StreamSteps.length}
               </span>
             </>
           ) : (
             <>
-              <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#ccc' }}>Plan</span>
+              <span style={{
+                fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.18em',
+                color: SY.cyan, textTransform: 'uppercase',
+              }}>▸ PLAN</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: SY.text }}>
+                Execution
+              </span>
+              <div style={{ flex: 1 }} />
               {plan.length > 0 && (
-                <span style={{ fontSize: '0.6rem', color: '#4ade80', background: 'rgba(34,197,94,0.08)', padding: '0.1rem 0.4rem', borderRadius: '8px' }}>
+                <span style={{
+                  fontFamily: SY.mono, fontSize: 10,
+                  color: SY.success, background: 'rgba(16,185,129,0.08)',
+                  padding: '2px 7px', borderRadius: 4,
+                  border: `1px solid ${SY.success}30`,
+                }}>
                   {plan.filter(p => p.status === 'done').length}/{plan.length}
                 </span>
               )}
@@ -1088,58 +1421,92 @@ function App() {
 
         {/* Agent 3 streaming steps with progress bar */}
         {selectedAgent === 'agent3' && agent3StreamSteps.length > 0 ? (
-          <div style={{ flex: 1, overflow: 'auto', padding: '0.5rem' }}>
+          <div style={{ flex: 1, overflow: 'auto', padding: '10px 10px 14px' }}>
             {/* Progress bar */}
-            <div style={{ padding: '0 0.25rem 0.5rem' }}>
-              <div style={{ height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.04)', overflow: 'hidden' }}>
+            <div style={{ padding: '0 2px 12px' }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                fontFamily: SY.mono, fontSize: 9, letterSpacing: '0.14em',
+                color: SY.textDim, marginBottom: 6, textTransform: 'uppercase',
+              }}>
+                <span>Progress</span>
+                <span style={{ color: AGENT3_CYAN }}>
+                  {Math.round((agent3StreamSteps.filter(s => s.status === 'done').length / agent3StreamSteps.length) * 100)}%
+                </span>
+              </div>
+              <div style={{
+                height: 3, borderRadius: 2,
+                background: SY.surface,
+                border: `1px solid ${SY.border}`,
+                overflow: 'hidden',
+              }}>
                 <div style={{
                   height: '100%', borderRadius: 2,
-                  background: `linear-gradient(90deg, ${AGENT3_BLUE}, ${AGENT3_GOLD}, ${AGENT3_BLUE})`,
+                  background: `linear-gradient(90deg, ${AGENT3_CYAN}, ${AGENT3_INDIGO}, ${AGENT3_CYAN})`,
                   backgroundSize: '200% 100%',
-                  animation: 'agent3-border-glow 3s ease-in-out infinite',
+                  animation: 'a3-border 3s ease-in-out infinite',
+                  boxShadow: `0 0 8px ${AGENT3_CYAN}80`,
                   width: `${Math.round((agent3StreamSteps.filter(s => s.status === 'done').length / agent3StreamSteps.length) * 100)}%`,
                   transition: 'width 0.5s ease',
                 }} />
               </div>
             </div>
             {/* Steps list */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               {agent3StreamSteps.map((s) => (
                 <div key={s.id} style={{
-                  padding: '0.4rem 0.5rem', borderRadius: '8px',
-                  background: s.status === 'running' ? 'rgba(59,130,246,0.06)'
-                    : s.status === 'done' ? 'rgba(16,185,129,0.04)' : 'rgba(255,255,255,0.02)',
-                  border: `1px solid ${s.status === 'running' ? 'rgba(59,130,246,0.15)'
-                    : s.status === 'done' ? 'rgba(16,185,129,0.12)' : 'rgba(255,255,255,0.04)'}`,
-                  display: 'flex', alignItems: 'center', gap: '0.4rem',
+                  padding: '8px 10px', borderRadius: 6,
+                  background:
+                    s.status === 'running' ? 'rgba(56,189,248,0.06)' :
+                    s.status === 'done'    ? 'rgba(16,185,129,0.04)' :
+                    SY.surface,
+                  border: `1px solid ${
+                    s.status === 'running' ? `${AGENT3_CYAN}40` :
+                    s.status === 'done'    ? `${SY.success}30` :
+                    SY.border
+                  }`,
+                  display: 'flex', alignItems: 'center', gap: 8,
                   transition: 'all 0.3s',
                 }}>
                   {/* Status indicator */}
-                  <div style={{ width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <div style={{
+                    width: 16, height: 16, display: 'flex',
+                    alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                  }}>
                     {s.status === 'done' && (
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={SY.success} strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
                     )}
                     {s.status === 'running' && (
                       <div style={{
                         width: 12, height: 12, borderRadius: '50%',
                         border: '2px solid transparent',
-                        borderTopColor: AGENT3_BLUE, borderRightColor: AGENT3_GOLD,
-                        animation: 'spin 0.8s linear infinite',
+                        borderTopColor: AGENT3_CYAN, borderRightColor: AGENT3_INDIGO,
+                        animation: 'sy-spin 0.8s linear infinite',
                       }} />
                     )}
                     {s.status === 'pending' && (
-                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'rgba(255,255,255,0.12)' }} />
+                      <div style={{
+                        width: 6, height: 6, borderRadius: '50%',
+                        background: SY.textDim,
+                      }} />
                     )}
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <p style={{
-                      fontSize: '0.68rem', margin: 0, lineHeight: 1.3,
-                      fontWeight: s.status === 'running' ? 600 : 400,
-                      color: s.status === 'running' ? '#60a5fa' : s.status === 'done' ? '#10b981' : '#666',
+                      fontSize: 11, margin: 0, lineHeight: 1.35,
+                      fontWeight: s.status === 'running' ? 600 : 500,
+                      color:
+                        s.status === 'running' ? AGENT3_CYAN :
+                        s.status === 'done'    ? SY.success :
+                        SY.textMute,
                     }}>
                       {s.label}
                     </p>
-                    <p style={{ fontSize: '0.58rem', color: '#444', margin: '0.1rem 0 0' }}>{s.detail}</p>
+                    <p style={{
+                      fontSize: 9, fontFamily: SY.mono,
+                      color: SY.textDim, margin: '2px 0 0',
+                      letterSpacing: '0.04em',
+                    }}>{s.detail}</p>
                   </div>
                 </div>
               ))}
@@ -1147,34 +1514,65 @@ function App() {
           </div>
         ) : (
           /* Original plan steps */
-          <div style={{ flex: 1, overflow: 'auto', padding: '0.5rem' }}>
+          <div style={{ flex: 1, overflow: 'auto', padding: 10 }}>
             {plan.length === 0 ? (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#333' }}>
-                <p style={{ fontSize: '0.7rem', color: '#444', textAlign: 'center' }}>Aucun plan en cours</p>
+              <div style={{
+                display: 'flex', flexDirection: 'column',
+                alignItems: 'center', justifyContent: 'center',
+                height: '100%', gap: 8, textAlign: 'center',
+              }}>
+                <div style={{
+                  fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.18em',
+                  color: SY.textDim, textTransform: 'uppercase',
+                }}>
+                  ◌ Aucun plan actif
+                </div>
+                <div style={{
+                  fontSize: 10, color: SY.textDim, maxWidth: 180, lineHeight: 1.4,
+                }}>
+                  Les etapes d'execution apparaitront ici.
+                </div>
               </div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {plan.map((p, i) => {
                   const isA3 = p.agent === 'agent3'
                   return (
                     <div key={i} style={{
-                      padding: '0.45rem 0.55rem', borderRadius: '8px',
-                      background: p.status === 'done'
-                        ? (isA3 ? 'rgba(59,130,246,0.06)' : 'rgba(34,197,94,0.05)')
-                        : p.status === 'running' ? 'rgba(251,191,36,0.05)' : 'rgba(255,255,255,0.02)',
-                      border: `1px solid ${p.status === 'done'
-                        ? (isA3 ? 'rgba(59,130,246,0.15)' : 'rgba(34,197,94,0.12)')
-                        : p.status === 'running' ? 'rgba(251,191,36,0.12)' : 'rgba(255,255,255,0.04)'}`,
-                      display: 'flex', alignItems: 'flex-start', gap: '0.4rem',
+                      padding: '8px 10px', borderRadius: 6,
+                      background:
+                        p.status === 'done'    ? (isA3 ? 'rgba(56,189,248,0.06)' : 'rgba(16,185,129,0.05)') :
+                        p.status === 'running' ? 'rgba(245,158,11,0.05)' :
+                        SY.surface,
+                      border: `1px solid ${
+                        p.status === 'done'    ? (isA3 ? `${AGENT3_CYAN}30` : `${SY.success}30`) :
+                        p.status === 'running' ? `${SY.warn}30` :
+                        SY.border
+                      }`,
+                      display: 'flex', alignItems: 'flex-start', gap: 8,
                     }}>
-                      <span style={{ fontSize: '0.7rem', marginTop: '0.05rem', color: isA3 && p.status === 'done' ? AGENT3_BLUE : undefined }}>
-                        {p.status === 'done' ? '✓' : p.status === 'running' ? '⟳' : '○'}
+                      <span style={{
+                        fontFamily: SY.mono, fontSize: 13, marginTop: -1,
+                        color:
+                          p.status === 'done'    ? (isA3 ? AGENT3_CYAN : SY.success) :
+                          p.status === 'running' ? SY.warn : SY.textDim,
+                      }}>
+                        {p.status === 'done' ? '✓' : p.status === 'running' ? '◐' : '○'}
                       </span>
                       <div style={{ flex: 1 }}>
-                        <p style={{ fontSize: '0.68rem', color: p.status === 'done' ? (isA3 ? '#60a5fa' : '#4ade80') : '#999', lineHeight: 1.4, margin: 0 }}>
-                          Etape {i + 1}{isA3 ? ' (Agent 3)' : ''}
+                        <p style={{
+                          fontSize: 11, lineHeight: 1.3, margin: 0,
+                          color:
+                            p.status === 'done'    ? (isA3 ? AGENT3_CYAN : SY.success) :
+                            p.status === 'running' ? SY.warn : SY.textMute,
+                          fontFamily: SY.mono, letterSpacing: '0.04em',
+                        }}>
+                          ETAPE {String(i + 1).padStart(2, '0')}{isA3 ? ' · A3' : ''}
                         </p>
-                        <p style={{ fontSize: '0.6rem', color: '#555', margin: '0.1rem 0 0' }}>{p.step}</p>
+                        <p style={{
+                          fontSize: 11, color: SY.text, margin: '3px 0 0',
+                          lineHeight: 1.4,
+                        }}>{p.step}</p>
                       </div>
                     </div>
                   )
@@ -1186,23 +1584,22 @@ function App() {
 
         {/* Status footer */}
         <div style={{
-          padding: '0.4rem 0.75rem', borderTop: '1px solid rgba(255,255,255,0.05)',
-          fontSize: '0.55rem', color: '#2a2a2a', textAlign: 'center',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
+          padding: '8px 12px', borderTop: `1px solid ${SY.border}`,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+          fontFamily: SY.mono, fontSize: 9, letterSpacing: '0.14em',
+          color: SY.textDim, textTransform: 'uppercase',
         }}>
           <span>v1.0</span>
-          <span style={{ color: '#333' }}>|</span>
-          <span style={{
-            display: 'flex', alignItems: 'center', gap: '0.2rem',
-            color: openclawConnected ? '#4ade80' : '#555',
-          }}>
-            <span style={{
-              width: 4, height: 4, borderRadius: '50%',
-              background: openclawConnected ? '#4ade80' : '#555',
-              boxShadow: openclawConnected ? '0 0 4px rgba(74,222,128,0.4)' : 'none',
-            }} />
-            OpenClaw
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <StatusDot
+              color={openclawConnected ? SY.success : SY.warn}
+              pulsing={!openclawConnected}
+              size={5}
+            />
+            <span style={{ color: openclawConnected ? SY.success : SY.warn }}>
+              OpenClaw {openclawConnected ? 'OK' : 'WAIT'}
+            </span>
+          </div>
         </div>
       </div>
     </div>

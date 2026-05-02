@@ -844,21 +844,77 @@ export default function MarketplacePage() {
             </div>
             {loadingDetails ? (
               <div style={{ color: 'var(--text-muted)' }}>Chargement...</div>
-            ) : (
-              <pre style={{
-                background: 'rgba(0,0,0,0.35)',
-                padding: '0.85rem',
-                borderRadius: '6px',
-                fontSize: '0.78rem',
-                color: 'var(--text-secondary)',
-                overflow: 'auto',
-                margin: 0,
-                maxHeight: '55vh',
-                lineHeight: 1.45,
-              }}>
-                {JSON.stringify(detailsSkill.data, null, 2)}
-              </pre>
-            )}
+            ) : (() => {
+              const d: any = detailsSkill.data || {}
+              const meta = d?.data || d  // backend wraps as {success, slug, data:{...}}
+              const md = meta?.skill_md_content as string | undefined
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem' }}>
+                  {/* En-tete metadata */}
+                  <div style={{
+                    background: 'rgba(99,102,241,0.06)',
+                    border: '1px solid rgba(99,102,241,0.25)',
+                    borderRadius: 8,
+                    padding: '0.7rem 0.9rem',
+                    fontSize: '0.82rem',
+                    color: 'var(--text-secondary)',
+                  }}>
+                    <div style={{ color: 'var(--text-primary)', fontWeight: 600, marginBottom: '0.3rem' }}>
+                      {meta.name || meta.slug}
+                      {meta.version && <span style={{ marginLeft: '0.5rem', color: 'var(--text-muted)', fontSize: '0.75rem' }}>v{meta.version}</span>}
+                    </div>
+                    {meta.description && <div style={{ marginBottom: '0.3rem' }}>{meta.description}</div>}
+                    {meta.author && <div style={{ fontSize: '0.75rem' }}>👤 {meta.author}</div>}
+                    {Array.isArray(meta.tags) && meta.tags.length > 0 && (
+                      <div style={{ marginTop: '0.3rem', display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }}>
+                        {meta.tags.map((t: string) => (
+                          <span key={t} style={{
+                            fontSize: '0.7rem', padding: '0.1rem 0.5rem',
+                            background: 'rgba(255,255,255,0.06)', borderRadius: 12,
+                          }}>{t}</span>
+                        ))}
+                      </div>
+                    )}
+                    {meta.installed && <div style={{ marginTop: '0.3rem', fontSize: '0.7rem', color: '#10b981' }}>✓ Installé localement{meta.path ? ` (${meta.path})` : ''}</div>}
+                  </div>
+
+                  {/* SKILL.md viewer */}
+                  {md ? (
+                    <div>
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '0.3rem', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                        SKILL.md
+                      </div>
+                      <pre style={{
+                        background: 'rgba(0,0,0,0.4)',
+                        padding: '0.85rem',
+                        borderRadius: '6px',
+                        fontSize: '0.76rem',
+                        color: 'var(--text-secondary)',
+                        overflow: 'auto',
+                        margin: 0,
+                        maxHeight: '45vh',
+                        lineHeight: 1.5,
+                        whiteSpace: 'pre-wrap',
+                        fontFamily: '"Fira Code", monospace',
+                      }}>{md}</pre>
+                    </div>
+                  ) : (
+                    <details style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                      <summary style={{ cursor: 'pointer', padding: '0.3rem 0' }}>Voir les données brutes (debug)</summary>
+                      <pre style={{
+                        background: 'rgba(0,0,0,0.35)',
+                        padding: '0.7rem',
+                        borderRadius: 6,
+                        fontSize: '0.72rem',
+                        marginTop: '0.4rem',
+                        overflow: 'auto',
+                        maxHeight: '40vh',
+                      }}>{JSON.stringify(d, null, 2)}</pre>
+                    </details>
+                  )}
+                </div>
+              )
+            })()}
           </div>
         </div>
       )}

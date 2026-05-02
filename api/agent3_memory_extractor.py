@@ -146,8 +146,9 @@ class MemoryExtractor:
         )
 
         try:
-            resp = await asyncio.to_thread(
-                self.client.messages.create,
+            # Support des deux types de clients : AsyncAnthropic (natif async)
+            # et Anthropic (sync, wrappe dans to_thread).
+            create_kwargs = dict(
                 model=self.model,
                 max_tokens=800,
                 system=[{
@@ -157,6 +158,14 @@ class MemoryExtractor:
                 }],
                 messages=[{"role": "user", "content": user_prompt}],
             )
+            # Detection : AsyncAnthropic a une classe qui contient "Async" dans son nom
+            client_cls_name = type(self.client).__name__
+            if "Async" in client_cls_name:
+                resp = await self.client.messages.create(**create_kwargs)
+            else:
+                resp = await asyncio.to_thread(
+                    self.client.messages.create, **create_kwargs
+                )
             raw = "".join(b.text for b in resp.content if hasattr(b, "text"))
         except Exception as e:
             logger.warning(f"MemoryExtractor LLM call failed: {e}")

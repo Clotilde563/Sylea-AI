@@ -41,7 +41,7 @@ from api.agent3_plan_mode import (
 
 logger = logging.getLogger("sylea.browser_agent")
 
-MODEL_SMART = "claude-sonnet-4-20250514"   # Decisions complexes + vision principale
+MODEL_SMART = "claude-sonnet-4-6"   # Decisions complexes + vision principale
 MODEL_CHEAP = "claude-haiku-4-5-20251001"  # Verifications simples (login? erreur?)
 
 SCREENSHOTS_DIR = Path(__file__).parent.parent / "data" / "screenshots"

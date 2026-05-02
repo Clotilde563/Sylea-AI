@@ -166,3 +166,48 @@ async def check(
         "data": result.data,
         "error": result.error,
     }
+
+
+# ── Publish (skill custom) ───────────────────────────────────────────────────
+
+
+@router.post("/publish")
+async def publish(
+    body: dict,
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Publie un skill custom sur ClawHub.
+
+    Body :
+      slug : str (requis, kebab-case unique)
+      name : str (requis, nom affichable)
+      description : str (requis, 1-2 phrases)
+      skill_content : str (requis, contenu SKILL.md complet)
+      version : str (optionnel, ex '0.1.0')
+      tags : list[str] (optionnel)
+    """
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Non authentifie")
+    body = body or {}
+    slug = (body.get("slug") or "").strip()
+    name = (body.get("name") or "").strip()
+    description = (body.get("description") or "").strip()
+    skill_content = body.get("skill_content") or ""
+    if not (slug and name and description and skill_content.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="Champs requis : slug, name, description, skill_content",
+        )
+    try:
+        from api.agent3_skills.clawhub_meta_tools import clawhub_meta_publish
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"clawhub_meta_publish import failed: {e}")
+    result = await clawhub_meta_publish(
+        slug=slug,
+        name=name,
+        description=description,
+        skill_content=skill_content,
+        version=(body.get("version") or "0.1.0"),
+        tags=body.get("tags") or [],
+    )
+    return result

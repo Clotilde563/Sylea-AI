@@ -32,7 +32,15 @@ import CoachingPage         from './pages/CoachingPage'
 import IntegrationsPage     from './pages/IntegrationsPage'
 import NetworkPage          from './pages/NetworkPage'
 import MarketplacePage      from './pages/MarketplacePage'
+import OutilsPage           from './pages/OutilsPage'
+import AuditLogPage         from './pages/AuditLogPage'
+import MetricsPage          from './pages/MetricsPage'
 import AuthCallbackPage     from './pages/AuthCallbackPage'
+import QuotasPage           from './pages/QuotasPage'
+import AdminPage            from './pages/AdminPage'
+import WorkspacesPage       from './pages/WorkspacesPage'
+import WebhooksPage         from './pages/WebhooksPage'
+import { ToastProvider }    from './components/Toast'
 
 // ── Application ───────────────────────────────────────────────────────────────
 
@@ -87,8 +95,20 @@ function AppContent() {
                     <Route path="/scenarios"    element={<ScenariosPage />} />
                     <Route path="/coaching"     element={<CoachingPage />} />
                     <Route path="/integrations" element={<IntegrationsPage />} />
+                    {/* Backward-compat: /credentials → onglet "Clés API" de Intégrations */}
+                    <Route path="/credentials"  element={<Navigate to="/integrations?tab=credentials" replace />} />
                     <Route path="/network"      element={<NetworkPage />} />
                     <Route path="/marketplace"  element={<MarketplacePage />} />
+                    <Route path="/outils"       element={<OutilsPage />} />
+                    <Route path="/audit"        element={<AuditLogPage />} />
+                    <Route path="/metrics"      element={<MetricsPage />} />
+                    {/* Phase 10/11 */}
+                    <Route path="/quotas"         element={<QuotasPage />} />
+                    <Route path="/admin"          element={<AdminPage />} />
+                    <Route path="/workspaces"     element={<WorkspacesPage />} />
+                    {/* Backward-compat: /api-keys → onglet "Tokens API B2B" de Intégrations */}
+                    <Route path="/api-keys"       element={<Navigate to="/integrations?tab=tokens" replace />} />
+                    <Route path="/webhooks"       element={<WebhooksPage />} />
                     <Route path="*"             element={<Navigate to="/" replace />} />
                   </Routes>
                 </main>
@@ -134,8 +154,10 @@ export default function App() {
   return (
     <LanguageProvider>
       <DeviceContextProvider>
-        <GeoPermissionModal />
-        <AppContent />
+        <ToastProvider>
+          <GeoPermissionModal />
+          <AppContent />
+        </ToastProvider>
       </DeviceContextProvider>
     </LanguageProvider>
   )

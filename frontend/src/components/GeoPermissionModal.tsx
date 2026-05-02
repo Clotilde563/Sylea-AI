@@ -4,7 +4,7 @@ import { useStore } from '../store/useStore'
 import { useT } from '../i18n/LanguageContext'
 
 export function GeoPermissionModal() {
-  const { geoDenied, loading, retryGeo, useFallbackCity } = useDeviceContext()
+  const { geoDenied, loading, retryGeo, useFallbackCity, skipGeo } = useDeviceContext()
   const profil = useStore(s => s.profil)
   const t = useT()
 
@@ -87,6 +87,27 @@ export function GeoPermissionModal() {
               Utiliser ma ville ({profil.ville})
             </button>
           )}
+
+          {/* Option skip : l'app fonctionne sans geoloc (awareness simplement moins riche) */}
+          <button
+            onClick={skipGeo}
+            style={{
+              padding: '0.5rem 1rem',
+              borderRadius: '0.5rem',
+              background: 'transparent',
+              color: 'var(--text-muted, #8b8b9e)',
+              border: 'none',
+              fontWeight: 400,
+              fontSize: '0.75rem',
+              cursor: 'pointer',
+              textDecoration: 'underline',
+              transition: 'color 0.15s',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-primary, #e8e8f0)')}
+            onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-muted, #8b8b9e)')}
+          >
+            Continuer sans localisation
+          </button>
         </div>
       </div>
     </div>

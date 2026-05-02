@@ -4,14 +4,148 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Sylea Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
-      body { background: #050810; color: #e8e8f0; font-family: 'Inter', system-ui, sans-serif; }
-      input { outline: none; }
-      button { outline: none; }
-      ::-webkit-scrollbar { width: 4px; }
+
+      :root {
+        --sy-bg:          #050810;
+        --sy-bg-elev:     #070c1a;
+        --sy-surface:     rgba(0, 200, 255, 0.03);
+        --sy-surface-hi:  rgba(0, 200, 255, 0.06);
+        --sy-border:      rgba(0, 200, 255, 0.12);
+        --sy-border-hi:   rgba(0, 200, 255, 0.25);
+        --sy-text:        #e6f0ff;
+        --sy-text-muted:  rgba(230, 240, 255, 0.6);
+        --sy-text-dim:    rgba(230, 240, 255, 0.35);
+        --sy-cyan:        #00c8ff;
+        --sy-cyan-soft:   #7ad9ff;
+        --sy-blue:        #0090e0;
+        --sy-indigo:      #1848d8;
+        --sy-violet:      #5520b8;
+        --sy-success:     #10b981;
+        --sy-warn:        #f59e0b;
+        --sy-error:       #ef4444;
+        --sy-mono:        'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+        --sy-sans:        'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      }
+
+      html, body {
+        height: 100%;
+      }
+
+      body {
+        background: var(--sy-bg);
+        color: var(--sy-text);
+        font-family: var(--sy-sans);
+        font-size: 14px;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        overflow: hidden;
+        position: relative;
+      }
+
+      /* Grille technique subtile sur tout l'arriere-plan */
+      body::before {
+        content: '';
+        position: fixed;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(0, 200, 255, 0.035) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(0, 200, 255, 0.035) 1px, transparent 1px);
+        background-size: 48px 48px;
+        background-position: -1px -1px;
+        pointer-events: none;
+        z-index: 0;
+        mask-image: radial-gradient(ellipse at 50% 30%, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0) 70%);
+        -webkit-mask-image: radial-gradient(ellipse at 50% 30%, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0) 70%);
+      }
+
+      /* Glow discret cyan en haut de l'ecran */
+      body::after {
+        content: '';
+        position: fixed;
+        top: -200px; left: 50%;
+        transform: translateX(-50%);
+        width: 900px; height: 420px;
+        background: radial-gradient(ellipse at center, rgba(0, 200, 255, 0.09) 0%, transparent 60%);
+        pointer-events: none;
+        z-index: 0;
+      }
+
+      #root {
+        position: relative;
+        z-index: 1;
+        height: 100%;
+      }
+
+      input, button, textarea {
+        outline: none;
+        font-family: inherit;
+      }
+
+      input::placeholder {
+        color: var(--sy-text-dim);
+      }
+
+      button {
+        border: none;
+        cursor: pointer;
+      }
+
+      ::-webkit-scrollbar { width: 6px; height: 6px; }
       ::-webkit-scrollbar-track { background: transparent; }
-      ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+      ::-webkit-scrollbar-thumb {
+        background: rgba(0, 200, 255, 0.12);
+        border-radius: 3px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: rgba(0, 200, 255, 0.25);
+      }
+
+      /* Selection cyan discret */
+      ::selection {
+        background: rgba(0, 200, 255, 0.25);
+        color: #fff;
+      }
+
+      /* Utilitaires tech reutilisables */
+      .sy-mono { font-family: var(--sy-mono); }
+      .sy-dim  { color: var(--sy-text-dim); }
+      .sy-label {
+        font-family: var(--sy-mono);
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--sy-text-dim);
+      }
+
+      /* Animations globales */
+      @keyframes sy-scan {
+        0%   { transform: translateX(-100%); opacity: 0; }
+        50%  { opacity: 1; }
+        100% { transform: translateX(100%); opacity: 0; }
+      }
+
+      @keyframes sy-pulse {
+        0%, 100% { opacity: 1; }
+        50%      { opacity: 0.4; }
+      }
+
+      @keyframes sy-spin {
+        from { transform: rotate(0deg); }
+        to   { transform: rotate(360deg); }
+      }
+
+      @keyframes sy-flicker {
+        0%, 100% { opacity: 1; }
+        50%      { opacity: 0.75; }
+      }
     </style>
   </head>
   <body>

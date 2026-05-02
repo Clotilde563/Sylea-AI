@@ -118,7 +118,7 @@ def _ensure_coaching_tables(db: DatabaseManager) -> None:
 
 # ── AI content generation ────────────────────────────────────────────────────
 
-async def _fallback_claude_chat(system_prompt: str, messages: list[dict], model: str = "claude-sonnet-4-20250514", max_tokens: int = 2000) -> str:
+async def _fallback_claude_chat(system_prompt: str, messages: list[dict], model: str = "claude-sonnet-4-6", max_tokens: int = 2000) -> str:
     """Direct Claude API call for coaching content generation."""
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:

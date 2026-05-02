@@ -217,6 +217,22 @@ CREATE TABLE IF NOT EXISTS workspace_shares (
 """
 
 
+# ── Phase 3 — Preferences de tools par utilisateur ──────────────────────────
+# Chaque (user, tool_name) a une preference enabled 0/1. Absence d'entree =
+# enabled par defaut (selon le TOOL_PROFILES de l'agent). Cette table ne
+# remplace pas TOOL_PROFILES (qui est la whitelist systeme au niveau agent),
+# elle permet a chaque utilisateur de desactiver un tool pour SON agent.
+_CREATE_USER_TOOL_PREFERENCES = """
+CREATE TABLE IF NOT EXISTS user_tool_preferences (
+    user_id     TEXT NOT NULL,
+    tool_name   TEXT NOT NULL,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (user_id, tool_name)
+);
+"""
+
+
 class DatabaseManager:
     """Gestionnaire de connexion et de schéma SQLite."""
 
@@ -273,6 +289,7 @@ class DatabaseManager:
             self._conn.execute(_CREATE_AGENT3_MESSAGES)
             self._conn.execute(_CREATE_USER_EMAIL_SETTINGS)
             self._conn.execute(_CREATE_WORKSPACE_SHARES)
+            self._conn.execute(_CREATE_USER_TOOL_PREFERENCES)
             # Migrations legacy (colonnes maintenant dans CREATE TABLE, gardees pour anciennes DBs)
             for col_sql in [
                 "ALTER TABLE profil_utilisateur ADD COLUMN auth_user_id TEXT DEFAULT NULL",

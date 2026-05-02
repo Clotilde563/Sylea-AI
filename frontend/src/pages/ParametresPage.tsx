@@ -142,6 +142,136 @@ export default function ParametresPage() {
         >
           <ArchivesSection t={t} />
         </SettingsCard>
+
+        {/* 5. RGPD / Données personnelles (Phase 9A) */}
+        <SettingsCard
+          title="Mes données (RGPD)"
+          description="Exporte ou supprime tout ce que Sylea sait de toi"
+          icon={<svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>}
+          open={openSection === 'gdpr'}
+          onClick={() => toggle('gdpr')}
+        >
+          <GDPRSection />
+        </SettingsCard>
+      </div>
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION GDPR (Phase 9A)
+// ═══════════════════════════════════════════════════════════════════════════════
+function GDPRSection() {
+  const [exporting, setExporting] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState('')
+  const logout = useAuthStore(s => s.logout)
+
+  const doExport = async () => {
+    setExporting(true)
+    try {
+      const blob = await api.exportMyData()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `sylea_export_${new Date().toISOString().slice(0, 10)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e: any) {
+      alert('Export échoué : ' + (e.message || e))
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const doDelete = async () => {
+    if (deleteConfirm !== 'SUPPRIMER') {
+      alert('Tape SUPPRIMER en majuscules pour confirmer.')
+      return
+    }
+    if (!confirm('⚠ Dernière chance. Cette action supprime TOUTES tes données : messages, mémoire, fichiers, workspaces. Irréversible. Continuer ?')) return
+    setDeleting(true)
+    try {
+      const r = await api.deleteMyData()
+      if (r.error) throw new Error(r.error)
+      alert(`${r.total_rows || 0} lignes supprimées + ${r.files_deleted || 0} fichiers. Tu vas être déconnecté.`)
+      logout()
+      window.location.href = '/login'
+    } catch (e: any) {
+      alert('Suppression échouée : ' + (e.message || e))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  return (
+    <div style={{ paddingTop: '1rem' }}>
+      <div style={{ marginBottom: '1.5rem' }}>
+        <h4 style={{ color: 'var(--text-primary)', fontSize: '0.9rem', margin: '0 0 0.5rem' }}>
+          📥 Exporter mes données
+        </h4>
+        <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '0.75rem' }}>
+          Article 15 RGPD — télécharge un JSON avec tes messages, mémoire, fichiers, préférences et toute donnée personnelle conservée.
+        </p>
+        <button
+          onClick={doExport}
+          disabled={exporting}
+          style={{
+            padding: '8px 16px',
+            background: 'var(--accent-violet)',
+            color: '#fff',
+            border: 'none',
+            borderRadius: 6,
+            cursor: exporting ? 'wait' : 'pointer',
+            fontWeight: 600,
+            opacity: exporting ? 0.6 : 1,
+          }}
+        >
+          {exporting ? 'Export en cours…' : 'Télécharger mes données'}
+        </button>
+      </div>
+
+      <div style={{
+        borderTop: '1px solid var(--border)',
+        paddingTop: '1.5rem',
+      }}>
+        <h4 style={{ color: '#ef4444', fontSize: '0.9rem', margin: '0 0 0.5rem' }}>
+          🗑 Supprimer mon compte
+        </h4>
+        <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '0.75rem' }}>
+          Article 17 RGPD — droit à l'oubli. Supprime atomiquement messages, mémoire, fichiers, embeddings RAG, workspaces, API keys, webhooks, profil. Irréversible.
+        </p>
+        <input
+          type="text"
+          value={deleteConfirm}
+          onChange={e => setDeleteConfirm(e.target.value)}
+          placeholder='Tape "SUPPRIMER" pour confirmer'
+          style={{
+            width: '100%',
+            padding: '8px 12px',
+            marginBottom: '0.75rem',
+            background: 'var(--bg-elevated)',
+            border: '1px solid #ef4444',
+            borderRadius: 6,
+            color: 'var(--text-primary)',
+          }}
+        />
+        <button
+          onClick={doDelete}
+          disabled={deleting || deleteConfirm !== 'SUPPRIMER'}
+          style={{
+            padding: '8px 16px',
+            background: deleteConfirm === 'SUPPRIMER' ? '#ef4444' : 'transparent',
+            color: deleteConfirm === 'SUPPRIMER' ? '#fff' : '#ef4444',
+            border: '1px solid #ef4444',
+            borderRadius: 6,
+            cursor: deleteConfirm === 'SUPPRIMER' && !deleting ? 'pointer' : 'not-allowed',
+            fontWeight: 600,
+            opacity: deleting ? 0.6 : 1,
+          }}
+        >
+          {deleting ? 'Suppression…' : 'Tout supprimer définitivement'}
+        </button>
       </div>
     </div>
   )

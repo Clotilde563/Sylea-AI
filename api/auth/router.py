@@ -256,11 +256,26 @@ async def oauth_google(data: OAuthIn, db=Depends(get_db)):
 
     jwt_token = create_access_token(user["id"])
 
-    # Auto-connect Google integrations (Calendar, Gmail, Drive)
+    # Auto-connect Google integrations (Calendar, Gmail, Drive) UNIQUEMENT
+    # si le token recu a les scopes etendus. Sinon, ecrire un token "login-only"
+    # casse les integrations (Google API renvoie 403 sans les bonnes permissions).
+    # On detecte les scopes via la reponse token (`scope` field) puis on n'auto-
+    # connecte que les services compatibles. Le user peut completer plus tard via
+    # /integrations/google/oauth (flux state='integration', scopes etendus).
     _google_access = token_data.get("access_token", "")
     _google_refresh = token_data.get("refresh_token", "")
     _google_expires = token_data.get("expires_in", 3600)
+    _granted_scope = (token_data.get("scope") or "").lower()
     _user_id = user["id"]
+
+    # Mapping provider -> scope requis (au moins UN match suffit)
+    _required_scopes = {
+        "gmail": ("gmail.readonly", "gmail.send", "gmail.modify"),
+        "google_calendar": ("calendar.readonly", "calendar.events", "calendar"),
+        # `drive.file` requis pour creer/modifier des fichiers (drive_save).
+        # `drive.readonly` seul ne suffit pas pour ecrire.
+        "google_drive": ("drive.file", "drive.readonly", "drive"),
+    }
 
     if _google_access:
         _now_iso = datetime.now(timezone.utc).isoformat()
@@ -271,7 +286,12 @@ async def oauth_google(data: OAuthIn, db=Depends(get_db)):
         except Exception:
             pass
 
-        for _svc in ["google_calendar", "gmail", "google_drive"]:
+        for _svc, _scopes_needed in _required_scopes.items():
+            # Si aucun scope correspondant n'est present, on skip (pas d'auto-
+            # connexion) -> evite d'ecraser une integration valide existante
+            # avec un token login-only inutilisable.
+            if not any(sc in _granted_scope for sc in _scopes_needed):
+                continue
             try:
                 existing = _get_conn(db).execute(
                     "SELECT id FROM user_integrations WHERE auth_user_id = ? AND provider = ?",
@@ -280,15 +300,15 @@ async def oauth_google(data: OAuthIn, db=Depends(get_db)):
                 if existing:
                     _get_conn(db).execute(
                         "UPDATE user_integrations SET access_token = ?, refresh_token = ?, "
-                        "token_expires_at = ?, updated_at = ? "
+                        "token_expires_at = ?, scopes = ?, updated_at = ? "
                         "WHERE auth_user_id = ? AND provider = ?",
-                        (_google_access, _google_refresh, str(_google_expires), _now_iso, _user_id, _svc),
+                        (_google_access, _google_refresh, str(_google_expires), _granted_scope, _now_iso, _user_id, _svc),
                     )
                 else:
                     _get_conn(db).execute(
                         "INSERT INTO user_integrations (id, auth_user_id, provider, access_token, refresh_token, "
-                        "token_expires_at, connected_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (str(uuid.uuid4()), _user_id, _svc, _google_access, _google_refresh, str(_google_expires), _now_iso, _now_iso),
+                        "token_expires_at, scopes, connected_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (str(uuid.uuid4()), _user_id, _svc, _google_access, _google_refresh, str(_google_expires), _granted_scope, _now_iso, _now_iso),
                     )
                 _get_conn(db).commit()
             except Exception:
@@ -321,6 +341,9 @@ async def google_oauth_url(redirect_uri: str = "", state: str = "login"):
             "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/gmail.send",
             "https://www.googleapis.com/auth/drive.readonly",
+            # `drive.file` permet de creer/modifier les fichiers crees par
+            # l'app (pas un acces complet a Drive). Necessaire pour drive_save.
+            "https://www.googleapis.com/auth/drive.file",
         ]
     else:
         scope_list = ["openid", "email", "profile"]

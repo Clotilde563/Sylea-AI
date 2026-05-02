@@ -55,3 +55,30 @@ desktop.ini
 desktop/src-tauri/target/
 desktop/node_modules/
 desktop/dist/
+
+# TradingView browser profile + sessions (cookies, credentials)
+api/.tv_browser_profile/
+api/tv_session.json
+data/browser_profile/
+
+# OpenClaw runtime workspace
+.clawhub/
+.openclaw/
+
+# Temporary skill upload dirs (publish staging)
+clawhub-skill/
+clawhub-skill-upload/
+
+# Root-level test artifacts (one-off debugging scripts)
+/test_*.py
+/test_*.txt
+/test_*.jpg
+/skills_check.json
+
+# Frontend test fixtures
+frontend/public/test_*.jpg
+frontend/public/test_*.png
+
+# Logs uvicorn
+*.log
+/_uvicorn*.log

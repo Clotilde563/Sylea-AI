@@ -27,7 +27,7 @@ logger = logging.getLogger("sylea.agent3.cost_tracker")
 
 # Tarifs par defaut (USD per million tokens)
 DEFAULT_PRICING = {
-    "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00, "cache_read": 0.30},
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cache_read": 0.30},
     "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00, "cache_read": 0.08},
     # Fallback generique
     "_default": {"input": 3.00, "output": 15.00, "cache_read": 0.30},

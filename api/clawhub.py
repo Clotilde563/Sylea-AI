@@ -432,7 +432,7 @@ def _read_local_skill(slug: str, skill_dir: str | None = None) -> dict | None:
             return None
 
     try:
-        content = open(skill_md, "r", encoding="utf-8", errors="replace").read(5000)
+        content = open(skill_md, "r", encoding="utf-8", errors="replace").read(20000)
     except Exception:
         return None
 
@@ -441,6 +441,8 @@ def _read_local_skill(slug: str, skill_dir: str | None = None) -> dict | None:
         "name": slug,
         "installed": True,
         "path": skill_dir,
+        # Raw SKILL.md / README.md content (truncated 20k chars max) — pour le rendu UI.
+        "skill_md_content": content,
     }
 
     # Parser le frontmatter YAML

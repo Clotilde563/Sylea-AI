@@ -31,24 +31,57 @@ export function getAuthHeaders(): Record<string, string> {
   return headers
 }
 
+// Messages FR user-friendly par status HTTP.
+const HTTP_STATUS_FR: Record<number, string> = {
+  400: 'Requête mal formée.',
+  403: 'Accès refusé.',
+  404: 'Ressource introuvable.',
+  408: 'Le serveur met trop de temps à répondre.',
+  409: 'Conflit : la ressource existe déjà ou a été modifiée.',
+  413: 'Contenu trop volumineux.',
+  422: 'Données invalides.',
+  429: 'Trop de requêtes — réessaie dans quelques secondes.',
+  500: 'Erreur serveur — réessaie plus tard.',
+  502: 'Service indisponible.',
+  503: 'Service surchargé — réessaie plus tard.',
+  504: 'Délai dépassé côté serveur.',
+}
+
 async function request<T>(
   path: string,
   options?: RequestInit,
 ): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: getAuthHeaders(),
-    ...options,
-  })
+  let res: Response
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      headers: getAuthHeaders(),
+      ...options,
+    })
+  } catch (e) {
+    // Erreurs réseau (offline, CORS, DNS) — pas de res.ok
+    throw new Error('Connexion au serveur impossible. Vérifie ta connexion internet.')
+  }
   if (!res.ok) {
-    // Token expiré ou invalide → déconnexion automatique
+    // Token expiré ou invalide → déconnexion automatique avec message clair.
     if (res.status === 401) {
       localStorage.removeItem(AUTH_TOKEN_KEY)
       localStorage.removeItem('sylea_auth_user')
-      window.location.href = '/login'
-      throw new Error('Session expirée')
+      // Flag pour la page login : affiche un banner "session expirée".
+      try {
+        sessionStorage.setItem('sylea_session_expired', '1')
+      } catch {
+        // ignore
+      }
+      // Laisse un court delai pour que l'UI appelante puisse catch avant redirect.
+      setTimeout(() => {
+        window.location.href = '/login?expired=1'
+      }, 100)
+      throw new Error('Session expirée — redirection vers la page de connexion…')
     }
     const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail || `Erreur ${res.status}`)
+    const friendly = HTTP_STATUS_FR[res.status]
+    const detail = err.detail || friendly || `Erreur ${res.status}`
+    throw new Error(detail)
   }
   return res.json() as Promise<T>
 }
@@ -507,6 +540,61 @@ export const api = {
         turn: number
         preview_text?: string
       }) => void
+      // Phase 4 : feedback live auto-extension ClawHub
+      onAutoExtensionStart?: (payload: {
+        turn: number
+        tool_use_id: string
+        phase: 'search' | 'install' | 'publish'
+        action_type: string
+        trigger: string
+      }) => void
+      onAutoExtensionFound?: (payload: {
+        turn: number
+        tool_use_id: string
+        query: string
+        count: number
+        candidates: Array<{ slug: string; name: string; description: string; author?: string; version?: string }>
+      }) => void
+      onAutoExtensionReady?: (payload: {
+        turn: number
+        tool_use_id: string
+        phase: 'install' | 'publish'
+        slug: string
+        tool_alias?: string
+      }) => void
+      onAutoExtensionError?: (payload: {
+        turn: number
+        tool_use_id: string
+        phase: 'search' | 'install' | 'publish'
+        action_type: string
+        message: string
+      }) => void
+      onToolsRefreshed?: (payload: {
+        turn: number
+        tool_use_id: string
+        trigger: string
+        slug: string
+        added_slugs: string[]
+        total_before: number
+        total_after: number
+        ok: boolean
+      }) => void
+      // Card visuelle apres chaque action destructive reussie (EMAIL/FILE_CREATE/...)
+      onActionDone?: (payload: {
+        turn: number
+        tool_use_id: string
+        action_type: string
+        title: string
+        subtitle?: string | null
+        download_url?: string | null
+        external_url?: string | null
+        method?: string | null
+      }) => void
+      // Health check OpenClaw Gateway (envoye au debut de session si down)
+      onOpenClawStatus?: (payload: {
+        is_up: boolean
+        message: string
+      }) => void
     },
     options?: {
       stream?: boolean
@@ -583,6 +671,27 @@ export const api = {
                   case 'tool_result':
                     callbacks?.onToolResult?.(data)
                     break
+                  case 'auto_extension_start':
+                    callbacks?.onAutoExtensionStart?.(data)
+                    break
+                  case 'auto_extension_found':
+                    callbacks?.onAutoExtensionFound?.(data)
+                    break
+                  case 'auto_extension_ready':
+                    callbacks?.onAutoExtensionReady?.(data)
+                    break
+                  case 'auto_extension_error':
+                    callbacks?.onAutoExtensionError?.(data)
+                    break
+                  case 'tools_refreshed':
+                    callbacks?.onToolsRefreshed?.(data)
+                    break
+                  case 'action_done':
+                    callbacks?.onActionDone?.(data)
+                    break
+                  case 'openclaw_status':
+                    callbacks?.onOpenClawStatus?.(data)
+                    break
                   case 'turn_llm_done':
                   case 'done':
                     callbacks?.onTurnDone?.(data.turn ?? 0)
@@ -645,6 +754,56 @@ export const api = {
         preview_text?: string
       }) => void
       onError?: (message: string) => void
+      // Phase 4 : feedback live auto-extension ClawHub (chemin resume)
+      onAutoExtensionStart?: (payload: {
+        turn: number
+        tool_use_id: string
+        phase: 'search' | 'install' | 'publish'
+        action_type: string
+        trigger: string
+      }) => void
+      onAutoExtensionFound?: (payload: {
+        turn: number
+        tool_use_id: string
+        query: string
+        count: number
+        candidates: Array<{ slug: string; name: string; description: string; author?: string; version?: string }>
+      }) => void
+      onAutoExtensionReady?: (payload: {
+        turn: number
+        tool_use_id: string
+        phase: 'install' | 'publish'
+        slug: string
+        tool_alias?: string
+      }) => void
+      onAutoExtensionError?: (payload: {
+        turn: number
+        tool_use_id: string
+        phase: 'search' | 'install' | 'publish'
+        action_type: string
+        message: string
+      }) => void
+      onToolsRefreshed?: (payload: {
+        turn: number
+        tool_use_id: string
+        trigger: string
+        slug: string
+        added_slugs: string[]
+        total_before: number
+        total_after: number
+        ok: boolean
+      }) => void
+      onActionDone?: (payload: {
+        turn: number
+        tool_use_id: string
+        action_type: string
+        title: string
+        subtitle?: string | null
+        download_url?: string | null
+        external_url?: string | null
+        method?: string | null
+      }) => void
+      onOpenClawStatus?: (payload: { is_up: boolean; message: string }) => void
     }
   ): Promise<{ message: string; turns: number; actions_count: number }> => {
     return new Promise(async (resolve, reject) => {
@@ -679,6 +838,13 @@ export const api = {
                   case 'thinking': callbacks?.onThinking?.(data.text); break
                   case 'tool_use': callbacks?.onToolUse?.(data); break
                   case 'tool_result': callbacks?.onToolResult?.(data); break
+                  case 'auto_extension_start': callbacks?.onAutoExtensionStart?.(data); break
+                  case 'auto_extension_found': callbacks?.onAutoExtensionFound?.(data); break
+                  case 'auto_extension_ready': callbacks?.onAutoExtensionReady?.(data); break
+                  case 'auto_extension_error': callbacks?.onAutoExtensionError?.(data); break
+                  case 'tools_refreshed': callbacks?.onToolsRefreshed?.(data); break
+                  case 'action_done': callbacks?.onActionDone?.(data); break
+                  case 'openclaw_status': callbacks?.onOpenClawStatus?.(data); break
                   case 'result':
                     callbacks?.onResult?.(data)
                     resolve(data)
@@ -1223,4 +1389,852 @@ export const api = {
     error?: string | null
   }> =>
     request('/marketplace/check', { method: 'POST' }),
+
+  // ── Agent 3 / Phase 3 — Outils OpenClaw ────────────────────────────────
+  // Gestion fine des 38 outils : activer/desactiver par utilisateur en plus
+  // du profil agent (TOOL_PROFILES whitelist/blacklist).
+
+  /** Retourne les 38 outils OpenClaw avec leur statut (profil + override user). */
+  agent3GetTools: (): Promise<{
+    agent_id: string
+    total_tools: number
+    enabled_count: number
+    has_user_overrides: boolean
+    tools: Array<{
+      name: string
+      description: string
+      group: string
+      enabled_profile: boolean
+      enabled_user: boolean | null
+      effectively_enabled: boolean
+    }>
+    groups: Record<string, Array<{
+      name: string
+      description: string
+      group: string
+      enabled_profile: boolean
+      enabled_user: boolean | null
+      effectively_enabled: boolean
+    }>>
+  }> =>
+    request('/agent3/tools'),
+
+  /** Toggle on/off d'un outil pour l'utilisateur courant (override). */
+  agent3ToggleTool: (toolName: string, enabled: boolean): Promise<{
+    success: boolean
+    tool: string
+    enabled_user: boolean
+    enabled_profile: boolean
+    effectively_enabled: boolean
+  }> =>
+    request(`/agent3/tools/${encodeURIComponent(toolName)}/toggle`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    }),
+
+  /** Supprime l'override utilisateur sur un outil (retour au reglage du profil). */
+  agent3ClearToolOverride: (toolName: string): Promise<{
+    success: boolean
+    tool: string
+    override_cleared: boolean
+  }> =>
+    request(`/agent3/tools/${encodeURIComponent(toolName)}/override`, { method: 'DELETE' }),
+
+  /** Toggle en masse : {"tool_name": enabled, ...}. */
+  agent3BulkToggleTools: (preferences: Record<string, boolean>): Promise<{
+    success: boolean
+    updated_count: number
+    updated: string[]
+    skipped: string[]
+  }> =>
+    request('/agent3/tools/bulk-toggle', {
+      method: 'POST',
+      body: JSON.stringify({ preferences }),
+    }),
+
+  // ── Agent 3 / Phase 4 — ClawHub skills ─────────────────────────────────
+  // Agent auto-extensible : skills bundled OpenClaw + skills installees
+  // depuis le registre ClawHub.com (search/install/publish).
+
+  /** Liste toutes les skills (bundled + user) via le loader Phase 4. */
+  agent3ClawhubListSkills: (opts?: {
+    include_bundled?: boolean
+    include_user?: boolean
+    force_refresh?: boolean
+  }): Promise<{
+    success: boolean
+    count: number
+    bundled_count: number
+    user_count: number
+    enabled_mode: 'all' | 'filter'
+    enabled_slugs: string[] | null
+    skills: Array<{
+      slug: string
+      name: string
+      description: string
+      path: string
+      is_bundled: boolean
+      version: string
+      author: string
+      homepage: string
+      emoji: string
+      tags: string[]
+      required_bins: string[]
+      body_preview: string
+      tool_name: string
+      enabled: boolean
+    }>
+    error?: string
+  }> => {
+    const params = new URLSearchParams()
+    if (opts?.include_bundled !== undefined) params.set('include_bundled', String(opts.include_bundled))
+    if (opts?.include_user !== undefined) params.set('include_user', String(opts.include_user))
+    if (opts?.force_refresh !== undefined) params.set('force_refresh', String(opts.force_refresh))
+    const qs = params.toString()
+    return request(`/agent3/clawhub/skills${qs ? '?' + qs : ''}`)
+  },
+
+  /** Detail complet d'une skill (metas + SKILL.md). */
+  agent3ClawhubGetSkill: (slug: string): Promise<{
+    success: boolean
+    skill?: {
+      slug: string
+      name: string
+      description: string
+      path: string
+      is_bundled: boolean
+      emoji: string
+      tags: string[]
+      required_bins: string[]
+      tool_name: string
+    }
+    skill_md?: string
+    error?: string
+  }> =>
+    request(`/agent3/clawhub/skills/${encodeURIComponent(slug)}`),
+
+  /** Force le rescan du disque (invalide le cache). Utile apres qu'un skill
+   * ait ete installe/modifie en dehors de l'agent. */
+  agent3ClawhubRefresh: (): Promise<{
+    success: boolean
+    count: number
+    bundled_count: number
+    user_count: number
+    error?: string
+  }> =>
+    request('/agent3/clawhub/skills/refresh', { method: 'POST' }),
+
+  /** Historique des actions destructives de l'Agent 3 (EMAIL/FILE_CREATE/...). */
+  agent3GetAudit: (limit: number = 100): Promise<{
+    success: boolean
+    count: number
+    success_count: number
+    counts_by_type: Record<string, number>
+    entries: Array<{
+      id: string
+      action_type: string
+      summary: string
+      success: boolean
+      error_message: string
+      created_at: string
+    }>
+  }> =>
+    request(`/agent3/audit?limit=${limit}`),
+
+  /** Liste les fichiers crees dans le workspace (authentifie). */
+  agent3ListWorkspaceFiles: (): Promise<{
+    files: Array<{
+      filename: string
+      size: number
+      modified_at: string
+      download_url: string
+    }>
+    workspace: string | null
+  }> =>
+    request('/agent3/workspace-files'),
+
+  /** Liste les 38 outils OpenClaw directs + leur statut exposition LLM. */
+  agent3ListOpenClawTools: (): Promise<{
+    success: boolean
+    tools: Array<{
+      name: string
+      group: string
+      description: string
+      exposed_to_llm: boolean
+      is_destructive: boolean
+    }>
+    direct_tools_enabled: boolean
+    enabled_filter: 'all' | 'subset'
+    counts: { total: number; exposed: number; destructive: number }
+  }> =>
+    request('/agent3/openclaw-tools'),
+
+  /** Breakdown des couts externes OpenClaw (USD) pour l'utilisateur courant. */
+  agent3GetExternalCost: (): Promise<{
+    total_usd: number
+    by_tool: Record<string, { usd: number; calls: number }>
+  }> =>
+    request('/agent3/cost-external'),
+
+  /** Metrics Agent 3 : retries, circuit breakers, gateway health, couts externes. */
+  agent3GetMetrics: (): Promise<{
+    retries: Record<string, number>
+    breakers: Record<string, {
+      name: string
+      state: 'closed' | 'open' | 'half_open'
+      failures: number
+      threshold: number
+    }>
+    gateway_health: {
+      is_up: boolean | null
+      checked_at: number
+      ttl_s: number
+      last_error: string
+    }
+    external_cost_global: {
+      total_by_user: Record<string, number>
+      total_calls: number
+    }
+    external_cost_mine: {
+      total_usd: number
+      by_tool: Record<string, { usd: number; calls: number }>
+    }
+    latencies?: Record<string, {
+      count: number
+      p50_ms: number
+      p95_ms: number
+      p99_ms: number
+      min_ms: number
+      max_ms: number
+      avg_ms: number
+    }>
+    daily_cost?: {
+      used_usd: number
+      cap_usd: number
+      pct: number
+    }
+  }> =>
+    request('/agent3/metrics'),
+
+  /** Met a jour la liste des outils OpenClaw exposes au LLM (filtrage granulaire). */
+  agent3SetOpenClawEnabledTools: (
+    enabledNames: string[] | null,
+    directToolsEnabled?: boolean,
+  ): Promise<{ success: boolean; preferences: Record<string, unknown> }> =>
+    request('/agent3/preferences', {
+      method: 'PUT',
+      body: JSON.stringify({
+        openclaw_enabled_tools: enabledNames,  // null = tous (filter 'all')
+        ...(directToolsEnabled !== undefined ? { openclaw_direct_tools_enabled: directToolsEnabled } : {}),
+      }),
+    }),
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Credential Vault (api/credentials/*)  — gestion cles API tierces
+  // ────────────────────────────────────────────────────────────────────────
+
+  /** Catalogue public des providers supportes. */
+  credentialsListProviders: (): Promise<{
+    providers: Array<{
+      slug: string
+      display_name: string
+      description: string
+      category: string
+      logo_emoji: string
+      aliases: string[]
+      fields: Array<{
+        key: string
+        label: string
+        type: string
+        required: boolean
+        pattern?: string
+        pattern_hint?: string
+      }>
+      tutorial_url: string
+      tutorial_steps: string[]
+      used_by_skills: string[]
+    }>
+  }> => {
+    // Appel absolu car le prefix du router est /api/credentials (pas /api/agent3/).
+    return fetch(`${API_BASE}/api/credentials/providers`, {
+      headers: getAuthHeaders(),
+    }).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      return r.json()
+    })
+  },
+
+  /** Liste des credentials du user (masquees). */
+  credentialsListMine: (): Promise<{
+    credentials: Array<{
+      provider_slug: string
+      field_key: string
+      preview: string
+      metadata: Record<string, unknown> | null
+      created_at: string
+      updated_at: string
+      last_used_at: string | null
+      last_tested_at: string | null
+      last_test_ok: boolean | null
+      expires_at: string | null
+    }>
+    count: number
+  }> => {
+    return fetch(`${API_BASE}/api/credentials`, {
+      headers: getAuthHeaders(),
+    }).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      return r.json()
+    })
+  },
+
+  /** Detecte un provider a partir d'un input (nom ou cle API collee). */
+  credentialsDetect: (input: string): Promise<{
+    type: 'api_key_detected' | 'provider_suggestions' | 'no_match' | 'empty'
+    matches: Array<{
+      provider_slug: string
+      field_key: string
+      provider_display_name: string
+      provider_logo_emoji: string
+      metadata: Record<string, string>
+    }>
+    suggestions: Array<{
+      slug: string
+      display_name: string
+      description: string
+      category: string
+      logo_emoji: string
+      score: number
+    }>
+  }> => {
+    return fetch(`${API_BASE}/api/credentials/detect`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ input }),
+    }).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      return r.json()
+    })
+  },
+
+  /** Save + test en un seul appel. Detection auto si provider_slug omis. */
+  credentialsQuickSave: (
+    input: string,
+    providerSlug?: string,
+    fieldKey?: string,
+  ): Promise<{
+    success: boolean
+    validated?: boolean
+    ambiguous?: boolean
+    provider_slug?: string
+    field_key?: string
+    preview?: string
+    test_message?: string
+    skills_activated?: string[]
+    metadata?: Record<string, unknown>
+    matches?: Array<{ provider_slug: string; field_key: string }>
+    message?: string
+  }> => {
+    return fetch(`${API_BASE}/api/credentials/quick-save`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({
+        input,
+        provider_slug: providerSlug,
+        field_key: fieldKey,
+      }),
+    }).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      return r.json()
+    })
+  },
+
+  /** Save manuel multi-champs (form complet). */
+  credentialsSave: (
+    providerSlug: string,
+    values: Record<string, string>,
+    metadata?: Record<string, unknown>,
+  ): Promise<{
+    success: boolean
+    validated: boolean
+    test_message: string
+    saved_fields: string[]
+    skills_activated: string[]
+  }> => {
+    return fetch(`${API_BASE}/api/credentials`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({
+        provider_slug: providerSlug,
+        values,
+        metadata,
+      }),
+    }).then(async r => {
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({ detail: 'Erreur' }))
+        throw new Error(body.detail || `HTTP ${r.status}`)
+      }
+      return r.json()
+    })
+  },
+
+  /** Supprime toutes les credentials d'un provider. */
+  credentialsDeleteProvider: (providerSlug: string): Promise<{
+    success: boolean
+    deleted_count: number
+  }> => {
+    return fetch(`${API_BASE}/api/credentials/${encodeURIComponent(providerSlug)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    }).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      return r.json()
+    })
+  },
+
+  /** Re-test les credentials existantes d'un provider. */
+  credentialsTest: (providerSlug: string): Promise<{
+    success: boolean
+    message: string
+  }> => {
+    return fetch(`${API_BASE}/api/credentials/${encodeURIComponent(providerSlug)}/test`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    }).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      return r.json()
+    })
+  },
+
+  /** Liste des credentials requises par les skills ClawHub installes, avec status. */
+  credentialsMissingForSkills: (): Promise<{
+    skills: Array<{
+      slug: string
+      name: string
+      emoji: string
+      required_env: string[]
+      missing: Array<{
+        env_name: string
+        matched_provider: string | null
+        field_key: string | null
+        has_credential: boolean
+        custom_provider_slug?: string
+      }>
+    }>
+    total_missing_count: number
+  }> => {
+    return fetch(`${API_BASE}/api/credentials/missing-for-skills`, {
+      headers: getAuthHeaders(),
+    }).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      return r.json()
+    })
+  },
+
+  /** Save une credential custom pour un skill ClawHub (env var arbitraire). */
+  credentialsSaveCustomSkillEnv: (
+    skillSlug: string,
+    envName: string,
+    value: string,
+  ): Promise<{
+    success: boolean
+    provider_slug: string
+    field_key: string
+    preview: string
+  }> => {
+    return fetch(`${API_BASE}/api/credentials/custom-skill-env`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ skill_slug: skillSlug, env_name: envName, value }),
+    }).then(async r => {
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({ detail: 'Erreur' }))
+        throw new Error(body.detail || `HTTP ${r.status}`)
+      }
+      return r.json()
+    })
+  },
+
+  /** Recupere le SKILL.md complet d'un skill installe (pour affichage UI). */
+  agent3ClawhubGetSkillMarkdown: (slug: string): Promise<{
+    success: boolean
+    slug: string
+    name: string
+    description: string
+    version: string
+    author: string
+    homepage: string
+    emoji: string
+    is_bundled: boolean
+    required_bins: string[]
+    markdown: string
+  }> =>
+    request(`/agent3/clawhub/skill/${encodeURIComponent(slug)}/md`),
+
+  /** Historique des auto-extensions (search/install/publish) faites par l'agent. */
+  agent3ClawhubGetEvents: (limit: number = 50): Promise<{
+    success: boolean
+    count: number
+    counts_by_type: { auto_search: number; auto_install: number; auto_publish: number; auto_unknown?: number }
+    events: Array<{
+      id: number
+      event_type: 'auto_search' | 'auto_install' | 'auto_publish' | 'auto_unknown'
+      slug: string
+      trigger_context: string
+      success: boolean
+      error_message: string
+      created_at: string
+    }>
+    error?: string
+  }> =>
+    request(`/agent3/clawhub/events?limit=${limit}`),
+
+  /** Retourne les preferences ClawHub (permission_mode + toggles). */
+  agent3ClawhubGetSettings: (): Promise<{
+    success: boolean
+    permission_mode: 'default' | 'bypass'
+    clawhub_skills_enabled: boolean
+    clawhub_meta_enabled: boolean
+    clawhub_enabled_slugs: string[] | null
+    enabled_mode: 'all' | 'filter'
+  }> =>
+    request('/agent3/clawhub/settings'),
+
+  /** Met a jour les preferences ClawHub. */
+  agent3ClawhubUpdateSettings: (data: {
+    permission_mode?: 'default' | 'bypass'
+    clawhub_skills_enabled?: boolean
+    clawhub_meta_enabled?: boolean
+    clawhub_enabled_slugs?: string[] | null
+  }): Promise<{
+    success: boolean
+    permission_mode: 'default' | 'bypass'
+    clawhub_skills_enabled: boolean
+    clawhub_meta_enabled: boolean
+    clawhub_enabled_slugs: string[] | null
+  }> =>
+    request('/agent3/clawhub/settings', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Phase 10A — Plans & Quotas
+  // ─────────────────────────────────────────────────────────────────────────
+
+  getPlan: (): Promise<{
+    plan: {
+      name: 'free' | 'pro' | 'team'
+      display_name: string
+      price_usd: number
+      limits: Record<string, number>
+      started_at?: string
+      expires_at?: string
+    }
+    usage: {
+      month_key: string
+      tokens: number
+      requests: number
+      skills_installed: number
+      crons: number
+      uploads: number
+      deep_researches: number
+      updated_at?: string
+    }
+  }> => request('/agent3/plan'),
+
+  getQuotasUsage: (month?: string): Promise<{
+    month_key: string
+    tokens: number
+    requests: number
+    skills_installed: number
+    crons: number
+    uploads: number
+    deep_researches: number
+  }> => request(`/agent3/quotas/usage${month ? `?month=${encodeURIComponent(month)}` : ''}`),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Phase 10B — Workspaces multi-tenant
+  // ─────────────────────────────────────────────────────────────────────────
+
+  listWorkspaces: (): Promise<{ items: Array<{
+    id: string
+    name: string
+    owner_id: string
+    created_at: string
+    my_role: 'owner' | 'admin' | 'member'
+  }> }> => request('/agent3/workspaces'),
+
+  createWorkspace: (name: string): Promise<{
+    ok: boolean
+    workspace_id?: string
+    name?: string
+    error?: string
+  }> => request('/agent3/workspaces', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  }),
+
+  deleteWorkspace: (id: string): Promise<{ ok: boolean }> =>
+    request(`/agent3/workspaces/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  listWorkspaceMembers: (id: string): Promise<{ members: Array<{
+    user_id: string
+    role: 'owner' | 'admin' | 'member'
+    joined_at: string
+  }> }> => request(`/agent3/workspaces/${encodeURIComponent(id)}/members`),
+
+  addWorkspaceMember: (id: string, user_id: string, role: 'owner' | 'admin' | 'member'): Promise<{ ok: boolean; error?: string }> =>
+    request(`/agent3/workspaces/${encodeURIComponent(id)}/members`, {
+      method: 'POST',
+      body: JSON.stringify({ user_id, role }),
+    }),
+
+  removeWorkspaceMember: (id: string, target_user_id: string): Promise<{ ok: boolean }> =>
+    request(`/agent3/workspaces/${encodeURIComponent(id)}/members/${encodeURIComponent(target_user_id)}`, {
+      method: 'DELETE',
+    }),
+
+  listWorkspaceSharedMemory: (id: string): Promise<{ items: Array<{
+    id: string
+    key: string
+    value: string
+    category: string
+    created_by: string
+    created_at: string
+  }> }> => request(`/agent3/workspaces/${encodeURIComponent(id)}/shared-memory`),
+
+  shareWorkspaceMemory: (id: string, key: string, value: string, category = 'general'): Promise<{ ok: boolean; memory_id?: string }> =>
+    request(`/agent3/workspaces/${encodeURIComponent(id)}/shared-memory`, {
+      method: 'POST',
+      body: JSON.stringify({ key, value, category }),
+    }),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Phase 10C — Admin dashboard
+  // ─────────────────────────────────────────────────────────────────────────
+
+  adminListUsers: (limit = 100): Promise<{ items: Array<{
+    id: string
+    email: string
+    provider: string
+    created_at: string
+    is_admin: boolean
+    disabled: boolean
+    plan: string
+    usage_this_month: { tokens: number; requests: number }
+    messages_total: number
+  }> }> => request(`/agent3/admin/users?limit=${limit}`),
+
+  adminGetStats: (): Promise<{
+    users_total: number
+    users_active: number
+    admins: number
+    messages_total: number
+    plans_distribution: Record<string, number>
+    tokens_this_month: number
+    requests_this_month: number
+    month_key: string
+  }> => request('/agent3/admin/stats'),
+
+  adminRecentActivity: (limit = 50): Promise<{ items: Array<{
+    id: string
+    user_id: string
+    action_type: string
+    summary: string
+    success: boolean
+    created_at: string
+  }> }> => request(`/agent3/admin/activity?limit=${limit}`),
+
+  adminSetPlan: (user_id: string, plan_name: string): Promise<{ ok: boolean }> =>
+    request(`/agent3/admin/users/${encodeURIComponent(user_id)}/plan`, {
+      method: 'POST',
+      body: JSON.stringify({ plan_name }),
+    }),
+
+  adminDisableUser: (user_id: string): Promise<{ ok: boolean }> =>
+    request(`/agent3/admin/users/${encodeURIComponent(user_id)}/disable`, {
+      method: 'POST',
+    }),
+
+  adminEnableUser: (user_id: string): Promise<{ ok: boolean }> =>
+    request(`/agent3/admin/users/${encodeURIComponent(user_id)}/enable`, {
+      method: 'POST',
+    }),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Phase 10D — API keys + Webhooks
+  // ─────────────────────────────────────────────────────────────────────────
+
+  listApiKeys: (): Promise<{ items: Array<{
+    id: string
+    name: string
+    prefix: string
+    scopes: string[]
+    last_used_at?: string
+    created_at: string
+    revoked: boolean
+  }> }> => request('/agent3/api-keys'),
+
+  createApiKey: (name: string, scopes?: string[]): Promise<{
+    ok: boolean
+    key_id?: string
+    token?: string
+    prefix?: string
+    scopes?: string[]
+    warning?: string
+    error?: string
+  }> => request('/agent3/api-keys', {
+    method: 'POST',
+    body: JSON.stringify({ name, scopes }),
+  }),
+
+  revokeApiKey: (id: string): Promise<{ ok: boolean }> =>
+    request(`/agent3/api-keys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  listWebhooks: (): Promise<{ items: Array<{
+    id: string
+    target_url: string
+    events: string[]
+    enabled: boolean
+    last_success_at?: string
+    last_error?: string
+    failures_count: number
+    created_at: string
+  }> }> => request('/agent3/webhooks'),
+
+  createWebhook: (target_url: string, events: string[]): Promise<{
+    ok: boolean
+    subscription_id?: string
+    secret?: string
+    events?: string[]
+    target_url?: string
+    error?: string
+  }> => request('/agent3/webhooks', {
+    method: 'POST',
+    body: JSON.stringify({ target_url, events }),
+  }),
+
+  deleteWebhook: (id: string): Promise<{ ok: boolean }> =>
+    request(`/agent3/webhooks/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  webhookDeliveries: (limit = 50): Promise<{ items: Array<{
+    id: string
+    subscription_id: string
+    event: string
+    status_code?: number
+    attempted_at: string
+    delivered_at?: string
+    error?: string
+  }> }> => request(`/agent3/webhooks/deliveries?limit=${limit}`),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Phase 11C — Voice (wrappers pour le STT/TTS backend)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  voiceTranscribe: (audio: Blob, language = 'fr'): Promise<{
+    text: string
+    cost_usd?: number
+    estimated_minutes?: number
+    error?: string
+  }> => {
+    const fd = new FormData()
+    fd.append('file', audio, 'audio.mp3')
+    return fetch(`${BASE}/agent3/voice/transcribe?language=${encodeURIComponent(language)}`, {
+      method: 'POST',
+      headers: (() => {
+        const h: Record<string, string> = {}
+        const t = localStorage.getItem(AUTH_TOKEN_KEY)
+        if (t) h['Authorization'] = `Bearer ${t}`
+        return h
+      })(),
+      body: fd,
+    }).then(r => r.json())
+  },
+
+  voiceTts: (text: string, voice = 'nova', speed = 1.0): Promise<{
+    audio_b64?: string
+    format?: string
+    chars?: number
+    voice?: string
+    cost_usd?: number
+    error?: string
+  }> => request('/agent3/voice/tts', {
+    method: 'POST',
+    body: JSON.stringify({ text, voice, speed }),
+  }),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Phase 9C — Feedback explicite (thumbs up/down)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  recordFeedback: (data: {
+    vote: 'up' | 'down'
+    message_id?: string
+    comment?: string
+    agent_response?: string
+  }): Promise<{ ok: boolean; feedback_id?: string; error?: string }> =>
+    request('/agent3/feedback', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  getFeedbackStats: (): Promise<{
+    thumbs_up: number
+    thumbs_down: number
+    total: number
+    ratio: number
+  }> => request('/agent3/feedback/stats'),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Phase 9A — GDPR
+  // ─────────────────────────────────────────────────────────────────────────
+
+  exportMyData: async (): Promise<Blob> => {
+    const res = await fetch(`${BASE}/agent3/export-my-data`, {
+      headers: getAuthHeaders(),
+    })
+    if (!res.ok) throw new Error('Export failed')
+    return res.blob()
+  },
+
+  deleteMyData: (): Promise<{
+    deleted_by_table?: Record<string, number>
+    files_deleted?: number
+    total_rows?: number
+    deleted_at?: string
+    error?: string
+  }> => request('/agent3/delete-my-data?confirm=YES-DELETE-EVERYTHING', {
+    method: 'DELETE',
+  }),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Phase 13 — Stripe checkout / portal
+  // ─────────────────────────────────────────────────────────────────────────
+
+  stripeConfig: (): Promise<{ configured: boolean }> =>
+    request('/agent3/stripe/config'),
+
+  stripeCheckout: (plan: 'pro' | 'team'): Promise<{
+    ok: boolean
+    url?: string
+    session_id?: string
+    error?: string
+  }> => request('/agent3/stripe/checkout', {
+    method: 'POST',
+    body: JSON.stringify({ plan }),
+  }),
+
+  stripePortal: (): Promise<{
+    ok: boolean
+    url?: string
+    error?: string
+  }> => request('/agent3/stripe/portal', {
+    method: 'POST',
+  }),
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Types exported (Phase 10/11)
+// ─────────────────────────────────────────────────────────────────────────────
+

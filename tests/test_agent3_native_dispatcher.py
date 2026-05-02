@@ -43,6 +43,10 @@ class TestSupportedSet:
         assert Agent3ActionDispatcher.SUPPORTED == {
             "SEARCH", "X_SEARCH", "WEB_FETCH",
             "MEMORY", "MEMORY_SEARCH",
+            # Phase 7 : RAG + sandbox Python + deep research
+            "SEMANTIC_SEARCH", "PYTHON_EXEC", "DEEP_RESEARCH",
+            # Phase 8 : vision analyze d'une image uploadee
+            "VISION_ANALYZE",
             "PDF", "CODE", "CANVAS",
             "FILE_READ", "CALENDAR_LIST", "GMAIL_READ",
             # Destructives (gated by AgenticLoop confirmation flow)
@@ -52,6 +56,8 @@ class TestSupportedSet:
             "SPAWN_AGENT",
             # Planification (in-memory)
             "TODO_WRITE",
+            # Phase 4 : meta-tools ClawHub (auto-extension de l'agent)
+            "CLAWHUB_SEARCH", "CLAWHUB_INSTALL", "CLAWHUB_PUBLISH",
         }
 
 

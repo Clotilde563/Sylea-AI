@@ -17,6 +17,27 @@
 import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { SyleaLogo } from './SyleaLogo'
+
+// ── Helper : ligne ✓ tech pour les recapitulatifs ──────────────────────────
+function CheckLine({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+      <span
+        style={{
+          color: '#10b981',
+          fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+          fontWeight: 700,
+          marginTop: 1,
+          textShadow: '0 0 6px rgba(16,185,129,0.4)',
+        }}
+      >
+        ✓
+      </span>
+      <span style={{ color: 'rgba(230,240,255,0.88)' }}>{children}</span>
+    </div>
+  )
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -321,82 +342,104 @@ export default function OpenClawOnboarding({ onComplete }: OpenClawOnboardingPro
 
   // ── Styles partages ──────────────────────────────────────────────────────
 
+  // ── Styles tech — palette officielle Syléa (cyan -> violet) ────────────
   const containerStyle: React.CSSProperties = {
     position: 'fixed',
     inset: 0,
-    background: 'linear-gradient(135deg, #0a0e27 0%, #151938 50%, #1a1240 100%)',
-    color: '#e5e7eb',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    background: '#050810',
+    color: '#e6f0ff',
+    fontFamily: '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     padding: '24px',
     overflowY: 'auto',
     zIndex: 10_000,
+    // Grille technique subtile
+    backgroundImage: `
+      linear-gradient(rgba(0, 200, 255, 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 200, 255, 0.035) 1px, transparent 1px),
+      radial-gradient(ellipse at 50% 20%, rgba(0, 200, 255, 0.07) 0%, transparent 60%)
+    `,
+    backgroundSize: '48px 48px, 48px 48px, 100% 100%',
   }
 
   const cardStyle: React.CSSProperties = {
+    position: 'relative',
     maxWidth: 640,
     margin: '0 auto',
-    background: 'rgba(255,255,255,0.03)',
-    border: '1px solid rgba(168,139,255,0.18)',
-    borderRadius: 16,
+    background: 'rgba(0, 200, 255, 0.03)',
+    border: '1px solid rgba(0, 200, 255, 0.15)',
+    borderRadius: 10,
     padding: '32px',
-    boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+    boxShadow: '0 0 0 1px rgba(0, 200, 255, 0.08) inset, 0 20px 60px rgba(0, 0, 0, 0.55)',
+    backdropFilter: 'blur(10px)',
   }
 
   const titleStyle: React.CSSProperties = {
-    fontSize: 24,
-    fontWeight: 700,
+    fontSize: 22,
+    fontWeight: 800,
+    letterSpacing: '0.03em',
     marginBottom: 8,
-    background: 'linear-gradient(90deg, #60a5fa, #a78bfa)',
+    background: 'linear-gradient(90deg, #00c8ff, #7ad9ff, #a5b4fc)',
     WebkitBackgroundClip: 'text',
     WebkitTextFillColor: 'transparent',
     backgroundClip: 'text',
   }
 
   const subtitleStyle: React.CSSProperties = {
-    fontSize: 14,
-    color: '#9ca3af',
+    fontSize: 13,
+    color: 'rgba(230, 240, 255, 0.6)',
     marginBottom: 28,
     lineHeight: 1.6,
   }
 
   const primaryButton: React.CSSProperties = {
-    background: 'linear-gradient(90deg, #6366f1, #a78bfa)',
+    background: 'linear-gradient(135deg, #5520b8 0%, #1848d8 40%, #0090e0 75%, #00c8ff 100%)',
     color: '#fff',
     border: 'none',
-    padding: '12px 24px',
-    borderRadius: 10,
-    fontSize: 14,
-    fontWeight: 600,
+    padding: '11px 22px',
+    borderRadius: 8,
+    fontSize: 12,
+    fontWeight: 700,
+    letterSpacing: '0.14em',
+    textTransform: 'uppercase',
+    fontFamily: '"JetBrains Mono", "Fira Code", monospace',
     cursor: 'pointer',
-    transition: 'transform 0.15s, opacity 0.15s',
+    transition: 'transform 0.15s, opacity 0.15s, box-shadow 0.2s',
+    boxShadow: '0 0 0 1px rgba(0, 200, 255, 0.25), 0 8px 22px rgba(0, 200, 255, 0.2)',
   }
 
   const secondaryButton: React.CSSProperties = {
     background: 'transparent',
-    color: '#9ca3af',
-    border: '1px solid rgba(255,255,255,0.15)',
-    padding: '10px 20px',
-    borderRadius: 10,
-    fontSize: 13,
+    color: 'rgba(230, 240, 255, 0.7)',
+    border: '1px solid rgba(0, 200, 255, 0.2)',
+    padding: '9px 18px',
+    borderRadius: 8,
+    fontSize: 11,
+    letterSpacing: '0.12em',
+    textTransform: 'uppercase',
+    fontFamily: '"JetBrains Mono", "Fira Code", monospace',
     cursor: 'pointer',
   }
 
   const progressPillStyle = (active: boolean, done: boolean): React.CSSProperties => ({
     padding: '4px 10px',
-    borderRadius: 999,
-    fontSize: 11,
+    borderRadius: 4,
+    fontSize: 10,
+    fontFamily: '"JetBrains Mono", "Fira Code", monospace',
     fontWeight: 600,
+    letterSpacing: '0.1em',
+    textTransform: 'uppercase',
     background: done
-      ? 'rgba(74,222,128,0.15)'
+      ? 'rgba(16, 185, 129, 0.12)'
       : active
-      ? 'rgba(99,102,241,0.25)'
-      : 'rgba(255,255,255,0.05)',
-    color: done ? '#4ade80' : active ? '#a78bfa' : '#6b7280',
+      ? 'rgba(0, 200, 255, 0.12)'
+      : 'rgba(0, 200, 255, 0.03)',
+    color: done ? '#10b981' : active ? '#00c8ff' : 'rgba(230, 240, 255, 0.35)',
     border: done
-      ? '1px solid rgba(74,222,128,0.4)'
+      ? '1px solid rgba(16, 185, 129, 0.35)'
       : active
-      ? '1px solid rgba(167,139,250,0.5)'
-      : '1px solid rgba(255,255,255,0.08)',
+      ? '1px solid rgba(0, 200, 255, 0.45)'
+      : '1px solid rgba(0, 200, 255, 0.08)',
+    boxShadow: active ? '0 0 8px rgba(0, 200, 255, 0.25)' : 'none',
   })
 
   // ── Rendu : barre de progression ─────────────────────────────────────────
@@ -475,43 +518,91 @@ export default function OpenClawOnboarding({ onComplete }: OpenClawOnboardingPro
       <div style={containerStyle}>
         <div style={cardStyle}>
           {renderProgressBar()}
-          <div style={titleStyle}>Bienvenue dans Sylea Agent</div>
+
+          {/* Logo + wordmark en en-tete */}
+          <div
+            style={{
+              display: 'flex', alignItems: 'center', gap: 14,
+              marginBottom: 22,
+              paddingBottom: 18,
+              borderBottom: '1px solid rgba(0, 200, 255, 0.12)',
+            }}
+          >
+            <SyleaLogo size={44} animated />
+            <div>
+              <div
+                style={{
+                  fontSize: 18, fontWeight: 800, letterSpacing: '0.12em',
+                  color: '#e6f0ff',
+                }}
+              >
+                SYLEA{' '}
+                <span style={{ color: '#7ad9ff', textShadow: '0 0 8px rgba(0,200,255,0.35)' }}>
+                  AGENT
+                </span>
+              </div>
+              <div
+                style={{
+                  fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+                  fontSize: 10, letterSpacing: '0.22em',
+                  color: 'rgba(230, 240, 255, 0.35)',
+                  textTransform: 'uppercase',
+                  marginTop: 2,
+                }}
+              >
+                ▸ Initialisation du runtime local
+              </div>
+            </div>
+          </div>
+
+          <div style={titleStyle}>Bienvenue</div>
           <div style={subtitleStyle}>
-            Pour que Syléa fonctionne en local, nous allons installer
-            OpenClaw, son moteur AI open-source sous licence MIT
-            (38 outils dispo). Prevoyez 2 minutes.
+            Pour que Syléa puisse agir en local sur ton ordinateur, on va
+            installer <b>OpenClaw</b> — son moteur AI open-source (licence
+            MIT, 38 outils). Duree estimee : <b>2 min</b>.
           </div>
 
           <div
             style={{
-              background: 'rgba(99,102,241,0.05)',
-              border: '1px solid rgba(99,102,241,0.2)',
-              borderRadius: 12,
-              padding: 16,
+              background: 'rgba(0, 200, 255, 0.04)',
+              border: '1px solid rgba(0, 200, 255, 0.18)',
+              borderRadius: 8,
+              padding: '14px 16px',
               marginBottom: 20,
+              fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+              fontSize: 12,
             }}
           >
-            <div style={{ fontWeight: 600, marginBottom: 12, fontSize: 14 }}>
-              ✓ Verification systeme
+            <div
+              style={{
+                fontSize: 10, letterSpacing: '0.2em',
+                color: '#00c8ff', textTransform: 'uppercase',
+                marginBottom: 10,
+              }}
+            >
+              ▸ Verification systeme
             </div>
-            <div style={{ fontSize: 13, lineHeight: 1.8 }}>
-              <div>
-                Node.js :{' '}
-                <span style={{ color: nodeVersion ? '#4ade80' : '#9ca3af' }}>
+            <div style={{ lineHeight: 1.9 }}>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <span style={{ color: 'rgba(230,240,255,0.5)', minWidth: 80 }}>Node.js</span>
+                <span style={{ color: 'rgba(230,240,255,0.35)' }}>::</span>
+                <span style={{ color: nodeVersion ? '#10b981' : 'rgba(230,240,255,0.5)' }}>
                   {nodeVersion ?? 'detection…'}
                 </span>
               </div>
-              <div>
-                npm :{' '}
-                <span style={{ color: npmVersion ? '#4ade80' : '#9ca3af' }}>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <span style={{ color: 'rgba(230,240,255,0.5)', minWidth: 80 }}>npm</span>
+                <span style={{ color: 'rgba(230,240,255,0.35)' }}>::</span>
+                <span style={{ color: npmVersion ? '#10b981' : 'rgba(230,240,255,0.5)' }}>
                   {npmVersion ?? 'detection…'}
                 </span>
               </div>
-              <div>
-                OpenClaw :{' '}
+              <div style={{ display: 'flex', gap: 10 }}>
+                <span style={{ color: 'rgba(230,240,255,0.5)', minWidth: 80 }}>OpenClaw</span>
+                <span style={{ color: 'rgba(230,240,255,0.35)' }}>::</span>
                 <span
                   style={{
-                    color: openclawVersion ? '#4ade80' : '#fbbf24',
+                    color: openclawVersion ? '#10b981' : '#f59e0b',
                   }}
                 >
                   {openclawVersion ?? 'non installe — sera installe a l\'etape 2'}
@@ -652,9 +743,27 @@ export default function OpenClawOnboarding({ onComplete }: OpenClawOnboardingPro
                 whiteSpace: 'pre-wrap',
               }}
             >
-              {installLogs.map((line, i) => (
-                <div key={i}>{line}</div>
-              ))}
+              {installLogs.map((line, i) => {
+                // Coloration des logs selon le niveau detecte dans le texte :
+                //  rouge (erreurs), jaune (warnings), vert (succes), gris (info).
+                const low = line.toLowerCase()
+                let color = '#9ca3af'  // gris par defaut
+                let prefix: string | null = null
+                if (/error|err!|failed|fail\b|✗|✘/.test(low)) {
+                  color = '#ef4444'; prefix = '✗'
+                } else if (/warn|warning|deprecat|⚠/.test(low)) {
+                  color = '#f59e0b'; prefix = '⚠'
+                } else if (/success|done|added|installed|ready|✓|✔/.test(low)) {
+                  color = '#10b981'; prefix = '✓'
+                } else if (/npm (http|info|notice)|fetch|http\s+GET/i.test(line)) {
+                  color = '#6366f1'  // requetes npm (info reseau)
+                }
+                return (
+                  <div key={i} style={{ color }}>
+                    {prefix ? `${prefix} ` : ''}{line}
+                  </div>
+                )
+              })}
             </div>
           )}
 
@@ -790,6 +899,26 @@ export default function OpenClawOnboarding({ onComplete }: OpenClawOnboardingPro
             quotidiens. Ils sont pre-selectionnes, vous pourrez toujours en
             installer d'autres plus tard depuis le marketplace.
           </div>
+
+          {/* Warning si l'utilisateur a tout decoche — rare mais important. */}
+          {selectedSlugs.size === 0 && !allDone && (
+            <div style={{
+              padding: '10px 14px',
+              marginBottom: 16,
+              background: 'rgba(245,158,11,0.1)',
+              border: '1px solid rgba(245,158,11,0.4)',
+              borderLeft: '4px solid #f59e0b',
+              borderRadius: 8,
+              fontSize: 13,
+              color: '#f59e0b',
+              lineHeight: 1.5,
+            }}>
+              ⚠️ Aucune skill selectionnee. Syléa fonctionnera avec ses
+              capacites de base, mais tu ne pourras pas controler Notion,
+              Gmail, Slack, etc. Tu peux continuer sans installer, ou
+              selectionner au moins une skill ci-dessous.
+            </div>
+          )}
 
           <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
             <button
@@ -935,21 +1064,32 @@ export default function OpenClawOnboarding({ onComplete }: OpenClawOnboardingPro
             </button>
 
             {!allDone ? (
-              <button
-                style={{
-                  ...primaryButton,
-                  opacity: anyInstalling ? 0.6 : 1,
-                  cursor: anyInstalling ? 'wait' : 'pointer',
-                }}
-                onClick={installSelectedSkills}
-                disabled={anyInstalling || selectedSlugs.size === 0}
-              >
-                {anyInstalling
-                  ? 'Installation en cours…'
-                  : selectedSlugs.size === 0
-                  ? 'Selectionnez au moins 1 skill'
-                  : `Installer ${selectedSlugs.size} skill(s)`}
-              </button>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {/* Bouton Passer : permet de finir sans installer aucune skill */}
+                {selectedSlugs.size === 0 && !anyInstalling && (
+                  <button
+                    style={{ ...secondaryButton, fontSize: 13 }}
+                    onClick={() => setStep('done')}
+                  >
+                    Passer (installer plus tard)
+                  </button>
+                )}
+                <button
+                  style={{
+                    ...primaryButton,
+                    opacity: anyInstalling ? 0.6 : 1,
+                    cursor: anyInstalling ? 'wait' : 'pointer',
+                  }}
+                  onClick={installSelectedSkills}
+                  disabled={anyInstalling || selectedSlugs.size === 0}
+                >
+                  {anyInstalling
+                    ? 'Installation en cours…'
+                    : selectedSlugs.size === 0
+                    ? 'Selectionne au moins 1 skill'
+                    : `Installer ${selectedSlugs.size} skill(s)`}
+                </button>
+              </div>
             ) : (
               <button style={primaryButton} onClick={() => setStep('done')}>
                 Terminer →
@@ -991,85 +1131,122 @@ export default function OpenClawOnboarding({ onComplete }: OpenClawOnboardingPro
         <div style={cardStyle}>
           {renderProgressBar()}
 
-          {/* Celebration : confetti + logo anime */}
+          {/* Logo officiel Syléa + halo pulsant */}
           <div
             style={{
-              fontSize: 64,
-              textAlign: 'center',
-              marginBottom: 8,
-              animation: 'bounce 1.2s ease-out',
+              position: 'relative',
+              width: 96, height: 96,
+              margin: '0 auto 16px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              animation: 'sy-logo-in 0.9s ease-out',
             }}
           >
-            🎉
-          </div>
-          <div style={{ ...titleStyle, textAlign: 'center', fontSize: 22 }}>
-            C'est pret ! Bienvenue dans Syléa
-          </div>
-          <div style={{ ...subtitleStyle, textAlign: 'center' }}>
-            Ton assistant est installe sur ton ordinateur. Il peut maintenant
-            agir pour toi : ecrire des emails, prendre des notes, gerer ton
-            calendrier.
+            <div
+              style={{
+                position: 'absolute', inset: -10, borderRadius: '50%',
+                background: 'radial-gradient(circle, rgba(0, 200, 255, 0.25), transparent 65%)',
+                animation: 'sy-halo 2.4s ease-in-out infinite',
+              }}
+            />
+            <SyleaLogo size={84} animated />
           </div>
 
-          {/* Recapitulatif visuel des installations */}
+          <div style={{ ...titleStyle, textAlign: 'center', fontSize: 22 }}>
+            Systeme operationnel
+          </div>
           <div
             style={{
-              background:
-                'linear-gradient(135deg, rgba(6,182,212,0.06), rgba(139,92,246,0.06))',
-              border: '1px solid rgba(99,102,241,0.25)',
-              borderRadius: 14,
-              padding: '16px 18px',
-              marginBottom: 22,
-              fontSize: 13,
-              lineHeight: 1.9,
+              textAlign: 'center',
+              fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+              fontSize: 10,
+              letterSpacing: '0.24em',
+              color: '#00c8ff',
+              textTransform: 'uppercase',
+              marginBottom: 14,
             }}
           >
-            <div style={{ fontWeight: 700, marginBottom: 10, fontSize: 14 }}>
-              Ce que Syléa a installe pour toi
+            ▸ Initialisation terminee
+          </div>
+          <div style={{ ...subtitleStyle, textAlign: 'center' }}>
+            Syléa Agent tourne maintenant sur ton ordinateur. Elle peut ecrire
+            des emails, prendre des notes, gerer ton calendrier — et agir
+            directement sur tes fichiers locaux.
+          </div>
+
+          {/* Recapitulatif tech */}
+          <div
+            style={{
+              position: 'relative',
+              background: 'rgba(0, 200, 255, 0.04)',
+              border: '1px solid rgba(0, 200, 255, 0.2)',
+              borderRadius: 8,
+              padding: '16px 18px',
+              marginBottom: 20,
+              fontSize: 12.5,
+              lineHeight: 1.8,
+            }}
+          >
+            <div
+              style={{
+                fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+                fontSize: 10,
+                letterSpacing: '0.18em',
+                color: '#00c8ff',
+                textTransform: 'uppercase',
+                marginBottom: 10,
+              }}
+            >
+              ▸ Systeme · Statut
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ color: '#10b981', fontWeight: 700 }}>✓</span>
-              <span>
-                Le moteur <b>OpenClaw</b>
-                {openclawVersion ? <span style={{ opacity: 0.6 }}> (v{openclawVersion})</span> : null} — 38 outils de base
-              </span>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ color: '#10b981', fontWeight: 700 }}>✓</span>
-              <span>Une cle de securite unique pour ta machine</span>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ color: '#10b981', fontWeight: 700 }}>✓</span>
-              <span>
-                <b>{installedCount}</b> skill{installedCount > 1 ? 's' : ''} pour agir concretement
-                (calendrier, email, notes...)
-              </span>
-            </div>
+            <CheckLine>
+              <b>OpenClaw</b>
+              {openclawVersion ? (
+                <span style={{ opacity: 0.55, fontFamily: '"JetBrains Mono", monospace' }}>
+                  {' '}v{openclawVersion}
+                </span>
+              ) : null}
+              <span style={{ opacity: 0.6 }}> — 38 outils de base charges</span>
+            </CheckLine>
+            <CheckLine>
+              Cle de chiffrement locale — <b>256 bits</b>, unique a cette machine
+            </CheckLine>
+            <CheckLine>
+              <b>{installedCount}</b> skill{installedCount > 1 ? 's' : ''} installe{installedCount > 1 ? 's' : ''}
+              <span style={{ opacity: 0.6 }}> — calendrier · email · notes</span>
+            </CheckLine>
           </div>
 
           {/* Carte pedagogique : pourquoi ouvrir le site */}
           <div
             style={{
-              background: 'rgba(99,102,241,0.08)',
-              border: '1px dashed rgba(99,102,241,0.35)',
-              borderRadius: 12,
+              position: 'relative',
+              background: 'rgba(85, 32, 184, 0.08)',
+              border: '1px dashed rgba(129, 140, 248, 0.35)',
+              borderRadius: 8,
               padding: '14px 16px',
               marginBottom: 20,
-              fontSize: 13,
+              fontSize: 12.5,
               lineHeight: 1.6,
             }}
           >
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>
-              🔗 Derniere etape : relie ton compte
+            <div
+              style={{
+                fontFamily: '"JetBrains Mono", "Fira Code", monospace',
+                fontSize: 10, letterSpacing: '0.18em',
+                color: '#a5b4fc', textTransform: 'uppercase',
+                marginBottom: 6,
+              }}
+            >
+              ▸ Handshake requis
             </div>
             <div style={{ opacity: 0.85 }}>
-              Ouvre Syléa sur le web et connecte-toi. Des que c'est fait, un
-              petit point vert apparaitra en haut du site : ca veut dire que
-              Syléa et ton ordinateur se parlent.
+              Ouvre Syléa sur le web et connecte-toi avec le meme compte. Un
+              point vert apparaitra en haut du site : il confirme que l'agent
+              et l'app web sont relies en temps reel.
             </div>
           </div>
 
-          {/* Double CTA : bouton principal (web) + secondaire (lancer app) */}
+          {/* Double CTA */}
           <div
             style={{
               display: 'flex',
@@ -1081,44 +1258,39 @@ export default function OpenClawOnboarding({ onComplete }: OpenClawOnboardingPro
             <button
               style={{
                 ...primaryButton,
-                padding: '15px 32px',
-                fontSize: 15,
-                background:
-                  'linear-gradient(135deg, #06b6d4 0%, #6366f1 50%, #8b5cf6 100%)',
-                boxShadow: '0 4px 14px rgba(99,102,241,0.35)',
+                padding: '14px 28px',
+                fontSize: 13,
               }}
               onClick={openWebApp}
             >
-              🌐 Ouvrir Syléa sur le web
+              ▸ Ouvrir Syléa sur le web
             </button>
             <button
               style={{
-                background: 'transparent',
-                border: '1px solid rgba(99,102,241,0.3)',
-                color: 'rgba(255,255,255,0.85)',
-                padding: '10px 24px',
-                borderRadius: 10,
-                cursor: 'pointer',
-                fontSize: 13,
-                fontWeight: 500,
+                ...secondaryButton,
+                padding: '10px 20px',
+                fontSize: 11,
               }}
               onClick={finishOnboarding}
             >
-              Ou ouvrir directement l'app Syléa Agent
+              Lancer directement l'agent local
             </button>
           </div>
         </div>
 
-        {/* Animation de spinner globale + bounce pour le confetti */}
         <style>{`
           @keyframes spin {
             from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
+            to   { transform: rotate(360deg); }
           }
-          @keyframes bounce {
-            0%   { transform: scale(0); opacity: 0; }
-            50%  { transform: scale(1.25); opacity: 1; }
+          @keyframes sy-logo-in {
+            0%   { transform: scale(0.6); opacity: 0; }
+            60%  { transform: scale(1.08); opacity: 1; }
             100% { transform: scale(1); }
+          }
+          @keyframes sy-halo {
+            0%, 100% { opacity: 0.55; transform: scale(1); }
+            50%      { opacity: 0.9;  transform: scale(1.08); }
           }
         `}</style>
       </div>

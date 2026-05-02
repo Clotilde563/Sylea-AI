@@ -64,18 +64,24 @@ def _load_openclaw_token() -> str:
 
 OPENCLAW_TOKEN = _load_openclaw_token()
 
-# Timeouts
-OPENCLAW_TIMEOUT_SIMPLE = 120    # Chat simple
-OPENCLAW_TIMEOUT_AGENTIC = 300   # Taches avec outils (5 min)
-OPENCLAW_TIMEOUT_HEAVY = 600     # Taches lourdes (browser, multi-step) (10 min)
+# Timeouts (overridables via env vars pour ajuster sans redeployer)
+OPENCLAW_TIMEOUT_SIMPLE = int(os.environ.get("OPENCLAW_TIMEOUT_SIMPLE", "120"))    # Chat simple
+OPENCLAW_TIMEOUT_AGENTIC = int(os.environ.get("OPENCLAW_TIMEOUT_AGENTIC", "300"))  # Outils (5 min)
+OPENCLAW_TIMEOUT_HEAVY = int(os.environ.get("OPENCLAW_TIMEOUT_HEAVY", "600"))      # Multi-step (10 min)
 
 
 # ── Circuit Breaker ──────────────────────────────────────────────────────────
 
 class CircuitBreaker:
-    """Circuit breaker pattern : evite de marteler un service down."""
+    """Circuit breaker pattern : evite de marteler un service down.
 
-    def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 60.0):
+    Threadsafe en mode single-process + asyncio (pas besoin de lock car les
+    coroutines tournent dans un seul thread). Pour multi-worker gunicorn,
+    chaque worker aura ses propres breakers — acceptable (isole les pannes).
+    """
+
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 60.0, name: str = "global"):
+        self.name = name
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self._failure_count = 0
@@ -101,21 +107,342 @@ class CircuitBreaker:
         self._last_failure_time = self._time.time()
         if self._failure_count >= self.failure_threshold:
             self._state = "open"
-            logger.warning(f"Circuit breaker OPEN apres {self._failure_count} echecs")
+            logger.warning(f"Circuit breaker OPEN apres {self._failure_count} echecs (tool={self.name})")
 
     def can_execute(self) -> bool:
         return self.state != "open"
 
     def get_stats(self) -> dict:
         return {
+            "name": self.name,
             "state": self.state,
             "failures": self._failure_count,
             "threshold": self.failure_threshold,
         }
 
 
-# Instance globale
-_circuit_breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=60)
+# Instance globale (conservee pour compat + fallback : calls qui n'ont pas de tool_name).
+_circuit_breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=60, name="global")
+
+
+# Circuit breakers PER-TOOL : isolent les pannes. Si `browser` est down,
+# les autres outils (exec, fs, image_generate) continuent de marcher.
+# Lazy init dans `get_breaker_for_tool`.
+_per_tool_breakers: dict[str, CircuitBreaker] = {}
+import threading as _threading
+_per_tool_breakers_lock = _threading.Lock()
+
+
+def get_breaker_for_tool(tool_name: str) -> CircuitBreaker:
+    """Retourne le circuit breaker du tool_name donne (cree si absent)."""
+    b = _per_tool_breakers.get(tool_name)
+    if b is not None:
+        return b
+    with _per_tool_breakers_lock:
+        b = _per_tool_breakers.get(tool_name)
+        if b is None:
+            b = CircuitBreaker(failure_threshold=5, recovery_timeout=60, name=tool_name)
+            _per_tool_breakers[tool_name] = b
+    return b
+
+
+def get_all_breakers_stats() -> dict[str, dict]:
+    """Snapshot de tous les circuit breakers actifs (pour /metrics)."""
+    return {
+        "global": _circuit_breaker.get_stats(),
+        **{name: br.get_stats() for name, br in _per_tool_breakers.items()},
+    }
+
+
+# ── Metrics retry (counters in-memory, expose via endpoint) ──────────────────
+
+from collections import defaultdict as _defaultdict
+
+# Counter : (tool_name, event) -> count
+# Events : "attempt", "retry", "success", "failure", "timeout",
+#          "http_5xx", "circuit_open_rejected", "retry_after_honored"
+_retry_metrics: dict[tuple[str, str], int] = _defaultdict(int)
+_retry_metrics_lock = _threading.Lock()
+
+
+def _record_metric(tool_name: str, event: str, n: int = 1) -> None:
+    with _retry_metrics_lock:
+        _retry_metrics[(tool_name, event)] += n
+
+
+def get_retry_metrics() -> dict[str, int]:
+    """Snapshot des metrics. Format : 'tool__event' -> count. Pour /metrics."""
+    with _retry_metrics_lock:
+        return {f"{tool}__{event}": n for (tool, event), n in _retry_metrics.items()}
+
+
+def reset_retry_metrics() -> None:
+    """Utilitaire test — reset complet."""
+    with _retry_metrics_lock:
+        _retry_metrics.clear()
+
+
+# ── Latence par tool (sliding window, bounded) ───────────────────────────────
+#
+# Pour chaque tool, on garde les N dernieres durees d'appel reussi.
+# Permet de calculer p50/p95/p99 a la demande, sans exploser en memoire
+# (N * 38 tools = bornee).
+
+from collections import deque as _deque
+
+_LATENCY_WINDOW_SIZE = 100  # dernieres durees par tool
+_tool_latencies: dict[str, _deque[float]] = {}
+_tool_latencies_lock = _threading.Lock()
+
+
+def record_tool_latency(tool_name: str, duration_s: float) -> None:
+    """Enregistre la duree d'un appel tool (en secondes). Bounded window."""
+    if duration_s < 0 or duration_s > 3600:
+        return  # sanity check, ignore outliers aberrants
+    with _tool_latencies_lock:
+        dq = _tool_latencies.get(tool_name)
+        if dq is None:
+            dq = _deque(maxlen=_LATENCY_WINDOW_SIZE)
+            _tool_latencies[tool_name] = dq
+        dq.append(float(duration_s))
+
+
+def _percentile(sorted_values: list[float], p: float) -> float:
+    """p50/p95/p99 sur une liste triee. p dans [0, 100]."""
+    if not sorted_values:
+        return 0.0
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    k = (len(sorted_values) - 1) * (p / 100.0)
+    f = int(k)
+    c = min(f + 1, len(sorted_values) - 1)
+    return sorted_values[f] + (sorted_values[c] - sorted_values[f]) * (k - f)
+
+
+def get_tool_latency_stats() -> dict[str, dict[str, Any]]:
+    """Retourne les stats p50/p95/p99 + count par tool."""
+    out: dict[str, dict[str, Any]] = {}
+    with _tool_latencies_lock:
+        snapshot = {k: list(v) for k, v in _tool_latencies.items()}
+    for tool, vals in snapshot.items():
+        if not vals:
+            continue
+        sv = sorted(vals)
+        out[tool] = {
+            "count": len(sv),
+            "p50_ms": round(_percentile(sv, 50) * 1000, 1),
+            "p95_ms": round(_percentile(sv, 95) * 1000, 1),
+            "p99_ms": round(_percentile(sv, 99) * 1000, 1),
+            "min_ms": round(min(sv) * 1000, 1),
+            "max_ms": round(max(sv) * 1000, 1),
+            "avg_ms": round(sum(sv) / len(sv) * 1000, 1),
+        }
+    return out
+
+
+def reset_tool_latencies() -> None:
+    """Utilitaire test — reset complet."""
+    with _tool_latencies_lock:
+        _tool_latencies.clear()
+
+
+# ── Cost tracker per-tool (USD cumule par user + tool) ───────────────────────
+#
+# Couts des APIs externes appelees via les 38 outils OpenClaw. Differencie des
+# couts Claude/Anthropic qui sont trackes separement dans le cost monitor
+# principal (par tokens input/output). Ici on track :
+#   - cumul USD par (user_id, tool) — diagnostic fin
+#   - cumul USD par user (pour le cost cap global user)
+#   - compteur de calls par (user_id, tool)
+
+_external_cost_by_user_tool: dict[tuple[str, str], float] = _defaultdict(float)
+_external_calls_by_user_tool: dict[tuple[str, str], int] = _defaultdict(int)
+_external_cost_lock = _threading.Lock()
+
+
+def record_external_cost(user_id: str, tool_name: str, cost_usd: float) -> None:
+    """Enregistre le cout externe d'un appel outil OpenClaw reussi."""
+    if cost_usd <= 0:
+        # Incrementer quand meme le compteur d'appels (pour metriques).
+        with _external_cost_lock:
+            _external_calls_by_user_tool[(user_id or "anon", tool_name)] += 1
+        return
+    with _external_cost_lock:
+        _external_cost_by_user_tool[(user_id or "anon", tool_name)] += float(cost_usd)
+        _external_calls_by_user_tool[(user_id or "anon", tool_name)] += 1
+
+
+def get_external_cost_for_user(user_id: str) -> dict[str, Any]:
+    """Retourne le breakdown des couts externes d'un user.
+
+    Format :
+      {
+        "total_usd": float,
+        "by_tool": {tool_name: {"usd": float, "calls": int}, ...},
+      }
+    """
+    uid = user_id or "anon"
+    with _external_cost_lock:
+        by_tool: dict[str, dict[str, Any]] = {}
+        total = 0.0
+        for (u, tool), usd in _external_cost_by_user_tool.items():
+            if u != uid:
+                continue
+            by_tool[tool] = {
+                "usd": round(usd, 5),
+                "calls": _external_calls_by_user_tool.get((u, tool), 0),
+            }
+            total += usd
+        # Ajouter les tools a cout 0 mais appeles
+        for (u, tool), calls in _external_calls_by_user_tool.items():
+            if u != uid or tool in by_tool:
+                continue
+            by_tool[tool] = {"usd": 0.0, "calls": calls}
+    return {"total_usd": round(total, 5), "by_tool": by_tool}
+
+
+def get_external_cost_global() -> dict[str, Any]:
+    """Snapshot global (tous users). Pour /api/agent3/metrics."""
+    with _external_cost_lock:
+        return {
+            "total_by_user": {
+                u: round(sum(
+                    usd for (uu, _t), usd in _external_cost_by_user_tool.items() if uu == u
+                ), 5)
+                for u in {uu for (uu, _t) in _external_cost_by_user_tool.keys()}
+            },
+            "total_calls": sum(_external_calls_by_user_tool.values()),
+        }
+
+
+def reset_external_cost() -> None:
+    """Utilitaire test — reset complet."""
+    with _external_cost_lock:
+        _external_cost_by_user_tool.clear()
+        _external_calls_by_user_tool.clear()
+
+
+# ── Cost cap journalier per-user (protection financiere) ────────────────────
+#
+# Tracker separe pour le cumul du JOUR courant (reset a minuit UTC).
+# Format : dict[(user_id, date_str), cumul_usd]
+# Sert a :
+#   1. Bloquer les appels au-dessus de la limite (hard block).
+#   2. Warner l'utilisateur a 80% de la limite (soft alert).
+
+import datetime as _dt
+
+_daily_cost_by_user: dict[tuple[str, str], float] = _defaultdict(float)
+_daily_cost_lock = _threading.Lock()
+
+# Cap USD/jour par defaut si le user n'a pas defini le sien. Raisonnable pour
+# eviter les boucles infinies costly (ex: 10 video_generate a $0.50 = $5).
+DEFAULT_DAILY_COST_CAP_USD = 5.0
+
+# Warning emis une seule fois par jour/user a 80% (via flag persistent in-mem).
+_daily_warning_emitted: set[tuple[str, str]] = set()
+
+
+def _today_utc_str() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+
+
+def check_daily_cost_cap(
+    user_id: str, projected_cost_usd: float, cap_usd: float,
+) -> tuple[bool, float, float]:
+    """Verifie si l'ajout d'un cout projete depasse le cap journalier.
+
+    Returns (allowed, current_total, percentage_used).
+      - allowed=True si current_total + projected_cost_usd <= cap_usd.
+      - current_total = cumul du jour AVANT ce nouvel appel.
+      - percentage_used = (current_total + projected) / cap * 100.
+    """
+    if cap_usd <= 0:
+        return True, 0.0, 0.0  # cap desactive
+    uid = user_id or "anon"
+    key = (uid, _today_utc_str())
+    with _daily_cost_lock:
+        current = _daily_cost_by_user.get(key, 0.0)
+    new_total = current + projected_cost_usd
+    pct = (new_total / cap_usd) * 100.0
+    return new_total <= cap_usd, current, pct
+
+
+def record_daily_cost(user_id: str, cost_usd: float) -> None:
+    """Incremente le cumul journalier apres un appel reussi."""
+    if cost_usd <= 0:
+        return
+    uid = user_id or "anon"
+    key = (uid, _today_utc_str())
+    with _daily_cost_lock:
+        _daily_cost_by_user[key] += float(cost_usd)
+
+
+def get_daily_cost_for_user(user_id: str) -> float:
+    """Cumul USD consomme par ce user aujourd'hui (UTC)."""
+    uid = user_id or "anon"
+    key = (uid, _today_utc_str())
+    with _daily_cost_lock:
+        return float(_daily_cost_by_user.get(key, 0.0))
+
+
+def should_emit_warning_once(user_id: str) -> bool:
+    """True si on doit emettre le warning 80% (une seule fois par jour/user)."""
+    uid = user_id or "anon"
+    key = (uid, _today_utc_str())
+    with _daily_cost_lock:
+        if key in _daily_warning_emitted:
+            return False
+        _daily_warning_emitted.add(key)
+        return True
+
+
+def reset_daily_cost() -> None:
+    """Utilitaire test — reset complet."""
+    with _daily_cost_lock:
+        _daily_cost_by_user.clear()
+        _daily_warning_emitted.clear()
+
+
+# ── Retry helpers ────────────────────────────────────────────────────────────
+
+import random as _random
+
+
+def _compute_backoff_with_jitter(attempt: int, base: float = 1.0, cap: float = 30.0) -> float:
+    """Full jitter backoff (AWS pattern) : backoff = random(0, min(cap, base * 2^attempt)).
+
+    Pourquoi full jitter et pas un backoff deterministe :
+      - Des milliers de clients qui se synchronisent sur le meme 503 vont
+        retry AU MEME INSTANT avec un backoff fixe -> thundering herd qui
+        re-cogne le serveur des qu'il remonte.
+      - Full jitter etale les retries uniformement sur [0, cap], eliminant
+        la synchronisation. Demontree optimale par AWS Arch Blog 2015.
+    """
+    max_backoff = min(cap, base * (2 ** attempt))
+    return _random.uniform(0.0, max_backoff)
+
+
+def _parse_retry_after(header_value: str, cap: float = 30.0) -> float | None:
+    """Parse le header Retry-After (seconds seulement, HTTP-date ignore).
+
+    Retourne None si le header est absent ou mal forme. Cap a `cap` secondes
+    pour eviter qu'un serveur mal configure bloque la session trop longtemps.
+    """
+    if not header_value:
+        return None
+    header_value = header_value.strip()
+    if not header_value:
+        return None
+    try:
+        secs = float(header_value)
+        if secs < 0:
+            return None
+        return min(secs, cap)
+    except ValueError:
+        # HTTP-date (RFC 7231) : "Wed, 21 Oct 2015 07:28:00 GMT"
+        # Support non implemente (rare en pratique) — on fallback sur le jitter.
+        return None
 
 
 @dataclass
@@ -153,10 +480,76 @@ def _build_headers(session_key: str | None = None) -> dict:
         headers["Authorization"] = f"Bearer {token}"
     if session_key:
         headers["x-openclaw-session-key"] = session_key
+    # OpenClaw 2026.3+ : les endpoints HTTP /v1/chat/completions et /v1/tools/*
+    # exigent un header `x-openclaw-scopes` (sinon 403 "missing scope:
+    # operator.write"). Le client doit DECLARER quels scopes il veut utiliser.
+    # On declare l'ensemble des scopes operator (lecture + ecriture + admin
+    # + approvals + pairing) pour debloquer chat.send, chat.tools, agents.run,
+    # files.read, etc. Source : openclaw/dist/gateway-cli-*.js ligne 20513.
+    headers["x-openclaw-scopes"] = (
+        "operator.admin,operator.read,operator.write,"
+        "operator.approvals,operator.pairing"
+    )
     return headers
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
+
+# Cache TTL de l'etat up/down du Gateway pour ne pas spammer /health a chaque
+# requete. 30s est un compromis : assez court pour detecter un Gateway down
+# sans delai genant, assez long pour ne pas marteler le ping.
+_GATEWAY_HEALTH_CACHE_TTL_S = 30.0
+_gateway_health_cache: dict[str, Any] = {
+    "is_up": None,        # bool | None (None = jamais check)
+    "checked_at": 0.0,
+    "last_error": "",
+}
+
+
+async def is_gateway_up(force_refresh: bool = False) -> bool:
+    """Verifie si le Gateway OpenClaw est joignable, avec cache TTL 30s.
+
+    Utilise au demarrage d'une session /chat/native pour decider si on expose
+    les 38 outils OpenClaw directs au LLM. Si down, on reduit le perimetre
+    (natifs + skills ClawHub seulement) et on emet un event UI pour prevenir.
+    """
+    import time as _time
+    now = _time.time()
+    if (
+        not force_refresh
+        and _gateway_health_cache["is_up"] is not None
+        and now - _gateway_health_cache["checked_at"] < _GATEWAY_HEALTH_CACHE_TTL_S
+    ):
+        return bool(_gateway_health_cache["is_up"])
+
+    try:
+        # Timeout court (3s) pour ne pas bloquer la requete si Gateway down hard.
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            headers = _build_headers()
+            resp = await client.get(f"{OPENCLAW_GATEWAY_URL}/health", headers=headers)
+            is_up = resp.status_code == 200
+            err = "" if is_up else f"HTTP {resp.status_code}"
+    except Exception as e:
+        is_up = False
+        err = f"{type(e).__name__}: {str(e)[:120]}"
+
+    _gateway_health_cache["is_up"] = is_up
+    _gateway_health_cache["checked_at"] = now
+    _gateway_health_cache["last_error"] = err
+    if not is_up:
+        logger.warning(f"OpenClaw Gateway indisponible : {err}")
+    return is_up
+
+
+def get_gateway_health_status() -> dict[str, Any]:
+    """Snapshot de l'etat du health cache (pour /api/agent3/metrics)."""
+    return {
+        "is_up": _gateway_health_cache["is_up"],
+        "checked_at": _gateway_health_cache["checked_at"],
+        "ttl_s": _GATEWAY_HEALTH_CACHE_TTL_S,
+        "last_error": _gateway_health_cache["last_error"],
+    }
+
 
 async def openclaw_health() -> dict:
     """Verifie si le Gateway OpenClaw est accessible."""
@@ -193,6 +586,12 @@ async def openclaw_health() -> dict:
 
 # ── Tool invocation directe (payload corrige) ────────────────────────────────
 
+_OPENCLAW_RETRY_STATUS: tuple[int, ...] = (502, 503, 504)
+_OPENCLAW_RETRY_AFTER_STATUS: tuple[int, ...] = (429, 503)  # status qui peuvent renvoyer Retry-After
+_OPENCLAW_MAX_RETRIES: int = 2
+_OPENCLAW_RETRY_AFTER_CAP_S: float = 30.0
+
+
 async def openclaw_invoke_tool(
     tool_name: str,
     action: str = "default",
@@ -201,8 +600,27 @@ async def openclaw_invoke_tool(
 ) -> dict:
     """
     Invoque un outil OpenClaw directement via /tools/invoke.
-    Payload corrige : {tool, action, args, sessionKey}
+    Payload corrige : {tool, action, args, sessionKey}.
+
+    Robustesse (4 couches) :
+      1. Circuit breaker PER-TOOL : isole les pannes (browser down != exec down).
+      2. Retry 2x sur transients (502/503/504/timeout).
+      3. Full jitter : random(0, min(30, 2^attempt)) -> pas de thundering herd
+         quand N clients retry en meme temps (scalable a des milliers).
+      4. Respect du header Retry-After sur 429/503 (cap 30s) pour ne pas
+         DoS un serveur rate-limite.
+
+    Metrics : counters incrementes pour chaque event (attempt/retry/failure/...),
+    accessibles via /api/agent3/metrics (cf. endpoint router).
     """
+    breaker = get_breaker_for_tool(tool_name)
+    if not breaker.can_execute():
+        _record_metric(tool_name, "circuit_open_rejected")
+        return {
+            "success": False,
+            "error": f"Outil '{tool_name}' temporairement indisponible (5+ echecs recents). Reessaie dans <1 min.",
+        }
+
     headers = _build_headers(session_key)
     payload = {
         "tool": tool_name,
@@ -212,18 +630,101 @@ async def openclaw_invoke_tool(
     if session_key:
         payload["sessionKey"] = session_key
 
-    try:
-        async with httpx.AsyncClient(timeout=OPENCLAW_TIMEOUT_AGENTIC) as client:
-            resp = await client.post(
-                f"{OPENCLAW_GATEWAY_URL}/tools/invoke",
-                headers=headers,
-                json=payload,
-            )
-            if resp.status_code == 200:
-                return {"success": True, "result": resp.json()}
-            return {"success": False, "error": f"Status {resp.status_code}: {resp.text[:300]}"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    import time as _time
+    attempt = 0
+    last_err = ""
+    _record_metric(tool_name, "attempt")
+    _start_ts = _time.time()
+    while attempt <= _OPENCLAW_MAX_RETRIES:
+        try:
+            async with httpx.AsyncClient(timeout=OPENCLAW_TIMEOUT_AGENTIC) as client:
+                resp = await client.post(
+                    f"{OPENCLAW_GATEWAY_URL}/tools/invoke",
+                    headers=headers,
+                    json=payload,
+                )
+
+                # Succes : reset le breaker, enregistre la duree totale (incluant retries), retourne.
+                if resp.status_code == 200:
+                    _record_metric(tool_name, "success")
+                    breaker.record_success()
+                    record_tool_latency(tool_name, _time.time() - _start_ts)
+                    return {"success": True, "result": resp.json()}
+
+                # 429/503 : respecter Retry-After si fourni, sinon jitter.
+                if resp.status_code in _OPENCLAW_RETRY_AFTER_STATUS and attempt < _OPENCLAW_MAX_RETRIES:
+                    _record_metric(tool_name, f"http_{resp.status_code}")
+                    ra = _parse_retry_after(
+                        resp.headers.get("retry-after", ""),
+                        cap=_OPENCLAW_RETRY_AFTER_CAP_S,
+                    )
+                    if ra is not None:
+                        backoff = ra
+                        _record_metric(tool_name, "retry_after_honored")
+                        logger.info(
+                            f"OpenClaw {tool_name} status {resp.status_code}, "
+                            f"Retry-After={ra}s (attempt {attempt + 1})"
+                        )
+                    else:
+                        backoff = _compute_backoff_with_jitter(attempt)
+                        logger.info(
+                            f"OpenClaw {tool_name} status {resp.status_code}, "
+                            f"jitter backoff {backoff:.2f}s (attempt {attempt + 1})"
+                        )
+                    _record_metric(tool_name, "retry")
+                    await asyncio.sleep(backoff)
+                    attempt += 1
+                    continue
+
+                # 502/504 : jitter backoff standard (pas de Retry-After attendu).
+                if resp.status_code in _OPENCLAW_RETRY_STATUS and attempt < _OPENCLAW_MAX_RETRIES:
+                    _record_metric(tool_name, f"http_{resp.status_code}")
+                    backoff = _compute_backoff_with_jitter(attempt)
+                    logger.info(
+                        f"OpenClaw {tool_name} status {resp.status_code}, "
+                        f"jitter backoff {backoff:.2f}s (attempt {attempt + 1})"
+                    )
+                    _record_metric(tool_name, "retry")
+                    await asyncio.sleep(backoff)
+                    attempt += 1
+                    continue
+
+                # Autre 4xx/5xx : echec final, pas de retry.
+                last_err = f"Status {resp.status_code}: {resp.text[:300]}"
+                _record_metric(tool_name, f"http_{resp.status_code}")
+                _record_metric(tool_name, "failure")
+                breaker.record_failure()
+                record_tool_latency(tool_name, _time.time() - _start_ts)
+                return {"success": False, "error": last_err}
+
+        except httpx.TimeoutException:
+            _record_metric(tool_name, "timeout")
+            if attempt < _OPENCLAW_MAX_RETRIES:
+                backoff = _compute_backoff_with_jitter(attempt)
+                logger.info(
+                    f"OpenClaw {tool_name} timeout, jitter backoff {backoff:.2f}s "
+                    f"(attempt {attempt + 1})"
+                )
+                _record_metric(tool_name, "retry")
+                await asyncio.sleep(backoff)
+                attempt += 1
+                continue
+            _record_metric(tool_name, "failure")
+            breaker.record_failure()
+            record_tool_latency(tool_name, _time.time() - _start_ts)
+            return {"success": False, "error": "Timeout apres retries"}
+
+        except Exception as e:
+            _record_metric(tool_name, "failure")
+            breaker.record_failure()
+            record_tool_latency(tool_name, _time.time() - _start_ts)
+            return {"success": False, "error": str(e)}
+
+    # Epuise les retries (cas edge : boucle sort sans return)
+    _record_metric(tool_name, "failure")
+    breaker.record_failure()
+    record_tool_latency(tool_name, _time.time() - _start_ts)
+    return {"success": False, "error": last_err or "Echec apres retries"}
 
 
 # ── Chat via CLI subprocess (methode principale — a les bons scopes) ─────────
@@ -1299,42 +1800,531 @@ async def openclaw_list_models() -> list[dict]:
     return []
 
 
+# ── Phase 3 — Nouveaux wrappers (12 tools) ───────────────────────────────────
+#
+# Chaque wrapper fait UN appel HTTP ou UN invoke OpenClaw, avec :
+#   - un timeout adapte (plus court pour search, plus long pour media)
+#   - gestion des erreurs unifiee (retour dict {success, data, error})
+#   - fallback sur openclaw_invoke_tool quand une cle API directe n'est pas fournie
+#
+# Tous les wrappers sont sync-safe et peuvent etre appeles depuis un endpoint
+# FastAPI sans blocage grace a httpx.AsyncClient / asyncio.to_thread.
+
+
+# ─── Search engines (6) ──────────────────────────────────────────────────────
+
+async def openclaw_firecrawl(
+    url: str,
+    mode: str = "scrape",  # "scrape" (1 page) | "crawl" (site entier)
+    max_pages: int = 20,
+    session_key: str | None = None,
+) -> dict:
+    """
+    Crawl ou scrape d'une URL via Firecrawl.
+    Mode "scrape" : retourne le markdown d'une page unique.
+    Mode "crawl"  : parcourt le site jusqu'a `max_pages`.
+    """
+    api_key = os.environ.get("FIRECRAWL_API_KEY", "")
+    if api_key:
+        endpoint = "scrape" if mode == "scrape" else "crawl"
+        payload = {"url": url}
+        if mode == "crawl":
+            payload["limit"] = max_pages
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"https://api.firecrawl.dev/v1/{endpoint}",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+                if resp.status_code in (200, 201, 202):
+                    return {"success": True, "source": "firecrawl_api", "data": resp.json()}
+                return {"success": False, "source": "firecrawl_api",
+                        "error": f"Status {resp.status_code}: {resp.text[:200]}"}
+        except Exception as e:
+            logger.warning(f"firecrawl API echoue: {e}")
+    # Fallback via OpenClaw invoke
+    return await openclaw_invoke_tool(
+        tool_name="firecrawl",
+        action=mode,
+        args={"url": url, "limit": max_pages},
+        session_key=session_key,
+    )
+
+
+async def openclaw_perplexity_search(
+    query: str,
+    max_results: int = 10,
+    recency: str | None = None,  # "day" | "week" | "month" | "year"
+    session_key: str | None = None,
+) -> dict:
+    """
+    Recherche via Perplexity AI — retourne une reponse synthese + citations.
+    """
+    api_key = os.environ.get("PERPLEXITY_API_KEY", "")
+    if api_key:
+        payload = {
+            "model": "llama-3.1-sonar-small-128k-online",
+            "messages": [{"role": "user", "content": query}],
+            "return_citations": True,
+            "return_images": False,
+        }
+        if recency:
+            payload["search_recency_filter"] = recency
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "https://api.perplexity.ai/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    citations = data.get("citations", [])[:max_results]
+                    return {"success": True, "source": "perplexity_api",
+                            "answer": answer, "citations": citations, "raw": data}
+                return {"success": False, "source": "perplexity_api",
+                        "error": f"Status {resp.status_code}: {resp.text[:200]}"}
+        except Exception as e:
+            logger.warning(f"perplexity API echoue: {e}")
+    # Fallback via OpenClaw invoke
+    return await openclaw_invoke_tool(
+        tool_name="perplexity_search",
+        action="default",
+        args={"query": query, "max_results": max_results},
+        session_key=session_key,
+    )
+
+
+async def openclaw_brave_search(
+    query: str,
+    max_results: int = 10,
+    country: str = "fr",
+    session_key: str | None = None,
+) -> dict:
+    """Recherche web via Brave Search API (privacy-first)."""
+    api_key = os.environ.get("BRAVE_SEARCH_API_KEY", "")
+    if api_key:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    "https://api.search.brave.com/res/v1/web/search",
+                    headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
+                    params={"q": query, "count": max_results, "country": country},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    results = [
+                        {"title": r.get("title"), "url": r.get("url"),
+                         "description": r.get("description")}
+                        for r in data.get("web", {}).get("results", [])[:max_results]
+                    ]
+                    return {"success": True, "source": "brave_api",
+                            "query": query, "results": results}
+                return {"success": False, "source": "brave_api",
+                        "error": f"Status {resp.status_code}"}
+        except Exception as e:
+            logger.warning(f"brave_search API echoue: {e}")
+    return await openclaw_invoke_tool(
+        tool_name="brave_search",
+        action="default",
+        args={"query": query, "count": max_results},
+        session_key=session_key,
+    )
+
+
+async def openclaw_google_search(
+    query: str,
+    max_results: int = 10,
+    session_key: str | None = None,
+) -> dict:
+    """Recherche Google via SerpAPI."""
+    api_key = os.environ.get("SERPAPI_API_KEY", "")
+    if api_key:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    "https://serpapi.com/search",
+                    params={"q": query, "num": max_results,
+                            "api_key": api_key, "engine": "google"},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    results = [
+                        {"title": r.get("title"), "url": r.get("link"),
+                         "description": r.get("snippet")}
+                        for r in data.get("organic_results", [])[:max_results]
+                    ]
+                    return {"success": True, "source": "serpapi",
+                            "query": query, "results": results}
+                return {"success": False, "source": "serpapi",
+                        "error": f"Status {resp.status_code}"}
+        except Exception as e:
+            logger.warning(f"google_search API echoue: {e}")
+    return await openclaw_invoke_tool(
+        tool_name="google_search",
+        action="default",
+        args={"query": query, "num": max_results},
+        session_key=session_key,
+    )
+
+
+async def openclaw_tavily_search(
+    query: str,
+    max_results: int = 10,
+    search_depth: str = "basic",  # "basic" | "advanced"
+    session_key: str | None = None,
+) -> dict:
+    """Recherche agentic RAG via Tavily — optimise pour agents LLM."""
+    api_key = os.environ.get("TAVILY_API_KEY", "")
+    if api_key:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "https://api.tavily.com/search",
+                    json={"api_key": api_key, "query": query,
+                          "max_results": max_results, "search_depth": search_depth,
+                          "include_answer": True},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return {"success": True, "source": "tavily_api",
+                            "query": query, "answer": data.get("answer", ""),
+                            "results": data.get("results", [])[:max_results]}
+                return {"success": False, "source": "tavily_api",
+                        "error": f"Status {resp.status_code}"}
+        except Exception as e:
+            logger.warning(f"tavily_search API echoue: {e}")
+    return await openclaw_invoke_tool(
+        tool_name="tavily_search",
+        action="default",
+        args={"query": query, "max_results": max_results},
+        session_key=session_key,
+    )
+
+
+async def openclaw_exa_search(
+    query: str,
+    max_results: int = 10,
+    search_type: str = "neural",  # "neural" | "keyword"
+    session_key: str | None = None,
+) -> dict:
+    """Recherche neurale semantique via Exa (ex-Metaphor)."""
+    api_key = os.environ.get("EXA_API_KEY", "")
+    if api_key:
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(
+                    "https://api.exa.ai/search",
+                    headers={"x-api-key": api_key, "Content-Type": "application/json"},
+                    json={"query": query, "numResults": max_results,
+                          "type": search_type, "contents": {"text": True}},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    results = [
+                        {"title": r.get("title"), "url": r.get("url"),
+                         "description": r.get("text", "")[:300]}
+                        for r in data.get("results", [])[:max_results]
+                    ]
+                    return {"success": True, "source": "exa_api",
+                            "query": query, "results": results}
+                return {"success": False, "source": "exa_api",
+                        "error": f"Status {resp.status_code}"}
+        except Exception as e:
+            logger.warning(f"exa_search API echoue: {e}")
+    return await openclaw_invoke_tool(
+        tool_name="exa_search",
+        action="default",
+        args={"query": query, "num_results": max_results},
+        session_key=session_key,
+    )
+
+
+# ─── Media generation (3) ────────────────────────────────────────────────────
+
+async def openclaw_music_generate(
+    prompt: str,
+    duration_seconds: int = 30,
+    style: str | None = None,
+    session_key: str | None = None,
+) -> dict:
+    """
+    Generation de musique / piste audio.
+    Utilise OpenClaw invoke (le Gateway connait Suno / MusicGen / Stability Audio).
+    """
+    args = {"prompt": prompt, "duration": duration_seconds}
+    if style:
+        args["style"] = style
+    return await openclaw_invoke_tool(
+        tool_name="music_generate",
+        action="default",
+        args=args,
+        session_key=session_key,
+    )
+
+
+async def openclaw_video_generate(
+    prompt: str,
+    duration_seconds: int = 5,
+    aspect_ratio: str = "16:9",
+    session_key: str | None = None,
+) -> dict:
+    """Generation de clip video court (Runway / Pika)."""
+    return await openclaw_invoke_tool(
+        tool_name="video_generate",
+        action="default",
+        args={"prompt": prompt, "duration": duration_seconds,
+              "aspectRatio": aspect_ratio},
+        session_key=session_key,
+    )
+
+
+async def openclaw_voice_generate(
+    text: str,
+    voice: str = "alloy",  # alloy, echo, fable, onyx, nova, shimmer (OpenAI)
+    provider: str = "openai",  # "openai" | "elevenlabs"
+    session_key: str | None = None,
+) -> dict:
+    """Synthese vocale TTS haute fidelite (OpenAI TTS ou ElevenLabs)."""
+    # OpenAI TTS (direct, plus simple si cle fournie)
+    if provider == "openai":
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        if api_key:
+            try:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.post(
+                        "https://api.openai.com/v1/audio/speech",
+                        headers={"Authorization": f"Bearer {api_key}",
+                                 "Content-Type": "application/json"},
+                        json={"model": "tts-1-hd", "input": text, "voice": voice},
+                    )
+                    if resp.status_code == 200:
+                        import base64
+                        audio_b64 = base64.b64encode(resp.content).decode("ascii")
+                        return {"success": True, "source": "openai_tts",
+                                "audio_base64": audio_b64, "voice": voice,
+                                "length_bytes": len(resp.content)}
+                    return {"success": False, "source": "openai_tts",
+                            "error": f"Status {resp.status_code}: {resp.text[:200]}"}
+            except Exception as e:
+                logger.warning(f"openai_tts echoue: {e}")
+    # Fallback OpenClaw
+    return await openclaw_invoke_tool(
+        tool_name="voice_generate",
+        action="default",
+        args={"text": text, "voice": voice, "provider": provider},
+        session_key=session_key,
+    )
+
+
+# ─── Safety / guardrails (3) ─────────────────────────────────────────────────
+
+async def openclaw_content_moderation(
+    text: str,
+    session_key: str | None = None,
+) -> dict:
+    """
+    Moderation de contenu — detecte toxicite, harm, auto-harm, violence.
+    Utilise OpenAI Moderation (gratuit) si OPENAI_API_KEY dispo,
+    sinon fallback OpenClaw.
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if api_key:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    "https://api.openai.com/v1/moderations",
+                    headers={"Authorization": f"Bearer {api_key}",
+                             "Content-Type": "application/json"},
+                    json={"input": text, "model": "omni-moderation-latest"},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    result = data.get("results", [{}])[0]
+                    flagged = bool(result.get("flagged", False))
+                    categories = result.get("categories", {})
+                    scores = result.get("category_scores", {})
+                    # Liste des categories actives
+                    active = [cat for cat, is_on in categories.items() if is_on]
+                    return {"success": True, "source": "openai_moderation",
+                            "flagged": flagged, "categories_flagged": active,
+                            "scores": scores, "raw": data}
+                return {"success": False, "source": "openai_moderation",
+                        "error": f"Status {resp.status_code}"}
+        except Exception as e:
+            logger.warning(f"content_moderation API echoue: {e}")
+    return await openclaw_invoke_tool(
+        tool_name="content_moderation",
+        action="default",
+        args={"text": text},
+        session_key=session_key,
+    )
+
+
+async def openclaw_url_safety_check(
+    url: str,
+    session_key: str | None = None,
+) -> dict:
+    """
+    Verifie la reputation d'une URL (phishing / malware).
+    Utilise Google Safe Browsing si GOOGLE_SAFE_BROWSING_API_KEY dispo.
+    """
+    api_key = os.environ.get("GOOGLE_SAFE_BROWSING_API_KEY", "")
+    if api_key:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                payload = {
+                    "client": {"clientId": "sylea", "clientVersion": "1.0"},
+                    "threatInfo": {
+                        "threatTypes": [
+                            "MALWARE", "SOCIAL_ENGINEERING",
+                            "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION",
+                        ],
+                        "platformTypes": ["ANY_PLATFORM"],
+                        "threatEntryTypes": ["URL"],
+                        "threatEntries": [{"url": url}],
+                    },
+                }
+                resp = await client.post(
+                    f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={api_key}",
+                    json=payload,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    matches = data.get("matches", [])
+                    is_safe = len(matches) == 0
+                    return {"success": True, "source": "google_safebrowsing",
+                            "url": url, "is_safe": is_safe,
+                            "threats": [m.get("threatType") for m in matches]}
+                return {"success": False, "source": "google_safebrowsing",
+                        "error": f"Status {resp.status_code}"}
+        except Exception as e:
+            logger.warning(f"url_safety_check API echoue: {e}")
+    return await openclaw_invoke_tool(
+        tool_name="url_safety_check",
+        action="default",
+        args={"url": url},
+        session_key=session_key,
+    )
+
+
+async def openclaw_pii_scrub(
+    text: str,
+    redact: bool = True,
+    session_key: str | None = None,
+) -> dict:
+    """
+    Detecte + optionnellement redacte les PII (email, tel, IBAN, CB, NSS).
+    Implementation locale via regex (rapide, pas de cle API requise).
+    Fallback OpenClaw pour detection plus avancee si dispo.
+    """
+    import re
+
+    patterns = {
+        "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b",
+        "phone_fr": r"(?:\+33|0)[1-9](?:[\s.-]?\d{2}){4}",
+        "phone_intl": r"\+\d{1,3}[\s.-]?\d{4,14}",
+        "iban": r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b",
+        "credit_card": r"\b(?:\d[ -]*?){13,16}\b",
+        "nss_fr": r"\b[12]\s?\d{2}\s?\d{2}\s?\d{2}\s?\d{3}\s?\d{3}\s?\d{2}\b",
+        "ipv4": r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\b",
+    }
+
+    findings: dict[str, list[str]] = {}
+    scrubbed = text
+    for pii_type, pattern in patterns.items():
+        matches = re.findall(pattern, text)
+        if matches:
+            findings[pii_type] = matches
+            if redact:
+                scrubbed = re.sub(pattern, f"[REDACTED:{pii_type}]", scrubbed)
+
+    return {
+        "success": True,
+        "source": "local_regex",
+        "has_pii": bool(findings),
+        "findings": findings,
+        "total_matches": sum(len(v) for v in findings.values()),
+        "scrubbed_text": scrubbed if redact else None,
+    }
+
+
 # ── Gateway capabilities (dynamiques) ────────────────────────────────────────
 
-# Liste complete des outils OpenClaw connus
+# Liste complete des outils OpenClaw connus (Phase 3 : 38 tools)
+#
+# Repartition par groupe :
+#   - web (9)        : recherche / fetch web + search engines specialises
+#   - ui (2)         : browser + canvas
+#   - runtime (3)    : exec / bash / process
+#   - fs (4)         : read / write / edit / apply_patch
+#   - sessions (4)   : spawn / send / list / history
+#   - memory (2)     : memory_search / memory_get
+#   - automation (2) : cron / gateway
+#   - messaging (1)  : message
+#   - media (5)      : image / image_generate / music / video / voice
+#   - safety (3)     : moderation / url_safety / pii_scrub
+#   - special (3)    : llm_task / lobster / subagents
+# Total : 38
 ALL_OPENCLAW_TOOLS = [
-    # group:web
+    # ── group:web (9) — recherche / fetch / search engines ──────────────
     {"name": "web_search", "group": "web", "description": "Recherche web via DuckDuckGo"},
     {"name": "web_fetch", "group": "web", "description": "Recuperer le contenu d'une URL"},
     {"name": "x_search", "group": "web", "description": "Recherche X/Twitter via xAI Grok"},
-    # group:ui
+    {"name": "firecrawl", "group": "web", "description": "Crawl multi-pages avec extraction structuree (Firecrawl)"},
+    {"name": "perplexity_search", "group": "web", "description": "Recherche IA avec citations (Perplexity)"},
+    {"name": "brave_search", "group": "web", "description": "Recherche privacy-first (Brave Search API)"},
+    {"name": "google_search", "group": "web", "description": "Recherche Google (SerpAPI / Custom Search)"},
+    {"name": "tavily_search", "group": "web", "description": "Recherche agentic RAG optimisee (Tavily)"},
+    {"name": "exa_search", "group": "web", "description": "Recherche neurale semantique (Exa / Metaphor)"},
+
+    # ── group:ui (2) ────────────────────────────────────────────────────
     {"name": "browser", "group": "ui", "description": "Navigation web Chrome, screenshots, formulaires, scraping"},
     {"name": "canvas", "group": "ui", "description": "Visualisation, presentations, diagrammes"},
-    # group:runtime
+
+    # ── group:runtime (3) ───────────────────────────────────────────────
     {"name": "exec", "group": "runtime", "description": "Executer des commandes shell"},
     {"name": "bash", "group": "runtime", "description": "Terminal bash interactif"},
     {"name": "process", "group": "runtime", "description": "Gestion des processus systeme"},
-    # group:fs
+
+    # ── group:fs (4) ────────────────────────────────────────────────────
     {"name": "read", "group": "fs", "description": "Lire un fichier"},
     {"name": "write", "group": "fs", "description": "Ecrire un fichier"},
     {"name": "edit", "group": "fs", "description": "Modifier un fichier existant"},
     {"name": "apply_patch", "group": "fs", "description": "Appliquer un patch diff"},
-    # group:sessions
+
+    # ── group:sessions (4) ──────────────────────────────────────────────
     {"name": "sessions_spawn", "group": "sessions", "description": "Lancer un sous-agent autonome"},
     {"name": "sessions_send", "group": "sessions", "description": "Envoyer un message a un sous-agent"},
     {"name": "sessions_list", "group": "sessions", "description": "Lister les sessions actives"},
     {"name": "sessions_history", "group": "sessions", "description": "Historique d'une session"},
-    # group:memory
+
+    # ── group:memory (2) ────────────────────────────────────────────────
     {"name": "memory_search", "group": "memory", "description": "Rechercher dans la memoire persistante"},
     {"name": "memory_get", "group": "memory", "description": "Recuperer un souvenir specifique"},
-    # group:automation
+
+    # ── group:automation (2) ────────────────────────────────────────────
     {"name": "cron", "group": "automation", "description": "Taches planifiees / recurrentes"},
     {"name": "gateway", "group": "automation", "description": "Controle du Gateway"},
-    # group:messaging
+
+    # ── group:messaging (1) ─────────────────────────────────────────────
     {"name": "message", "group": "messaging", "description": "Envoyer des messages multi-canal"},
-    # Outils speciaux
-    {"name": "image", "group": "special", "description": "Analyse et comprehension d'images"},
-    {"name": "image_generate", "group": "special", "description": "Generation et edition d'images"},
+
+    # ── group:media (5) — analyse + generation audio/visuel ─────────────
+    {"name": "image", "group": "media", "description": "Analyse et comprehension d'images"},
+    {"name": "image_generate", "group": "media", "description": "Generation et edition d'images"},
+    {"name": "music_generate", "group": "media", "description": "Generation de musique / pistes audio (Suno / MusicGen)"},
+    {"name": "video_generate", "group": "media", "description": "Generation de clips video (Runway / Pika)"},
+    {"name": "voice_generate", "group": "media", "description": "Synthese vocale TTS haute fidelite (ElevenLabs / OpenAI TTS)"},
+
+    # ── group:safety (3) — guardrails avant action sensible ─────────────
+    {"name": "content_moderation", "group": "safety", "description": "Detection toxicite, harm, auto-harm, violence (OpenAI / Perspective)"},
+    {"name": "url_safety_check", "group": "safety", "description": "Verification phishing / malware / reputation d'URL (Google Safe Browsing)"},
+    {"name": "pii_scrub", "group": "safety", "description": "Detection + redaction PII (email, telephone, IBAN, numero identite)"},
+
+    # ── Outils speciaux (3) ─────────────────────────────────────────────
     {"name": "llm_task", "group": "special", "description": "Deleguer une sous-tache a un autre LLM"},
     {"name": "lobster", "group": "special", "description": "Moteur de workflows avec validations"},
     {"name": "subagents", "group": "special", "description": "Orchestration multi-agents"},

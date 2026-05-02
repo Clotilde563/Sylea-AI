@@ -1250,3 +1250,383 @@ class TestHookRegistryIntegration:
             if ev.type == "tool_result":
                 tool_results.append(ev)
         assert tool_results and tool_results[0].data["is_error"] is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 4 : Live-feedback auto-extension ClawHub
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+class TestAutoExtensionEvents:
+    """Le dispatch des meta-tools CLAWHUB_* doit emettre des events
+    auto_extension_start/found/ready/error en plus des classiques tool_use /
+    tool_result, pour que l'UI puisse afficher un indicateur live."""
+
+    def _meta_tools(self) -> list[dict]:
+        """Meta-tools minimum necessaires pour router CLAWHUB_* via le LLM."""
+        return [
+            {
+                "name": "clawhub_search",
+                "description": "search",
+                "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+            },
+            {
+                "name": "clawhub_install",
+                "description": "install",
+                "input_schema": {"type": "object", "properties": {"slug": {"type": "string"}}, "required": ["slug"]},
+            },
+            {
+                "name": "clawhub_publish",
+                "description": "publish",
+                "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+            },
+        ]
+
+    async def test_search_emits_start_then_found(self):
+        """clawhub_search reussi -> auto_extension_start precede auto_extension_found
+        avec la liste des candidats extraite de raw.results."""
+        client = FakeAnthropicClient([
+            _tool_use_response("clawhub_search", {"query": "slack notifications"}, tool_id="tu_s"),
+            _text_response("Voici les skills trouves."),
+        ])
+        executor = MockExecutor(responses={
+            "CLAWHUB_SEARCH": {
+                "content": "**2 skill(s) trouve(s)**\n1. `slack-notify` — poste sur Slack\n2. `slack-webhook` — via webhook",
+                "is_error": False,
+                "raw": {
+                    "query": "slack notifications",
+                    "results": [
+                        {"slug": "slack-notify", "description": "poste sur Slack",
+                         "author": "alice", "version": "1.2.0"},
+                        {"slug": "slack-webhook", "description": "via webhook",
+                         "author": "bob", "version": "0.5.1"},
+                    ],
+                },
+            },
+        })
+        loop = AgenticLoop(
+            client=client, system_prompt="test",
+            tools=self._meta_tools(), executor=executor, max_turns=5,
+        )
+        events = []
+        async for ev in loop.run(user_message="poste sur slack"):
+            events.append(ev)
+
+        types = [e.type for e in events]
+        # start doit preceder found, qui suivent tool_use/tool_result respectivement
+        assert "auto_extension_start" in types
+        assert "auto_extension_found" in types
+        idx_start = types.index("auto_extension_start")
+        idx_found = types.index("auto_extension_found")
+        idx_tool_use = types.index("tool_use")
+        idx_tool_result = types.index("tool_result")
+        # Ordre attendu : tool_use -> auto_extension_start -> tool_result -> auto_extension_found
+        assert idx_tool_use < idx_start < idx_tool_result < idx_found
+
+        start_ev = [e for e in events if e.type == "auto_extension_start"][0]
+        assert start_ev.data["phase"] == "search"
+        assert start_ev.data["action_type"] == "CLAWHUB_SEARCH"
+        assert "slack" in start_ev.data["trigger"]
+
+        found_ev = [e for e in events if e.type == "auto_extension_found"][0]
+        assert found_ev.data["count"] == 2
+        assert found_ev.data["query"] == "slack notifications"
+        slugs = [c["slug"] for c in found_ev.data["candidates"]]
+        assert slugs == ["slack-notify", "slack-webhook"]
+        assert found_ev.data["candidates"][0]["author"] == "alice"
+
+    async def test_install_emits_start_then_ready_with_tool_alias(self):
+        """clawhub_install reussi (via pre-approval bypass confirmation) ->
+        auto_extension_start + auto_extension_ready avec tool_alias skill_<slug>."""
+        client = FakeAnthropicClient([
+            _tool_use_response("clawhub_install", {"slug": "postgres-backup"}, tool_id="tu_i"),
+            _text_response("Skill installe, voici ce qu'il peut faire."),
+        ])
+        executor = MockExecutor(responses={
+            "CLAWHUB_INSTALL": {
+                "content": "Skill 'postgres-backup' installe dans ~/.openclaw/skills/postgres-backup/.",
+                "is_error": False,
+                "raw": {"slug": "postgres-backup", "version": "2.0.0"},
+            },
+        })
+        loop = AgenticLoop(
+            client=client, system_prompt="test",
+            tools=self._meta_tools(), executor=executor, max_turns=5,
+            # Pre-approve car CLAWHUB_INSTALL est destructive en mode default
+            pre_approved_tool_ids={"tu_i"},
+        )
+        events = []
+        async for ev in loop.run(user_message="installe le skill postgres"):
+            events.append(ev)
+
+        types = [e.type for e in events]
+        assert "auto_extension_start" in types
+        assert "auto_extension_ready" in types
+
+        start_ev = [e for e in events if e.type == "auto_extension_start"][0]
+        assert start_ev.data["phase"] == "install"
+        assert start_ev.data["action_type"] == "CLAWHUB_INSTALL"
+
+        ready_ev = [e for e in events if e.type == "auto_extension_ready"][0]
+        assert ready_ev.data["phase"] == "install"
+        assert ready_ev.data["slug"] == "postgres-backup"
+        # Conversion kebab-case -> snake_case pour le nom du tool
+        assert ready_ev.data["tool_alias"] == "skill_postgres_backup"
+
+    async def test_publish_emits_start_then_ready(self):
+        """clawhub_publish reussi -> auto_extension_start + auto_extension_ready
+        avec phase=publish."""
+        client = FakeAnthropicClient([
+            _tool_use_response("clawhub_publish",
+                               {"name": "my-new-skill", "slug": "my-new-skill"},
+                               tool_id="tu_p"),
+            _text_response("Publie."),
+        ])
+        executor = MockExecutor(responses={
+            "CLAWHUB_PUBLISH": {
+                "content": "Skill 'my-new-skill' publie sur ClawHub.",
+                "is_error": False,
+                "raw": {"slug": "my-new-skill", "version": "0.1.0"},
+            },
+        })
+        loop = AgenticLoop(
+            client=client, system_prompt="test",
+            tools=self._meta_tools(), executor=executor, max_turns=5,
+            pre_approved_tool_ids={"tu_p"},
+        )
+        events = []
+        async for ev in loop.run(user_message="publie un skill"):
+            events.append(ev)
+
+        types = [e.type for e in events]
+        assert "auto_extension_start" in types
+        assert "auto_extension_ready" in types
+
+        ready_ev = [e for e in events if e.type == "auto_extension_ready"][0]
+        assert ready_ev.data["phase"] == "publish"
+        assert ready_ev.data["slug"] == "my-new-skill"
+
+    async def test_failed_search_emits_auto_extension_error_not_found(self):
+        """clawhub_search qui echoue (is_error=True) -> auto_extension_error
+        emis a la place de auto_extension_found."""
+        client = FakeAnthropicClient([
+            _tool_use_response("clawhub_search", {"query": "foobar"}, tool_id="tu_f"),
+            _text_response("Recherche echouee."),
+        ])
+        executor = MockExecutor(responses={
+            "CLAWHUB_SEARCH": {
+                "content": "Recherche ClawHub echouee: CLI non installee.",
+                "is_error": True,
+                "raw": {"rc": 127},
+            },
+        })
+        loop = AgenticLoop(
+            client=client, system_prompt="test",
+            tools=self._meta_tools(), executor=executor, max_turns=5,
+        )
+        events = []
+        async for ev in loop.run(user_message="cherche foobar"):
+            events.append(ev)
+
+        types = [e.type for e in events]
+        assert "auto_extension_start" in types
+        assert "auto_extension_error" in types
+        # Pas de found sur erreur
+        assert "auto_extension_found" not in types
+
+        err_ev = [e for e in events if e.type == "auto_extension_error"][0]
+        assert err_ev.data["phase"] == "search"
+        assert err_ev.data["action_type"] == "CLAWHUB_SEARCH"
+        assert "CLI non installee" in err_ev.data["message"]
+
+    async def test_non_clawhub_tool_does_not_emit_auto_extension(self):
+        """Un tool normal (SEARCH, MEMORY, etc.) ne doit emettre aucun event
+        auto_extension_*. Seuls les meta-tools CLAWHUB_* le font."""
+        client = FakeAnthropicClient([
+            _tool_use_response("search", {"query": "Ada"}, tool_id="tu_n"),
+            _text_response("Voici Ada."),
+        ])
+        executor = MockExecutor(responses={
+            "SEARCH": {"content": "Resultats...", "is_error": False, "raw": {}},
+        })
+        loop = AgenticLoop(
+            client=client, system_prompt="test",
+            tools=build_tool_schemas(enabled_actions={"SEARCH"}),
+            executor=executor, max_turns=5,
+        )
+        events = []
+        async for ev in loop.run(user_message="qui est ada"):
+            events.append(ev)
+
+        types = [e.type for e in events]
+        assert "tool_use" in types
+        assert "tool_result" in types
+        # Aucun event auto_extension pour un tool non-meta
+        assert not any(t.startswith("auto_extension_") for t in types)
+
+    async def test_install_triggers_tools_refreshed_with_new_slugs(self):
+        """Apres un CLAWHUB_INSTALL reussi, AgenticLoop doit :
+          1. Appeler tools_rebuild_fn pour regenerer sa liste de tools
+          2. Swap self.tools vers la nouvelle liste
+          3. Emettre un event tools_refreshed avec added_slugs = [nouveau_slug]
+        Ainsi le LLM voit `skill_<slug>` des le prochain tour."""
+        client = FakeAnthropicClient([
+            _tool_use_response("clawhub_install", {"slug": "jira-sync"}, tool_id="tu_j"),
+            _text_response("Skill installe, fin."),
+        ])
+        executor = MockExecutor(responses={
+            "CLAWHUB_INSTALL": {
+                "content": "Skill 'jira-sync' installe.", "is_error": False,
+                "raw": {"slug": "jira-sync"},
+            },
+        })
+
+        # Tools initiaux : juste les meta-tools (pas encore skill_jira_sync)
+        initial_tools = self._meta_tools()
+
+        # tools apres install : on ajoute skill_jira_sync pour simuler le load
+        rebuilt_tools = self._meta_tools() + [{
+            "name": "skill_jira_sync",
+            "description": "Sync Jira issues",
+            "input_schema": {"type": "object", "properties": {"instruction": {"type": "string"}}},
+        }]
+
+        rebuild_calls = {"n": 0}
+        def _rebuild() -> list[dict]:
+            rebuild_calls["n"] += 1
+            return rebuilt_tools
+
+        loop = AgenticLoop(
+            client=client, system_prompt="test",
+            tools=initial_tools, executor=executor, max_turns=5,
+            pre_approved_tool_ids={"tu_j"},
+            tools_rebuild_fn=_rebuild,
+        )
+        events = []
+        async for ev in loop.run(user_message="installe jira-sync"):
+            events.append(ev)
+
+        # La closure doit avoir ete appelee exactement 1 fois
+        assert rebuild_calls["n"] == 1
+
+        # Un event tools_refreshed doit etre emis avec le nouveau slug
+        refresh_events = [e for e in events if e.type == "tools_refreshed"]
+        assert len(refresh_events) == 1
+        refresh_data = refresh_events[0].data
+        assert refresh_data["ok"] is True
+        assert refresh_data["added_slugs"] == ["jira-sync"]
+        assert refresh_data["total_before"] == len(initial_tools)
+        assert refresh_data["total_after"] == len(rebuilt_tools)
+        assert refresh_data["trigger"] == "clawhub_install"
+        assert refresh_data["slug"] == "jira-sync"
+
+        # self.tools a bien ete swap
+        assert any(t["name"] == "skill_jira_sync" for t in loop.tools)
+
+    async def test_install_without_rebuild_fn_still_invalidates_cache(self):
+        """Si tools_rebuild_fn n'est pas fourni, tools_refreshed est quand meme
+        emis (avec added_slugs=[], total_before=total_after, ok=False) mais
+        sans crasher. Le cache du loader est invalide best-effort."""
+        client = FakeAnthropicClient([
+            _tool_use_response("clawhub_install", {"slug": "foo"}, tool_id="tu_n"),
+            _text_response("ok"),
+        ])
+        executor = MockExecutor(responses={
+            "CLAWHUB_INSTALL": {"content": "installed", "is_error": False, "raw": {}},
+        })
+        loop = AgenticLoop(
+            client=client, system_prompt="test",
+            tools=self._meta_tools(), executor=executor, max_turns=5,
+            pre_approved_tool_ids={"tu_n"},
+            # tools_rebuild_fn omis
+        )
+        events = []
+        async for ev in loop.run(user_message="installe foo"):
+            events.append(ev)
+
+        refresh_events = [e for e in events if e.type == "tools_refreshed"]
+        assert len(refresh_events) == 1
+        # Pas de nouveau slug puisque le callback etait absent
+        assert refresh_events[0].data["added_slugs"] == []
+        assert refresh_events[0].data["ok"] is False
+        # Pas de crash : la boucle a abouti normalement
+        assert loop.result is not None
+
+    async def test_search_and_publish_do_not_trigger_tools_refreshed(self):
+        """Seul CLAWHUB_INSTALL declenche tools_refreshed. Un search ou un
+        publish (meme reussi) n'ajoute pas de tool skill_<slug>, donc pas de
+        refresh."""
+        client = FakeAnthropicClient([
+            _tool_use_response("clawhub_search", {"query": "x"}, tool_id="tu_s"),
+            _tool_use_response("clawhub_publish", {"slug": "my-skill", "name": "my-skill"}, tool_id="tu_p"),
+            _text_response("done"),
+        ])
+        executor = MockExecutor(responses={
+            "CLAWHUB_SEARCH": {"content": "empty", "is_error": False, "raw": {"results": []}},
+            "CLAWHUB_PUBLISH": {"content": "published", "is_error": False, "raw": {}},
+        })
+        rebuild_calls = {"n": 0}
+        def _rebuild(): rebuild_calls["n"] += 1; return self._meta_tools()
+
+        loop = AgenticLoop(
+            client=client, system_prompt="test",
+            tools=self._meta_tools(), executor=executor, max_turns=5,
+            pre_approved_tool_ids={"tu_p"},
+            tools_rebuild_fn=_rebuild,
+        )
+        events = []
+        async for ev in loop.run(user_message="test"):
+            events.append(ev)
+
+        # tools_refreshed NE doit PAS etre emis pour search ou publish
+        types = [e.type for e in events]
+        assert "tools_refreshed" not in types
+        # Et la closure ne doit pas avoir ete appelee
+        assert rebuild_calls["n"] == 0
+
+    async def test_install_via_resume_after_confirmation_emits_events(self):
+        """Meme chemin via resume_from_confirmation : l'utilisateur approuve
+        un CLAWHUB_INSTALL paused -> start + ready emis dans la reprise."""
+        client = FakeAnthropicClient([
+            _tool_use_response("clawhub_install", {"slug": "discord-notify"}, tool_id="tu_c"),
+            _text_response("Installe."),
+        ])
+        executor = MockExecutor(responses={
+            "CLAWHUB_INSTALL": {
+                "content": "Skill installe.",
+                "is_error": False,
+                "raw": {"slug": "discord-notify"},
+            },
+        })
+        loop = AgenticLoop(
+            client=client, system_prompt="test",
+            tools=self._meta_tools(), executor=executor, max_turns=5,
+            # Permission par defaut -> install sera gate
+        )
+
+        # 1er passage : attendre awaiting_confirmation
+        async for _ in loop.run(user_message="installe discord"):
+            pass
+        assert loop.result.stop_reason == "awaiting_confirmation"
+        assert loop.pending_confirmation is not None
+
+        # Completer la conversation avec une reponse finale pour ne pas depasser le fake script
+        client.messages._responses.append(_text_response("Merci, fait."))
+
+        # 2e passage : user approuve, on doit voir auto_extension_start + ready
+        resume_events = []
+        async for ev in loop.resume_from_confirmation(
+            loop.pending_confirmation,
+            approvals={"tu_c": True},
+        ):
+            resume_events.append(ev)
+
+        resume_types = [e.type for e in resume_events]
+        assert "auto_extension_start" in resume_types
+        assert "auto_extension_ready" in resume_types
+        start_ev = [e for e in resume_events if e.type == "auto_extension_start"][0]
+        assert start_ev.data["phase"] == "install"
+        ready_ev = [e for e in resume_events if e.type == "auto_extension_ready"][0]
+        assert ready_ev.data["slug"] == "discord-notify"
+        assert ready_ev.data["tool_alias"] == "skill_discord_notify"

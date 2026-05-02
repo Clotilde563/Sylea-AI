@@ -159,6 +159,13 @@ class SyleaScheduler:
 
             # Also check reminders
             self._check_reminders(db, now)
+
+            # Phase 9B : retention pass (interne, idempotent 6h min entre runs)
+            try:
+                from api.agent3_retention import run_retention_pass
+                run_retention_pass(db)  # no-op si < 6h depuis dernier run
+            except Exception as e:
+                print(f"[Scheduler] retention_pass warning: {e}")
         finally:
             db.disconnect()
 
@@ -200,7 +207,7 @@ class SyleaScheduler:
                 pass
             return
 
-        model = os.environ.get("SYLEA_SCHEDULER_MODEL", "claude-haiku-4-5-20250929")
+        model = os.environ.get("SYLEA_SCHEDULER_MODEL", "claude-haiku-4-5-20251001")
         max_tok = 300
         # Tarifs Haiku 4.5 par defaut
         in_rate = 1.0 / 1_000_000.0

@@ -4,12 +4,14 @@ import { useT } from '../i18n/LanguageContext'
 import { api } from '../api/client'
 import { useDeviceContext } from '../contexts/DeviceContext'
 import { useStore } from '../store/useStore'
+import { useToast } from '../components/Toast'
 
 // Agent 2 feature flag — set to true when desktop version is ready
 const AGENT2_ENABLED = true
 
 // VoiceCall is only used by Agent 2 — import kept but component only rendered when AGENT2_ENABLED is true
 import VoiceCall from '../components/VoiceCall'
+import FeedbackButton from '../components/FeedbackButton'
 
 // Agent 3 Plan Mode / Permissions / Cost UI (Claude-Code-inspired, ethically reimplemented)
 import {
@@ -272,13 +274,14 @@ function renderFormattedText(text: string) {
   return <>{elements}</>
 }
 
-// Inline formatting: **bold**, `code`, links (<url> and [text](url) and bare https://...)
+// Inline formatting: **bold**, `code`, images ![alt](url), links (<url> and [text](url) and bare https://...)
 function formatInline(text: string): React.ReactNode {
   if (!text) return null
-  // Split on patterns: **bold**, `code`, [text](url), <url>, bare URLs
+  // Split on patterns: **bold**, `code`, ![alt](url) image, [text](url) link, <url>, bare URLs
   const parts: React.ReactNode[] = []
-  // Combined regex for all inline patterns
-  const regex = /(\*\*(.+?)\*\*)|(`([^`]+)`)|(\[([^\]]+)\]\(([^)]+)\))|(<(https?:\/\/[^>]+)>)|((?:^|\s)(https?:\/\/[^\s),]+))/g
+  // Combined regex for all inline patterns. NOTE: image regex MUST come before
+  // link regex (sinon `!` est avale puis `[text](url)` matche comme link).
+  const regex = /(\*\*(.+?)\*\*)|(`([^`]+)`)|(!\[([^\]]*)\]\(([^)]+)\))|(\[([^\]]+)\]\(([^)]+)\))|(<(https?:\/\/[^>]+)>)|((?:^|\s)(https?:\/\/[^\s),]+))/g
   let lastIndex = 0
   let match
   let keyIdx = 0
@@ -295,15 +298,41 @@ function formatInline(text: string): React.ReactNode {
       // `code`
       parts.push(<code key={`c-${keyIdx++}`} style={{ background: 'rgba(255,255,255,0.1)', padding: '0.1rem 0.3rem', borderRadius: '4px', fontSize: '0.82rem' }}>{match[4]}</code>)
     } else if (match[5]) {
-      // [text](url)
-      parts.push(<a key={`a-${keyIdx++}`} href={match[7]} target="_blank" rel="noopener noreferrer" style={{ color: '#60a5fa', textDecoration: 'underline', textUnderlineOffset: '2px' }}>{match[6]}</a>)
+      // ![alt](url) — image. Si URL relative commencant par /api -> on prefix
+      // automatiquement avec le host backend (geree par le proxy Vite a 5173).
+      const altText = match[6] || 'image'
+      const imgUrl = match[7]
+      parts.push(
+        <div key={`img-${keyIdx++}`} style={{ margin: '0.5rem 0', textAlign: 'center' }}>
+          <img
+            src={imgUrl}
+            alt={altText}
+            style={{
+              maxWidth: '100%',
+              maxHeight: '500px',
+              borderRadius: '8px',
+              border: '1px solid rgba(255,255,255,0.1)',
+              cursor: 'zoom-in',
+            }}
+            onClick={() => window.open(imgUrl, '_blank')}
+          />
+          {altText && altText !== 'image' && (
+            <div style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.5)', marginTop: '0.3rem', fontStyle: 'italic' }}>
+              {altText}
+            </div>
+          )}
+        </div>
+      )
     } else if (match[8]) {
+      // [text](url) — link (NB: image ![alt](url) was matched earlier in the regex)
+      parts.push(<a key={`a-${keyIdx++}`} href={match[10]} target="_blank" rel="noopener noreferrer" style={{ color: '#60a5fa', textDecoration: 'underline', textUnderlineOffset: '2px' }}>{match[9]}</a>)
+    } else if (match[11]) {
       // <url>
-      parts.push(<a key={`a-${keyIdx++}`} href={match[9]} target="_blank" rel="noopener noreferrer" style={{ color: '#60a5fa', textDecoration: 'underline', textUnderlineOffset: '2px', wordBreak: 'break-all' }}>{match[9]}</a>)
-    } else if (match[10]) {
+      parts.push(<a key={`a-${keyIdx++}`} href={match[12]} target="_blank" rel="noopener noreferrer" style={{ color: '#60a5fa', textDecoration: 'underline', textUnderlineOffset: '2px', wordBreak: 'break-all' }}>{match[12]}</a>)
+    } else if (match[13]) {
       // bare URL (https://...)
-      const url = match[11]
-      const prefix = match[10].slice(0, match[10].length - url.length)
+      const url = match[14]
+      const prefix = match[13].slice(0, match[13].length - url.length)
       if (prefix) parts.push(prefix)
       parts.push(<a key={`a-${keyIdx++}`} href={url} target="_blank" rel="noopener noreferrer" style={{ color: '#60a5fa', textDecoration: 'underline', textUnderlineOffset: '2px', wordBreak: 'break-all' }}>{url}</a>)
     }
@@ -652,6 +681,7 @@ function VoiceMessageBubble({ msg, isAgent, onSpeakToggle, isSpeaking, agentColo
 // ── Main component ──────────────────────────────────────────────────────────
 export default function AgentsPage() {
   const t = useT()
+  const { toast } = useToast()
   const { ctx: deviceCtx } = useDeviceContext()
   const API = import.meta.env.VITE_API_URL || ''
   const [active, setActive] = useState(loadActive)
@@ -1274,8 +1304,12 @@ export default function AgentsPage() {
     data: Record<string, any>
   }
 
-  const parseActions = (content: string): { text: string; actions: AgentAction[] } => {
+  const parseActions = (content: string | null | undefined): { text: string; actions: AgentAction[] } => {
     const actions: AgentAction[] = []
+    // Defensive: message streaming peut avoir content undefined/null avant le 1er chunk.
+    if (!content || typeof content !== 'string') {
+      return { text: '', actions: [] }
+    }
     let text = content
     // Match ALL action types including PDF, SEARCH, ANALYSIS, etc.
     const regex = /\[ACTION:(\w+)\]([\s\S]*?)\[\/ACTION\]/g
@@ -1616,6 +1650,33 @@ export default function AgentsPage() {
   const [streamTools, setStreamTools] = useState<Array<{ tool: string; description: string; status: string }>>([])
   const [streamActive, setStreamActive] = useState(false)
   const [streamingText, setStreamingText] = useState('')
+  // Phase 4 : banner live pour l'auto-extension ClawHub (search/install/publish)
+  type AutoExtensionState = {
+    phase: 'search' | 'install' | 'publish'
+    status: 'running' | 'found' | 'ready' | 'error'
+    trigger: string
+    slug?: string
+    toolAlias?: string
+    candidates?: Array<{ slug: string; name: string; description: string }>
+    count?: number
+    message?: string
+    startedAt: number
+  }
+  const [autoExtension, setAutoExtension] = useState<AutoExtensionState | null>(null)
+  // Feedback visuel apres chaque action destructive reussie
+  type ActionDoneCard = {
+    id: string
+    action_type: string
+    title: string
+    subtitle?: string | null
+    download_url?: string | null
+    external_url?: string | null
+    method?: string | null
+    at: number
+  }
+  const [actionCards, setActionCards] = useState<ActionDoneCard[]>([])
+  // Status du Gateway OpenClaw (null = pas verifie, true/false = etat)
+  const [openclawStatus, setOpenclawStatus] = useState<{ is_up: boolean; message: string } | null>(null)
   // Agent 3 native: extended thinking panel + cancel plumbing
   const [thinkingEnabled, setThinkingEnabled] = useState<boolean>(() => {
     try { return localStorage.getItem('sylea_agent3_thinking') === '1' } catch { return false }
@@ -1631,9 +1692,15 @@ export default function AgentsPage() {
   const [thinkingOpen, setThinkingOpen] = useState(false)
   const [currentCancelToken, setCurrentCancelToken] = useState<string | null>(null)
   const abortControllerRef3 = useRef<AbortController | null>(null)
-  // Agent 3 native mode toggle (tool_use API natif vs legacy parser [ACTION:X])
+  // Agent 3 native mode toggle (tool_use API natif vs legacy parser [ACTION:X]).
+  // Defaut : natif (mode moderne). Le legacy est deprecie et sera supprime
+  // dans une future version. Le toggle reste pour compat/debug uniquement.
   const [agent3NativeMode, setAgent3NativeMode] = useState<boolean>(() => {
-    try { return localStorage.getItem('sylea_agent3_native') === '1' } catch { return false }
+    try {
+      const v = localStorage.getItem('sylea_agent3_native')
+      if (v === '0') return false   // opt-out explicite seulement
+      return true                    // defaut natif
+    } catch { return true }
   })
   const toggleAgent3Native = useCallback(() => {
     setAgent3NativeMode(prev => {
@@ -1680,9 +1747,86 @@ export default function AgentsPage() {
         onToolResult: (r) => {
           setStreamTools(prev => prev.length ? [...prev.slice(0, -1), { ...prev[prev.length - 1], status: r.is_error ? 'error' : 'done' }] : prev)
           setStreamLogs(prev => [...prev, {
-            text: `tool_result${r.user_approved === false ? ' (refuse)' : ''}: ${r.content.slice(0, 140)}`,
+            text: `tool_result${r.user_approved === false ? ' (refuse)' : ''}: ${String(r.content || '').slice(0, 140)}`,
             type: r.is_error ? 'error' : 'info', time: nowTime(),
           }])
+        },
+        onAutoExtensionStart: (p) => {
+          setAutoExtension({
+            phase: p.phase, status: 'running',
+            trigger: p.trigger, startedAt: Date.now(),
+          })
+          const verb = p.phase === 'search' ? 'cherche' : p.phase === 'install' ? 'installe' : 'publie'
+          setStreamLogs(prev => [...prev, {
+            text: `L'agent ${verb} un skill : "${p.trigger}"`,
+            type: 'tool', time: nowTime(),
+          }])
+        },
+        onAutoExtensionFound: (p) => {
+          setAutoExtension(prev => prev ? { ...prev, status: 'found', count: p.count, candidates: p.candidates } : prev)
+          setStreamLogs(prev => [...prev, {
+            text: `${p.count} skill(s) trouve(s) sur ClawHub`,
+            type: 'success', time: nowTime(),
+          }])
+        },
+        onAutoExtensionReady: (p) => {
+          setAutoExtension(prev => prev ? { ...prev, status: 'ready', slug: p.slug, toolAlias: p.tool_alias } : prev)
+          setStreamLogs(prev => [...prev, {
+            text: p.phase === 'install'
+              ? `Skill ${p.slug} installe et pret a l'emploi`
+              : `Skill ${p.slug} publie sur ClawHub`,
+            type: 'success', time: nowTime(),
+          }])
+          // Auto-dismiss apres 4s
+          setTimeout(() => setAutoExtension(prev => (prev && prev.status === 'ready') ? null : prev), 4000)
+        },
+        onAutoExtensionError: (p) => {
+          setAutoExtension(prev => prev ? { ...prev, status: 'error', message: p.message } : prev)
+          setStreamLogs(prev => [...prev, {
+            text: `Auto-extension echouee (${p.phase}) : ${String(p.message || '').slice(0, 120)}`,
+            type: 'error', time: nowTime(),
+          }])
+          setTimeout(() => setAutoExtension(prev => (prev && prev.status === 'error') ? null : prev), 6000)
+        },
+        onToolsRefreshed: (p) => {
+          const added = p.added_slugs?.length ?? 0
+          if (added > 0) {
+            setStreamLogs(prev => [...prev, {
+              text: `Tools regeneres : +${added} nouveau(x) skill(s) dispo [${(p.added_slugs || []).slice(0, 3).join(', ')}${added > 3 ? '…' : ''}] (${p.total_before}\u2192${p.total_after})`,
+              type: 'success', time: nowTime(),
+            }])
+          } else if (p.ok) {
+            setStreamLogs(prev => [...prev, {
+              text: `Tools regeneres (${p.total_after} disponibles)`,
+              type: 'info', time: nowTime(),
+            }])
+          }
+        },
+        onActionDone: (p) => {
+          setActionCards(prev => [...prev.slice(-9), {
+            id: `${p.tool_use_id}-${Date.now()}`,
+            action_type: p.action_type,
+            title: p.title,
+            subtitle: p.subtitle ?? null,
+            download_url: p.download_url ?? null,
+            external_url: p.external_url ?? null,
+            method: p.method ?? null,
+            at: Date.now(),
+          }])
+          // Refresh workspace info (mis a jour des fichiers crees par FILE_CREATE)
+          if (p.action_type === 'FILE_CREATE') {
+            const tkn = localStorage.getItem('sylea_auth_token')
+            if (tkn) {
+              fetch(`${API}/api/agent3/workspace-info`, { headers: { 'Authorization': `Bearer ${tkn}` } })
+                .then(r => r.json()).then(data => setWorkspaceInfo(data)).catch(() => {})
+            }
+          }
+        },
+        onOpenClawStatus: (p) => {
+          setOpenclawStatus({ is_up: p.is_up, message: p.message })
+          if (!p.is_up) {
+            toast.warning(p.message)
+          }
         },
         onResult: (result) => {
           setStreamingText('')
@@ -2158,10 +2302,29 @@ export default function AgentsPage() {
     setMessages3(updated)
     setInputText3('')
     setSending3(true)
+
+    // Safety net : si le stream ne termine jamais (crash silencieux du SSE,
+    // serveur qui ferme la connexion sans onResult, etc.), on force le reset
+    // de sending3 apres 180s pour ne pas bloquer l'UI a vie. L'user peut alors
+    // re-essayer un nouveau message.
+    const stuckGuardTimer = window.setTimeout(() => {
+      setSending3(false)
+      setStreamingText('')
+      setCurrentCancelToken(null)
+      abortControllerRef3.current = null
+      setStreamActive(false)
+      setMessages3(prev => [...prev, {
+        role: 'agent',
+        content: "[Timeout — le stream s'est interrompu sans reponse. Reessaie.]",
+        timestamp: new Date().toISOString(), type: 'text',
+        actions: [{ type: 'ERROR', data: { retryable: true } }],
+      }])
+    }, 180_000)
     setStreamActive(true)
     setStreamSteps([])
     setStreamLogs([])
     setStreamTools([])
+    setActionCards([])
     setStreamingText('')
     try {
       const chatHistory = updated.map(m => ({
@@ -2224,7 +2387,76 @@ export default function AgentsPage() {
             },
             onToolResult: (r) => {
               setStreamTools(prev => prev.length ? [...prev.slice(0, -1), { ...prev[prev.length - 1], status: r.is_error ? 'error' : 'done' }] : prev)
-              setStreamLogs(prev => [...prev, { text: `tool_result: ${r.content.slice(0, 140)}`, type: r.is_error ? 'error' : 'info', time: nowTime() }])
+              setStreamLogs(prev => [...prev, { text: `tool_result: ${String(r.content || '').slice(0, 140)}`, type: r.is_error ? 'error' : 'info', time: nowTime() }])
+            },
+            onAutoExtensionStart: (p) => {
+              setAutoExtension({
+                phase: p.phase, status: 'running',
+                trigger: p.trigger, startedAt: Date.now(),
+              })
+              const verb = p.phase === 'search' ? 'cherche' : p.phase === 'install' ? 'installe' : 'publie'
+              setStreamLogs(prev => [...prev, {
+                text: `L'agent ${verb} un skill : "${p.trigger}"`,
+                type: 'tool', time: nowTime(),
+              }])
+            },
+            onAutoExtensionFound: (p) => {
+              setAutoExtension(prev => prev ? { ...prev, status: 'found', count: p.count, candidates: p.candidates } : prev)
+              setStreamLogs(prev => [...prev, {
+                text: `${p.count} skill(s) trouve(s) sur ClawHub`,
+                type: 'success', time: nowTime(),
+              }])
+            },
+            onAutoExtensionReady: (p) => {
+              setAutoExtension(prev => prev ? { ...prev, status: 'ready', slug: p.slug, toolAlias: p.tool_alias } : prev)
+              setStreamLogs(prev => [...prev, {
+                text: p.phase === 'install'
+                  ? `Skill ${p.slug} installe et pret a l'emploi`
+                  : `Skill ${p.slug} publie sur ClawHub`,
+                type: 'success', time: nowTime(),
+              }])
+              setTimeout(() => setAutoExtension(prev => (prev && prev.status === 'ready') ? null : prev), 4000)
+            },
+            onAutoExtensionError: (p) => {
+              setAutoExtension(prev => prev ? { ...prev, status: 'error', message: p.message } : prev)
+              setStreamLogs(prev => [...prev, {
+                text: `Auto-extension echouee (${p.phase}) : ${String(p.message || '').slice(0, 120)}`,
+                type: 'error', time: nowTime(),
+              }])
+              setTimeout(() => setAutoExtension(prev => (prev && prev.status === 'error') ? null : prev), 6000)
+            },
+            onToolsRefreshed: (p) => {
+              const added = p.added_slugs?.length ?? 0
+              if (added > 0) {
+                setStreamLogs(prev => [...prev, {
+                  text: `Tools regeneres : +${added} nouveau(x) skill(s) dispo [${(p.added_slugs || []).slice(0, 3).join(', ')}${added > 3 ? '…' : ''}] (${p.total_before}\u2192${p.total_after})`,
+                  type: 'success', time: nowTime(),
+                }])
+              } else if (p.ok) {
+                setStreamLogs(prev => [...prev, {
+                  text: `Tools regeneres (${p.total_after} disponibles)`,
+                  type: 'info', time: nowTime(),
+                }])
+              }
+            },
+            onActionDone: (p) => {
+              setActionCards(prev => [...prev.slice(-9), {
+                id: `${p.tool_use_id}-${Date.now()}`,
+                action_type: p.action_type,
+                title: p.title,
+                subtitle: p.subtitle ?? null,
+                download_url: p.download_url ?? null,
+                external_url: p.external_url ?? null,
+                method: p.method ?? null,
+                at: Date.now(),
+              }])
+              if (p.action_type === 'FILE_CREATE') {
+                const tkn = localStorage.getItem('sylea_auth_token')
+                if (tkn) {
+                  fetch(`${API}/api/agent3/workspace-info`, { headers: { 'Authorization': `Bearer ${tkn}` } })
+                    .then(r => r.json()).then(data => setWorkspaceInfo(data)).catch(() => {})
+                }
+              }
             },
             onTurnDone: () => {},
             onResult: (result) => {
@@ -2316,12 +2548,24 @@ export default function AgentsPage() {
           },
         }
       )
-    } catch {
+    } catch (streamErr: any) {
+      const errMsg = streamErr?.message || ''
+      // Distingue : annulation utilisateur, perte connexion, erreur serveur.
+      const isAbort = errMsg.toLowerCase().includes('abort') || errMsg.toLowerCase().includes('cancel')
+      const isNetwork = errMsg.toLowerCase().includes('network') || errMsg.toLowerCase().includes('fetch')
+      let userMsg = "Désolé, une erreur est survenue pendant la conversation."
+      if (isAbort) {
+        userMsg = "Génération interrompue."
+      } else if (isNetwork) {
+        userMsg = "Connexion avec l'agent interrompue. Vérifie ta connexion et réessaie."
+      }
       setMessages3(prev => [...prev, {
-        role: 'agent', content: "Desole, une erreur est survenue.", actions: [{ type: 'ERROR', data: { retryable: true } }],
+        role: 'agent', content: userMsg,
+        actions: [{ type: 'ERROR', data: { retryable: !isAbort } }],
         timestamp: new Date().toISOString(), type: 'text',
       }])
     } finally {
+      window.clearTimeout(stuckGuardTimer)
       setSending3(false)
       setStreamingText('')
       setCurrentCancelToken(null)
@@ -2343,7 +2587,8 @@ export default function AgentsPage() {
     }
     setCurrentCancelToken(null)
     abortControllerRef3.current = null
-  }, [currentCancelToken])
+    toast.info('Génération arrêtée')
+  }, [currentCancelToken, toast])
 
   // ── Voice recording for Agent 3 ──────────────────────────────────────────
   const stopVoiceRecording3 = useCallback(() => {
@@ -2926,7 +3171,7 @@ export default function AgentsPage() {
             )}
             {messages3.map((msg, idx) => {
               // Use pre-parsed actions from backend if available, otherwise parse from content
-              const parsed = msg.role === 'agent' ? parseActions(msg.content) : { text: msg.content, actions: [] }
+              const parsed = msg.role === 'agent' ? parseActions(msg.content) : { text: msg.content || '', actions: [] }
               const msgText = parsed.text
               const actions = (msg.actions && msg.actions.length > 0)
                 ? msg.actions as AgentAction[]
@@ -3017,6 +3262,13 @@ export default function AgentsPage() {
                                 <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
                               </svg>
                             </button>
+                          )}
+                          {/* Feedback thumbs (Phase 9C) */}
+                          {msg.role === 'agent' && (
+                            <FeedbackButton
+                              messageId={(msg as any).id}
+                              agentResponse={msg.content}
+                            />
                           )}
                         </div>
                       </div>
@@ -4021,6 +4273,30 @@ export default function AgentsPage() {
                 </div>
               )
             })}
+            {/* ── Banner OpenClaw Gateway down ── */}
+            {openclawStatus && !openclawStatus.is_up && (
+              <div style={{
+                padding: '0.6rem 0.9rem',
+                marginBottom: '0.5rem',
+                background: 'rgba(245,158,11,0.1)',
+                border: '1px solid rgba(245,158,11,0.35)',
+                borderLeft: '4px solid #f59e0b',
+                borderRadius: 8,
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                gap: '0.5rem', fontSize: '0.82rem', color: '#f59e0b',
+              }}>
+                <span>⚠️ {openclawStatus.message}</span>
+                <button
+                  onClick={() => setOpenclawStatus(null)}
+                  style={{
+                    background: 'transparent', border: 'none', color: '#f59e0b',
+                    cursor: 'pointer', fontSize: '1.1rem', padding: 0,
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            )}
             {/* ── Agent 3 Streaming Progress Panel ── */}
             {(sending3 || streamActive) && streamSteps.length > 0 && (
               <div ref={streamPanelRef3} style={{
@@ -4099,6 +4375,161 @@ export default function AgentsPage() {
                     </div>
                   ))}
                 </div>
+
+                {/* Auto-extension live banner (Phase 4 : ClawHub auto-install) */}
+                {autoExtension && (
+                  <div style={{
+                    margin: '0 0.75rem 0.5rem',
+                    padding: '0.55rem 0.75rem',
+                    borderRadius: '10px',
+                    background:
+                      autoExtension.status === 'error'
+                        ? 'linear-gradient(90deg, rgba(239,68,68,0.12), rgba(239,68,68,0.04))'
+                        : autoExtension.status === 'ready'
+                        ? 'linear-gradient(90deg, rgba(16,185,129,0.15), rgba(16,185,129,0.04))'
+                        : 'linear-gradient(90deg, rgba(37,99,235,0.12), rgba(212,160,23,0.08))',
+                    border: `1px solid ${
+                      autoExtension.status === 'error'
+                        ? 'rgba(239,68,68,0.35)'
+                        : autoExtension.status === 'ready'
+                        ? 'rgba(16,185,129,0.35)'
+                        : 'rgba(212,160,23,0.3)'
+                    }`,
+                    display: 'flex', flexDirection: 'column', gap: '0.35rem',
+                    transition: 'all 0.3s',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      {autoExtension.status === 'running' && (
+                        <span className="spinner spinner-sm" style={{ width: 12, height: 12 }} />
+                      )}
+                      {autoExtension.status === 'found' && (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#d4a017" strokeWidth="2.5" strokeLinecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+                      )}
+                      {autoExtension.status === 'ready' && (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                      )}
+                      {autoExtension.status === 'error' && (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                      )}
+                      <span style={{
+                        fontSize: '0.72rem', fontWeight: 600,
+                        color:
+                          autoExtension.status === 'error' ? '#ef4444'
+                          : autoExtension.status === 'ready' ? '#10b981'
+                          : '#d4a017',
+                        textTransform: 'uppercase', letterSpacing: '0.04em',
+                      }}>
+                        {autoExtension.phase === 'search' && autoExtension.status === 'running' && 'Recherche ClawHub...'}
+                        {autoExtension.phase === 'search' && autoExtension.status === 'found' && `${autoExtension.count ?? 0} skill(s) trouve(s)`}
+                        {autoExtension.phase === 'install' && autoExtension.status === 'running' && 'Installation du skill...'}
+                        {autoExtension.phase === 'install' && autoExtension.status === 'ready' && 'Skill installe'}
+                        {autoExtension.phase === 'publish' && autoExtension.status === 'running' && 'Publication du skill...'}
+                        {autoExtension.phase === 'publish' && autoExtension.status === 'ready' && 'Skill publie'}
+                        {autoExtension.status === 'error' && `Echec (${autoExtension.phase})`}
+                      </span>
+                    </div>
+                    {autoExtension.trigger && autoExtension.status !== 'error' && (
+                      <div style={{
+                        fontSize: '0.7rem', color: 'rgba(255,255,255,0.7)',
+                        fontFamily: "'Fira Code', 'Cascadia Code', monospace",
+                        paddingLeft: '1.25rem',
+                      }}>
+                        {autoExtension.phase === 'search' ? 'query' : 'slug'}: <span style={{ color: '#d4a017' }}>{autoExtension.slug || autoExtension.trigger}</span>
+                      </div>
+                    )}
+                    {autoExtension.status === 'found' && (autoExtension.candidates?.length ?? 0) > 0 && (
+                      <div style={{
+                        fontSize: '0.65rem', color: 'rgba(255,255,255,0.55)',
+                        paddingLeft: '1.25rem', lineHeight: 1.4,
+                      }}>
+                        {autoExtension.candidates!.slice(0, 3).map(c => c.slug).join(', ')}
+                        {(autoExtension.candidates?.length ?? 0) > 3 && '…'}
+                      </div>
+                    )}
+                    {autoExtension.status === 'ready' && autoExtension.toolAlias && (
+                      <div style={{
+                        fontSize: '0.65rem', color: 'rgba(16,185,129,0.9)',
+                        fontFamily: "'Fira Code', 'Cascadia Code', monospace",
+                        paddingLeft: '1.25rem',
+                      }}>
+                        {autoExtension.toolAlias} pret a l'emploi
+                      </div>
+                    )}
+                    {autoExtension.status === 'error' && autoExtension.message && (
+                      <div style={{
+                        fontSize: '0.65rem', color: 'rgba(239,68,68,0.85)',
+                        paddingLeft: '1.25rem', lineHeight: 1.4,
+                      }}>
+                        {autoExtension.message.slice(0, 140)}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Cards "action done" : feedback visuel apres EMAIL/FILE_CREATE/CALENDAR/... */}
+                {actionCards.length > 0 && (
+                  <div style={{
+                    borderTop: '1px solid rgba(16,185,129,0.1)',
+                    padding: '0.5rem 0.75rem',
+                    display: 'flex', flexDirection: 'column', gap: '0.35rem',
+                  }}>
+                    <div style={{ fontSize: '0.65rem', color: 'rgba(255,255,255,0.3)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.15rem' }}>
+                      Actions reussies ({actionCards.length})
+                    </div>
+                    {actionCards.map((c) => {
+                      const emoji = (
+                        c.action_type === 'EMAIL' || c.action_type === 'GMAIL_SEND' ? '📧' :
+                        c.action_type === 'FILE_CREATE' ? '📄' :
+                        c.action_type === 'CALENDAR_EVENT' ? '📅' :
+                        c.action_type === 'DRIVE_SAVE' ? '☁️' :
+                        c.action_type === 'CRON' ? '⏰' :
+                        c.action_type === 'COMPUTER_USE' ? '🖥️' : '✅'
+                      )
+                      const link = c.download_url
+                        ? { href: c.download_url, label: 'Télécharger' }
+                        : c.external_url
+                          ? { href: c.external_url, label: 'Ouvrir' }
+                          : null
+                      return (
+                        <div key={c.id} style={{
+                          display: 'flex', alignItems: 'center', gap: '0.5rem',
+                          padding: '0.35rem 0.5rem', borderRadius: '8px',
+                          background: 'rgba(16,185,129,0.07)',
+                          border: '1px solid rgba(16,185,129,0.2)',
+                        }}>
+                          <span style={{ fontSize: '1rem' }}>{emoji}</span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: '0.75rem', color: '#10b981', fontWeight: 500, lineHeight: 1.2 }}>
+                              {c.title}
+                            </div>
+                            {c.subtitle && (
+                              <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {c.subtitle}
+                              </div>
+                            )}
+                          </div>
+                          {link && (
+                            <a
+                              href={link.href}
+                              target={c.external_url ? '_blank' : undefined}
+                              rel={c.external_url ? 'noopener noreferrer' : undefined}
+                              style={{
+                                fontSize: '0.65rem', color: '#10b981',
+                                textDecoration: 'none',
+                                padding: '0.2rem 0.5rem',
+                                borderRadius: '6px',
+                                border: '1px solid rgba(16,185,129,0.35)',
+                                flexShrink: 0,
+                              }}
+                            >
+                              {link.label}
+                            </a>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
 
                 {/* Tool progress — granular per-tool display */}
                 {streamTools.length > 0 && (
@@ -5032,6 +5463,100 @@ export default function AgentsPage() {
             {actionToast}
           </div>
         )}
+
+        {/* Modale de confirmation pour actions destructives en mode natif (chat view Agent 3) */}
+        {pendingConfirmation && (
+          <div style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)',
+            zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            backdropFilter: 'blur(4px)',
+          }}>
+            <div style={{
+              maxWidth: 560, width: '90%',
+              background: 'var(--bg-panel, #1a1a1a)',
+              border: '1px solid rgba(255, 160, 0, 0.5)',
+              borderRadius: 12, padding: '1.5rem',
+              boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ffa000" strokeWidth="2">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                  <line x1="12" y1="9" x2="12" y2="13"/>
+                  <line x1="12" y1="17" x2="12.01" y2="17"/>
+                </svg>
+                <h3 style={{ margin: 0, color: '#ffa000', fontSize: '1rem', fontWeight: 700 }}>
+                  Confirmation requise
+                </h3>
+              </div>
+              <p style={{ margin: '0 0 0.75rem 0', fontSize: '0.88rem', color: 'var(--text-secondary)' }}>
+                L'agent souhaite exécuter {pendingConfirmation.pending_tool_uses.length === 1 ? 'une action destructive' : `${pendingConfirmation.pending_tool_uses.length} actions destructives`}.
+                Ces actions modifient l'état externe (envoi, écriture, programmation) et ne peuvent pas être annulées.
+              </p>
+              <div style={{
+                background: 'rgba(255,255,255,0.04)', borderRadius: 8,
+                padding: '0.75rem', marginBottom: '1rem', maxHeight: 220, overflowY: 'auto',
+              }}>
+                {pendingConfirmation.pending_tool_uses.map((tu, i) => (
+                  <div key={tu.tool_use_id} style={{
+                    borderTop: i > 0 ? '1px solid rgba(255,255,255,0.08)' : 'none',
+                    paddingTop: i > 0 ? '0.5rem' : 0, marginTop: i > 0 ? '0.5rem' : 0,
+                  }}>
+                    <div style={{ fontSize: '0.82rem', fontWeight: 600, color: '#ffa000' }}>
+                      {tu.action_type}
+                    </div>
+                    <pre style={{
+                      margin: '0.3rem 0 0 0', fontSize: '0.72rem',
+                      color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                    }}>
+                      {JSON.stringify(tu.input, null, 2).slice(0, 400)}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+              {pendingConfirmation.preview_text && (
+                <p style={{
+                  margin: '0 0 1rem 0', fontSize: '0.8rem',
+                  color: 'var(--text-tertiary)', fontStyle: 'italic',
+                }}>
+                  « {pendingConfirmation.preview_text.slice(0, 200)} »
+                </p>
+              )}
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button
+                  onClick={() => resolvePendingConfirmation(false)}
+                  disabled={confirmResolving}
+                  style={{
+                    flex: 1, padding: '10px 14px',
+                    background: 'rgba(255,255,255,0.06)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8, color: 'var(--text-secondary)',
+                    cursor: confirmResolving ? 'not-allowed' : 'pointer',
+                    fontSize: '0.88rem', fontWeight: 600,
+                    opacity: confirmResolving ? 0.5 : 1,
+                  }}
+                >
+                  Refuser
+                </button>
+                <button
+                  onClick={() => resolvePendingConfirmation(true)}
+                  disabled={confirmResolving}
+                  style={{
+                    flex: 1, padding: '10px 14px',
+                    background: 'rgba(76, 175, 80, 0.2)',
+                    border: '1px solid rgba(76, 175, 80, 0.5)',
+                    borderRadius: 8, color: '#4caf50',
+                    cursor: confirmResolving ? 'not-allowed' : 'pointer',
+                    fontSize: '0.88rem', fontWeight: 700,
+                    opacity: confirmResolving ? 0.5 : 1,
+                  }}
+                >
+                  {confirmResolving ? 'Reprise…' : 'Autoriser'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     )
   }
@@ -5165,7 +5690,7 @@ export default function AgentsPage() {
             )}
             {messages2.map((msg, idx) => {
               // Use pre-parsed actions from backend if available, otherwise parse from content
-              const parsed = msg.role === 'agent' ? parseActions(msg.content) : { text: msg.content, actions: [] }
+              const parsed = msg.role === 'agent' ? parseActions(msg.content) : { text: msg.content || '', actions: [] }
               const msgText = parsed.text
               const actions = (msg.actions && msg.actions.length > 0)
                 ? msg.actions as AgentAction[]

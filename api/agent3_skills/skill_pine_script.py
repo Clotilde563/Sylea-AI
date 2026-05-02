@@ -119,7 +119,7 @@ class PineScriptSkill(Skill):
             client = anthropic.Anthropic(api_key=key)
             resp = await asyncio.to_thread(
                 client.messages.create,
-                model="claude-sonnet-4-20250514",
+                model="claude-sonnet-4-6",
                 max_tokens=2000,
                 system=[{
                     "type": "text",

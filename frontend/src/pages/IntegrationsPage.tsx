@@ -1,6 +1,15 @@
-// Page Integrations — Gestion des services externes connectes
+// Page Integrations & Sécurité — Hub unifié des connexions externes
+//
+// Architecture :
+//   • Onglet "Services" — OAuth providers (Google, GitHub, Notion...) → ce fichier
+//   • Onglet "Clés API" — Vault chiffré (39 providers) → ./CredentialsPage
+//   • Onglet "Tokens API" — Tokens B2B sortants (sk-sylea-...) → ./APIKeysPage
+//
+// Deep-linking via URL : /integrations?tab=services|credentials|tokens
 import { useState, useEffect } from 'react'
 import { api } from '../api/client'
+import { CredentialsSection } from './CredentialsPage'
+import { APIKeysSection } from './APIKeysPage'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 interface Integration {
@@ -279,8 +288,8 @@ function relativeTime(iso: string): string {
   return `il y a ${days}j`
 }
 
-// ── Component ────────────────────────────────────────────────────────────────
-export default function IntegrationsPage() {
+// ── Sous-section : services OAuth (anciennement contenu de la page) ──────────
+function OAuthServicesSection() {
   const [integrations, setIntegrations] = useState<Record<string, Integration>>(MOCK_INTEGRATIONS)
   const [loading, setLoading] = useState(true)
   const [expandedCard, setExpandedCard] = useState<string | null>(null)
@@ -422,20 +431,7 @@ export default function IntegrationsPage() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div style={{ maxWidth: 960, margin: '0 auto', padding: '2rem 1rem' }}>
-      {/* Header */}
-      <div style={{ marginBottom: '2rem' }}>
-        <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginBottom: '0.25rem', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-          Services externes
-        </p>
-        <h1 style={{ fontSize: '1.75rem', color: 'var(--accent-silver)', marginBottom: '0.5rem' }}>
-          Integrations
-        </h1>
-        <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-          Connectez vos services pour une experience unifiee
-        </p>
-      </div>
-
+    <>
       {/* Error banner */}
       {error && (
         <div style={{
@@ -843,6 +839,146 @@ export default function IntegrationsPage() {
           to { transform: rotate(360deg); }
         }
       `}</style>
+    </>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Page principale avec onglets : Services / Clés API / Tokens API
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Tab = 'services' | 'credentials' | 'tokens'
+
+const TABS: Array<{ key: Tab; label: string; icon: () => JSX.Element; color: string; desc: string }> = [
+  {
+    key: 'services',
+    label: 'Services',
+    color: '#22c55e',
+    desc: 'OAuth Google, GitHub, Notion…',
+    icon: () => (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+      </svg>
+    ),
+  },
+  {
+    key: 'credentials',
+    label: 'Clés API',
+    color: '#a855f7',
+    desc: 'Coffre-fort chiffré (39 providers)',
+    icon: () => (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
+      </svg>
+    ),
+  },
+  {
+    key: 'tokens',
+    label: 'Tokens API B2B',
+    color: '#f59e0b',
+    desc: 'Tokens sortants pour scripts/serveurs',
+    icon: () => (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <polyline points="14 2 14 8 20 8" />
+        <line x1="16" y1="13" x2="8" y2="13" />
+        <line x1="16" y1="17" x2="8" y2="17" />
+      </svg>
+    ),
+  },
+]
+
+function readTabFromUrl(): Tab {
+  try {
+    const q = new URLSearchParams(window.location.search).get('tab')
+    const valid: Tab[] = ['services', 'credentials', 'tokens']
+    if (q && (valid as string[]).includes(q)) return q as Tab
+  } catch {
+    /* SSR safety */
+  }
+  return 'services'
+}
+
+export default function IntegrationsPage() {
+  const [tab, setTab] = useState<Tab>(readTabFromUrl())
+
+  // Sync URL ↔ state (deep-link compatible avec /integrations?tab=credentials)
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href)
+      url.searchParams.set('tab', tab)
+      window.history.replaceState(null, '', url.toString())
+    } catch {
+      /* SSR safety */
+    }
+  }, [tab])
+
+  const activeMeta = TABS.find(t => t.key === tab)!
+
+  return (
+    <div style={{ maxWidth: 1100, margin: '0 auto', padding: '2rem 1rem' }}>
+      {/* Header global */}
+      <div style={{ marginBottom: '1.5rem' }}>
+        <p style={{
+          color: 'var(--text-muted)', fontSize: '0.875rem', marginBottom: '0.25rem',
+          textTransform: 'uppercase', letterSpacing: '0.1em',
+        }}>
+          Sylea
+        </p>
+        <h1 style={{ fontSize: '1.75rem', color: 'var(--accent-silver)', margin: 0 }}>
+          Intégrations & Sécurité
+        </h1>
+        <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', lineHeight: 1.5, marginTop: '0.3rem' }}>
+          Connecte tes services externes, gère tes clés API tierces et expose Sylea comme API B2B —
+          tout au même endroit.
+        </p>
+      </div>
+
+      {/* Tab Bar */}
+      <div style={{
+        display: 'flex', gap: '0.5rem', marginBottom: '1.5rem',
+        borderBottom: '1px solid var(--border)', paddingBottom: '0.5rem',
+        flexWrap: 'wrap',
+      }}>
+        {TABS.map(t => {
+          const active = tab === t.key
+          const Icon = t.icon
+          return (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              title={t.desc}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '0.4rem',
+                padding: '0.5rem 0.85rem',
+                background: active ? `${t.color}15` : 'transparent',
+                border: `1px solid ${active ? t.color : 'transparent'}`,
+                borderRadius: 8,
+                color: active ? t.color : 'var(--text-muted)',
+                fontSize: '0.85rem', fontWeight: active ? 600 : 500,
+                cursor: 'pointer',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              <Icon />
+              {t.label}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Sous-titre dynamique */}
+      <p style={{
+        fontSize: '0.78rem', color: 'var(--text-muted)',
+        marginTop: 0, marginBottom: '1rem', fontStyle: 'italic',
+      }}>
+        {activeMeta.desc}
+      </p>
+
+      {/* Section active */}
+      {tab === 'services' && <OAuthServicesSection />}
+      {tab === 'credentials' && <CredentialsSection embedded />}
+      {tab === 'tokens' && <APIKeysSection embedded />}
     </div>
   )
 }

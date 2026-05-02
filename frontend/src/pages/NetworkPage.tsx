@@ -1,6 +1,7 @@
 // Page Réseau — Premium social network experience
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../api/client'
+import { WorkspacesSection } from './WorkspacesPage'
 
 /* ── Animations ───────────────────────────────────────────────────────────── */
 
@@ -237,7 +238,7 @@ interface LeaderboardEntry {
   rank: number; name: string; score: number
 }
 
-type Tab = 'feed' | 'discover' | 'connections' | 'mentoring' | 'challenges'
+type Tab = 'feed' | 'discover' | 'connections' | 'mentoring' | 'challenges' | 'workspaces'
 
 const TABS: { key: Tab; label: string; icon: (s: number) => JSX.Element; color: string }[] = [
   { key: 'feed', label: "Fil d'actualit\u00e9", icon: (s) => <IconFeed size={s} />, color: '#7c3aed' },
@@ -245,6 +246,7 @@ const TABS: { key: Tab; label: string; icon: (s: number) => JSX.Element; color: 
   { key: 'connections', label: 'Connexions', icon: (s) => <IconUsers size={s} />, color: '#10b981' },
   { key: 'mentoring', label: 'Mentorat', icon: (s) => <IconStar size={s} />, color: '#f59e0b' },
   { key: 'challenges', label: 'D\u00e9fis', icon: (s) => <IconTrophy size={s} />, color: '#ec4899' },
+  { key: 'workspaces', label: '\u00c9quipes', icon: (s) => <IconUsers size={s} />, color: '#06b6d4' },
 ]
 
 const POST_BORDER_COLORS = ['#7c3aed', '#3b82f6', '#ec4899', '#10b981', '#f59e0b', '#6366f1']
@@ -318,7 +320,17 @@ const DEMO_CHALLENGES: Challenge[] = [
 /* ══════════════════════════════════════════════════════════════════════════ */
 
 export default function NetworkPage() {
-  const [tab, setTab] = useState<Tab>('feed')
+  // Lit `?tab=workspaces` (ou autre) depuis l'URL pour pre-selectionner l'onglet.
+  // Utile pour les liens externes (ex: NavBar bouton "Workspaces" -> /reseau?tab=workspaces).
+  const _initialTab: Tab = (() => {
+    try {
+      const q = new URLSearchParams(window.location.search).get('tab')
+      const valid: Tab[] = ['feed', 'discover', 'connections', 'mentoring', 'challenges', 'workspaces']
+      if (q && (valid as string[]).includes(q)) return q as Tab
+    } catch { /* SSR safe */ }
+    return 'feed'
+  })()
+  const [tab, setTab] = useState<Tab>(_initialTab)
 
   // Data states
   const [feed, setFeed] = useState<VictoryPost[]>(DEMO_FEED)
@@ -1025,6 +1037,28 @@ export default function NetworkPage() {
                 </div>
               )
             })}
+          </div>
+        )}
+
+        {/* ── ÉQUIPES (workspaces partagés) ── */}
+        {tab === 'workspaces' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{
+              background: 'linear-gradient(135deg, #06b6d411, #0891b211)',
+              border: '1px solid var(--border)', borderRadius: 14,
+              padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 12,
+            }}>
+              <IconUsers size={22} />
+              <div>
+                <div style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: 14 }}>
+                  Équipes Syléa — collaboration partagée
+                </div>
+                <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 2 }}>
+                  Crée un espace pour ton équipe, partagez objectifs, mémoire et contexte commun.
+                </div>
+              </div>
+            </div>
+            <WorkspacesSection embedded />
           </div>
         )}
 
