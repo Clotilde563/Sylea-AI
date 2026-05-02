@@ -24,6 +24,24 @@ from api.dependencies import get_db, get_optional_user
 from sylea.core.storage.database import DatabaseManager
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
 
+# v2 enrichments : shared memory + awareness + Google context
+try:
+    from api.agent_shared_memory import (
+        load_memories, format_memories, auto_extract_from_turns,
+    )
+except Exception:
+    load_memories = lambda *a, **k: []
+    format_memories = lambda m, **k: ""
+    async def auto_extract_from_turns(*a, **k): return []
+try:
+    from api.agent3_awareness import build_awareness_block
+except Exception:
+    def build_awareness_block(db, user_id): return ""
+try:
+    from api.google_context import build_google_context_block
+except Exception:
+    async def build_google_context_block(db, user_id): return ""
+
 router = APIRouter(prefix="/api/agent2", tags=["agent2"])
 
 
@@ -258,6 +276,9 @@ def _build_agent2_prompt(
     device_context: str = "",
     reminders: list[dict] | None = None,
     full_context: str = "",
+    awareness_block: str = "",
+    memory_block: str = "",
+    google_block: str = "",
 ) -> str:
     if profil_data:
         profil_info = f"""
@@ -292,7 +313,11 @@ PROFIL DE L'UTILISATEUR :
         for r in reminders:
             reminders_str += f"  - {r.get('date', '?')} a {r.get('time', '?')} : {r.get('message', '?')}\n"
 
-    return f"""Tu es l'Agent Sylea 2, un assistant personnel qui AGIT. Tu ne parles pas, tu FAIS.
+    awareness_section = (awareness_block + "\n") if awareness_block else ""
+    memory_section = (memory_block + "\n") if memory_block else ""
+    google_section = (google_block + "\n") if google_block else ""
+
+    return f"""{awareness_section}{memory_section}{google_section}Tu es l'Agent Sylea 2, un assistant personnel qui AGIT. Tu ne parles pas, tu FAIS.
 Tutoiement, naturel, 1 phrase max avant les actions.
 
 === REGLES ABSOLUES — TU NE DOIS JAMAIS LES ENFREINDRE ===
@@ -346,6 +371,23 @@ TES ACTIONS :
 
 5. COPIER → Presse-papier.
    [ACTION:COPY]{{"text": "texte"}}[/ACTION]
+
+6. GMAIL_SEND → Envoie REELLEMENT le mail via l'API Gmail (compte Google connecte).
+   [ACTION:GMAIL_SEND]{{"to": "x@y.com", "subject": "Objet", "body": "Corps complet"}}[/ACTION]
+   Utilise GMAIL_SEND si l'utilisateur dit "envoie", "envoie-le", "envoie-le maintenant".
+   Utilise EMAIL (action 1) si l'utilisateur dit "redige", "prepare", "ecris-moi un mail".
+
+7. CALENDAR_EVENT → Cree un evenement Google Calendar.
+   [ACTION:CALENDAR_EVENT]{{"summary": "Titre", "start": "2026-05-15T10:00:00", "end": "2026-05-15T11:00:00", "description": "Details", "location": "..."}}[/ACTION]
+
+8. DRIVE_UPLOAD → Cree un fichier Google Doc dans le Drive.
+   [ACTION:DRIVE_UPLOAD]{{"filename": "Mon CV.md", "content": "contenu...", "mime_type": "text/markdown"}}[/ACTION]
+
+REGLES GOOGLE :
+- Si l'utilisateur a connecte Gmail (visible dans le block CONTEXTE GOOGLE), tu peux utiliser GMAIL_SEND directement.
+- Sinon, fallback sur EMAIL (action 1) qui ouvre Gmail pre-rempli sur l'appareil.
+- Si CONTEXTE GOOGLE liste des mails non-lus, tu peux les referencer naturellement ("tu as un mail de X qui attend").
+- Si CONTEXTE GOOGLE liste des events Calendar, tu peux les rappeler ("ton meeting de 15h").
 
 COMBINER ACTIONS — C'EST TA FORCE :
 Tu DOIS combiner TOUTES les actions pertinentes dans une seule reponse. JAMAIS une a la fois.
@@ -512,9 +554,32 @@ async def agent2_chat(
     # Build prompt
     device_ctx = format_device_context(data.contexte_appareil) if data.contexte_appareil else ""
     full_ctx = build_full_user_context(db, user_id)
+
+    # v2 enrichments — awareness + shared memory + Google context
+    awareness_blk = ""
+    memory_blk = ""
+    google_blk = ""
+    if user_id:
+        try:
+            awareness_blk = build_awareness_block(db, user_id) or ""
+        except Exception:
+            pass
+        try:
+            mem = load_memories(db, user_id, limit=30)
+            memory_blk = format_memories(mem, max_items=25) if mem else ""
+        except Exception:
+            pass
+        try:
+            google_blk = await build_google_context_block(db, user_id) or ""
+        except Exception:
+            pass
+
     system_prompt = _build_agent2_prompt(
         profil_data, decisions, sous_objectifs, collected_info, device_ctx, reminders,
         full_context=full_ctx,
+        awareness_block=awareness_blk,
+        memory_block=memory_blk,
+        google_block=google_blk,
     )
 
     # Build chat context
@@ -583,6 +648,21 @@ async def agent2_chat(
             recent = _load_agent2_messages(db, user_id, limit=20)
             await _extract_and_update_profile(db, user_id, recent)
 
+    # v2 : Auto-extract memories partagees (3 agents) — best-effort, non bloquant
+    if user_id:
+        try:
+            recent_msgs = _load_agent2_messages(db, user_id, limit=10)
+            turns = [
+                {"role": "agent" if m["role"] == "agent" else "user", "content": m["content"]}
+                for m in recent_msgs if m.get("content", "").strip()
+            ]
+            if turns:
+                asyncio.create_task(
+                    auto_extract_from_turns(db, user_id, turns, agent_label="agent2")
+                )
+        except Exception:
+            pass
+
     # Parse actions from response and send to desktop via WebSocket
     actions = []
     import re as _re
@@ -593,6 +673,30 @@ async def agent2_chat(
             actions.append({"type": action_type, "data": action_data})
         except Exception:
             pass
+
+    # v2 : Auto-execute Google actions via integrations API (best-effort, non-blocking)
+    # Agent 2 garde le pattern "actions returnees au frontend" mais en plus,
+    # pour les actions GMAIL_SEND/CALENDAR_EVENT/DRIVE_UPLOAD, on tente
+    # l'execution backend immediate si le user a connecte le service.
+    if user_id and actions:
+        for act in actions:
+            atype = act.get("type", "")
+            adata = act.get("data", {}) or {}
+            try:
+                if atype == "GMAIL_SEND" and adata.get("to") and adata.get("subject"):
+                    asyncio.create_task(
+                        _exec_gmail_send(db, user_id, adata)
+                    )
+                elif atype == "CALENDAR_EVENT" and adata.get("summary") and adata.get("start"):
+                    asyncio.create_task(
+                        _exec_calendar_event(db, user_id, adata)
+                    )
+                elif atype == "DRIVE_UPLOAD" and adata.get("filename") and adata.get("content"):
+                    asyncio.create_task(
+                        _exec_drive_upload(db, user_id, adata)
+                    )
+            except Exception:
+                pass
 
     # Save TEXT actions to workspace (like Agent 3 does)
     if user_id and actions:
@@ -923,3 +1027,153 @@ async def text_to_speech(data: dict):
                 return Response(content=b"", media_type="audio/mpeg", status_code=502)
     except Exception:
         return Response(content=b"", media_type="audio/mpeg", status_code=500)
+
+
+# ── v2 Google action executors (best-effort, fire-and-forget) ────────────────
+
+async def _exec_gmail_send(db: DatabaseManager, user_id: str, data: dict) -> None:
+    """Envoie un email REEL via Gmail API. Erreur silencieuse + log audit."""
+    import httpx, base64
+    try:
+        row = db.conn.execute(
+            "SELECT access_token FROM user_integrations WHERE auth_user_id = ? AND provider = 'gmail'",
+            (user_id,),
+        ).fetchone()
+        if not row or not row[0] or len(row[0]) < 20:
+            return  # Gmail non connecte
+        token = row[0]
+        to = str(data.get("to", "")).strip()
+        subject = str(data.get("subject", ""))
+        body = str(data.get("body", ""))
+        raw = f"To: {to}\r\nSubject: {subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}"
+        encoded = base64.urlsafe_b64encode(raw.encode("utf-8")).decode("utf-8")
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"raw": encoded},
+            )
+            if r.status_code in (200, 201):
+                _log_agent2_action(db, user_id, "GMAIL_SEND", success=True, summary=f"to={to[:50]}")
+            else:
+                _log_agent2_action(db, user_id, "GMAIL_SEND", success=False, summary=f"http {r.status_code}")
+    except Exception as e:
+        try:
+            _log_agent2_action(db, user_id, "GMAIL_SEND", success=False, summary=str(e)[:80])
+        except Exception:
+            pass
+
+
+async def _exec_calendar_event(db: DatabaseManager, user_id: str, data: dict) -> None:
+    """Cree un event Google Calendar. Best-effort."""
+    import httpx
+    try:
+        row = db.conn.execute(
+            "SELECT access_token FROM user_integrations WHERE auth_user_id = ? AND provider = 'google_calendar'",
+            (user_id,),
+        ).fetchone()
+        if not row or not row[0] or len(row[0]) < 20:
+            return  # Calendar non connecte
+        token = row[0]
+        # Anti-pollution : si pas d'end, met +1h apres start
+        start = str(data.get("start", "")).strip()
+        end = str(data.get("end", "")).strip()
+        if start and not end:
+            try:
+                from datetime import datetime, timedelta
+                dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                end = (dt + timedelta(hours=1)).isoformat()
+            except Exception:
+                end = start
+        payload = {
+            "summary": data.get("summary", ""),
+            "description": data.get("description", ""),
+            "location": data.get("location", ""),
+            "start": {"dateTime": start, "timeZone": "Europe/Paris"},
+            "end": {"dateTime": end, "timeZone": "Europe/Paris"},
+        }
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(
+                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+            if r.status_code in (200, 201):
+                _log_agent2_action(db, user_id, "CALENDAR_EVENT", success=True, summary=str(payload.get("summary", ""))[:50])
+            else:
+                _log_agent2_action(db, user_id, "CALENDAR_EVENT", success=False, summary=f"http {r.status_code}")
+    except Exception as e:
+        try:
+            _log_agent2_action(db, user_id, "CALENDAR_EVENT", success=False, summary=str(e)[:80])
+        except Exception:
+            pass
+
+
+async def _exec_drive_upload(db: DatabaseManager, user_id: str, data: dict) -> None:
+    """Upload un fichier sur Google Drive. Best-effort."""
+    import httpx
+    try:
+        row = db.conn.execute(
+            "SELECT access_token FROM user_integrations WHERE auth_user_id = ? AND provider = 'google_drive'",
+            (user_id,),
+        ).fetchone()
+        if not row or not row[0] or len(row[0]) < 20:
+            return  # Drive non connecte
+        token = row[0]
+        filename = str(data.get("filename", "Document.md"))
+        content = str(data.get("content", ""))
+        mime = str(data.get("mime_type", "text/markdown"))
+        # Multipart upload (simple)
+        boundary = "sylea_drive_boundary_xyz"
+        meta = json.dumps({"name": filename, "mimeType": mime})
+        body = (
+            f"--{boundary}\r\n"
+            f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{meta}\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Type: {mime}\r\n\r\n"
+            f"{content}\r\n"
+            f"--{boundary}--"
+        ).encode("utf-8")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": f"multipart/related; boundary={boundary}",
+                },
+                content=body,
+            )
+            if r.status_code in (200, 201):
+                _log_agent2_action(db, user_id, "DRIVE_UPLOAD", success=True, summary=filename[:50])
+            else:
+                _log_agent2_action(db, user_id, "DRIVE_UPLOAD", success=False, summary=f"http {r.status_code}")
+    except Exception as e:
+        try:
+            _log_agent2_action(db, user_id, "DRIVE_UPLOAD", success=False, summary=str(e)[:80])
+        except Exception:
+            pass
+
+
+def _log_agent2_action(
+    db: DatabaseManager, user_id: str, action_type: str,
+    *, success: bool = True, summary: str = "",
+) -> None:
+    """Trace les actions Google de l'Agent 2 dans agent3_audit_log (table partagee)."""
+    try:
+        from api.agent3_security import _ensure_audit_table
+        _ensure_audit_table(db)
+        db.conn.execute(
+            "INSERT INTO agent3_audit_log "
+            "(id, auth_user_id, action_type, action_summary, success, error_message, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()), user_id,
+                f"AGENT2_{action_type}", summary, 1 if success else 0,
+                "" if success else summary,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        db.conn.commit()
+    except Exception:
+        pass
