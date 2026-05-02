@@ -44,6 +44,10 @@ except Exception:
 
 router = APIRouter(prefix="/api/agent2", tags=["agent2"])
 
+# v2 : Track background tasks pour eviter le GC FastAPI qui annule les
+# asyncio.create_task issues d'un request handler.
+_BG_TASKS: set = set()
+
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -648,18 +652,31 @@ async def agent2_chat(
             recent = _load_agent2_messages(db, user_id, limit=20)
             await _extract_and_update_profile(db, user_id, recent)
 
-    # v2 : Auto-extract memories partagees (3 agents) — best-effort, non bloquant
+    # v2 : Auto-extract memories partagees (3 agents) — best-effort, non bloquant.
+    # Convention : turns en ordre chronologique (oldest first) pour que la
+    # detection du "last user message" soit correcte (heuristique fact-rich).
+    # IMPORTANT : la task asyncio doit utiliser une fresh DB connection (le db
+    # de la request handler se ferme avant la fin de la coroutine).
     if user_id:
         try:
             recent_msgs = _load_agent2_messages(db, user_id, limit=10)
+            recent_msgs = list(reversed(recent_msgs))  # DESC -> ASC chronologique
             turns = [
                 {"role": "agent" if m["role"] == "agent" else "user", "content": m["content"]}
                 for m in recent_msgs if m.get("content", "").strip()
             ]
             if turns:
-                asyncio.create_task(
-                    auto_extract_from_turns(db, user_id, turns, agent_label="agent2")
-                )
+                async def _bg_extract(uid: str, t: list):
+                    fresh = DatabaseManager()
+                    fresh.connect()
+                    try:
+                        await auto_extract_from_turns(fresh, uid, t, agent_label="agent2")
+                    finally:
+                        try: fresh.disconnect()
+                        except Exception: pass
+                _task = asyncio.create_task(_bg_extract(user_id, turns))
+                _BG_TASKS.add(_task)
+                _task.add_done_callback(_BG_TASKS.discard)
         except Exception:
             pass
 

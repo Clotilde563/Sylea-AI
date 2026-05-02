@@ -294,17 +294,72 @@ class ExtractionScheduler:
     """Decide quand lancer l'extraction : apres N tours, ou sur deltas significatifs.
 
     State per-user : nb de tours depuis la derniere extraction.
+
+    Strategie equilibree cost <-> qualite :
+      - Skip uniquement les messages triviaux (< 50 chars : "ok", "merci")
+      - Trigger tous les 3 turns (latence mem 2x meilleure que 6)
+      - Override "fact-rich" : trigger immediat si keywords indicateurs detectes
+        meme sur message court (ex: "ma chatte s'appelle Mochi" = 30 chars
+        mais contient "ma" + nom propre majuscule).
+
+    Cost estime : ~$0.05/mois/user actif (vs ~$0.02 avec ancien seuil 300/6t).
     """
 
-    def __init__(self, trigger_every_n_turns: int = 6, min_chars: int = 300):
+    # Keywords FR/EN indiquant qu'un fact est probablement enonce
+    _FACT_HINTS = (
+        # Possessifs
+        " mon ", " ma ", " mes ", " my ", " our ",
+        # Identite
+        "je m'appelle", "je suis ", "i am ", "i'm ",
+        # Possession / preference
+        "j'ai ", "i have ", "j'aime ", "i like ", "je deteste ", "je hais ",
+        # Profession / lieu
+        "je travaille", "j'habite", "je vis ", "i work", "i live",
+        # Anniversaire / age
+        "anniversaire", "birthday", "j'ai ans", " ans ",
+    )
+
+    def __init__(self, trigger_every_n_turns: int = 3, min_chars: int = 50):
         self.trigger_every_n_turns = trigger_every_n_turns
         self.min_chars = min_chars
         self._turn_counters: dict[str, int] = {}
+        self._last_text: dict[str, str] = {}
 
-    def should_extract(self, user_id: str, turns_since_last: Optional[int] = None,
-                       conversation_chars: int = 0) -> bool:
-        if conversation_chars < self.min_chars:
+    def _is_fact_rich(self, text: str) -> bool:
+        """Heuristique : message court mais probablement porteur de facts."""
+        if not text:
             return False
+        low = text.lower()
+        # 1) Hint keywords
+        for hint in self._FACT_HINTS:
+            if hint in low:
+                return True
+        # 2) Nom propre (mot capitalise hors debut + len > 2)
+        import re
+        if re.search(r"\s[A-ZÉÀÈÙÂÊÎÔÛ][a-zéàèùâêîôû]{2,}", text):
+            return True
+        # 3) Annee 19xx / 20xx (= date de naissance, evenement)
+        if re.search(r"\b(19|20)\d{2}\b", text):
+            return True
+        return False
+
+    def should_extract(
+        self,
+        user_id: str,
+        turns_since_last: Optional[int] = None,
+        conversation_chars: int = 0,
+        last_text: str = "",
+    ) -> bool:
+        # 1) Skip messages triviaux
+        if conversation_chars < self.min_chars and not self._is_fact_rich(last_text):
+            return False
+
+        # 2) Override fact-rich : trigger immediat
+        if last_text and self._is_fact_rich(last_text):
+            self._turn_counters[user_id] = 0
+            return True
+
+        # 3) Logique standard : trigger tous les N turns
         if turns_since_last is not None:
             return turns_since_last >= self.trigger_every_n_turns
         self._turn_counters[user_id] = self._turn_counters.get(user_id, 0) + 1

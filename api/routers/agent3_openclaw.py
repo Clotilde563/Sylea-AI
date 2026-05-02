@@ -719,7 +719,17 @@ async def _auto_extract_memories(
 
     scheduler = get_extraction_scheduler()
     total_chars = sum(len(str(t.get("content", ""))) for t in turns)
-    if not force and not scheduler.should_extract(user_id, conversation_chars=total_chars):
+    # Override fact-rich : capture le dernier message user pour heuristique keywords
+    last_user_text = ""
+    for t in reversed(turns):
+        if t.get("role") == "user" and t.get("content"):
+            last_user_text = str(t["content"])
+            break
+    if not force and not scheduler.should_extract(
+        user_id,
+        conversation_chars=total_chars,
+        last_text=last_user_text,
+    ):
         return []
 
     key = os.environ.get("ANTHROPIC_API_KEY")
