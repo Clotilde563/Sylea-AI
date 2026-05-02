@@ -692,26 +692,33 @@ async def agent2_chat(
             pass
 
     # v2 : Auto-execute Google actions via integrations API (best-effort, non-blocking)
-    # Agent 2 garde le pattern "actions returnees au frontend" mais en plus,
-    # pour les actions GMAIL_SEND/CALENDAR_EVENT/DRIVE_UPLOAD, on tente
-    # l'execution backend immediate si le user a connecte le service.
+    # Pattern fire-and-forget : fresh DB par task + track dans _BG_TASKS pour
+    # eviter le GC FastAPI qui annule les asyncio.create_task issues d'un handler.
     if user_id and actions:
+        async def _bg_google(uid: str, exec_fn, action_data: dict):
+            fresh = DatabaseManager()
+            fresh.connect()
+            try:
+                await exec_fn(fresh, uid, action_data)
+            finally:
+                try: fresh.disconnect()
+                except Exception: pass
+
         for act in actions:
             atype = act.get("type", "")
             adata = act.get("data", {}) or {}
             try:
+                exec_fn = None
                 if atype == "GMAIL_SEND" and adata.get("to") and adata.get("subject"):
-                    asyncio.create_task(
-                        _exec_gmail_send(db, user_id, adata)
-                    )
+                    exec_fn = _exec_gmail_send
                 elif atype == "CALENDAR_EVENT" and adata.get("summary") and adata.get("start"):
-                    asyncio.create_task(
-                        _exec_calendar_event(db, user_id, adata)
-                    )
+                    exec_fn = _exec_calendar_event
                 elif atype == "DRIVE_UPLOAD" and adata.get("filename") and adata.get("content"):
-                    asyncio.create_task(
-                        _exec_drive_upload(db, user_id, adata)
-                    )
+                    exec_fn = _exec_drive_upload
+                if exec_fn is not None:
+                    _t = asyncio.create_task(_bg_google(user_id, exec_fn, adata))
+                    _BG_TASKS.add(_t)
+                    _t.add_done_callback(_BG_TASKS.discard)
             except Exception:
                 pass
 
@@ -1048,8 +1055,47 @@ async def text_to_speech(data: dict):
 
 # ── v2 Google action executors (best-effort, fire-and-forget) ────────────────
 
+async def _refresh_google_token_local(db: DatabaseManager, user_id: str, provider: str) -> str | None:
+    """Refresh OAuth token Google. Reuse pattern de api/routers/integrations.py."""
+    import httpx
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return None
+    row = db.conn.execute(
+        "SELECT refresh_token FROM user_integrations WHERE auth_user_id = ? AND provider = ?",
+        (user_id, provider),
+    ).fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post("https://oauth2.googleapis.com/token", data={
+                "client_id": client_id, "client_secret": client_secret,
+                "refresh_token": row[0], "grant_type": "refresh_token",
+            })
+            if resp.status_code == 200:
+                new_token = resp.json().get("access_token")
+                if new_token:
+                    db.conn.execute(
+                        "UPDATE user_integrations SET access_token = ?, updated_at = ? "
+                        "WHERE auth_user_id = ? AND provider = ?",
+                        (new_token, datetime.now(timezone.utc).isoformat(), user_id, provider),
+                    )
+                    db.conn.commit()
+                    return new_token
+    except Exception:
+        pass
+    return None
+
+
+async def _get_token_with_refresh(db: DatabaseManager, user_id: str, provider: str, current_token: str) -> str | None:
+    """Force un refresh OAuth si le current token a 401, retourne le nouveau."""
+    return await _refresh_google_token_local(db, user_id, provider)
+
+
 async def _exec_gmail_send(db: DatabaseManager, user_id: str, data: dict) -> None:
-    """Envoie un email REEL via Gmail API. Erreur silencieuse + log audit."""
+    """Envoie un email REEL via Gmail API avec retry-on-401-refresh."""
     import httpx, base64
     try:
         row = db.conn.execute(
@@ -1065,15 +1111,22 @@ async def _exec_gmail_send(db: DatabaseManager, user_id: str, data: dict) -> Non
         raw = f"To: {to}\r\nSubject: {subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}"
         encoded = base64.urlsafe_b64encode(raw.encode("utf-8")).decode("utf-8")
         async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.post(
-                "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={"raw": encoded},
-            )
-            if r.status_code in (200, 201):
-                _log_agent2_action(db, user_id, "GMAIL_SEND", success=True, summary=f"to={to[:50]}")
-            else:
+            for attempt in range(2):
+                r = await client.post(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    json={"raw": encoded},
+                )
+                if r.status_code in (200, 201):
+                    _log_agent2_action(db, user_id, "GMAIL_SEND", success=True, summary=f"to={to[:50]}")
+                    return
+                if r.status_code == 401 and attempt == 0:
+                    new_token = await _get_token_with_refresh(db, user_id, "gmail", token)
+                    if new_token:
+                        token = new_token
+                        continue
                 _log_agent2_action(db, user_id, "GMAIL_SEND", success=False, summary=f"http {r.status_code}")
+                return
     except Exception as e:
         try:
             _log_agent2_action(db, user_id, "GMAIL_SEND", success=False, summary=str(e)[:80])
@@ -1082,7 +1135,7 @@ async def _exec_gmail_send(db: DatabaseManager, user_id: str, data: dict) -> Non
 
 
 async def _exec_calendar_event(db: DatabaseManager, user_id: str, data: dict) -> None:
-    """Cree un event Google Calendar. Best-effort."""
+    """Cree un event Google Calendar avec retry-on-401-refresh."""
     import httpx
     try:
         row = db.conn.execute(
@@ -1090,9 +1143,8 @@ async def _exec_calendar_event(db: DatabaseManager, user_id: str, data: dict) ->
             (user_id,),
         ).fetchone()
         if not row or not row[0] or len(row[0]) < 20:
-            return  # Calendar non connecte
+            return
         token = row[0]
-        # Anti-pollution : si pas d'end, met +1h apres start
         start = str(data.get("start", "")).strip()
         end = str(data.get("end", "")).strip()
         if start and not end:
@@ -1110,15 +1162,22 @@ async def _exec_calendar_event(db: DatabaseManager, user_id: str, data: dict) ->
             "end": {"dateTime": end, "timeZone": "Europe/Paris"},
         }
         async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.post(
-                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-                headers={"Authorization": f"Bearer {token}"},
-                json=payload,
-            )
-            if r.status_code in (200, 201):
-                _log_agent2_action(db, user_id, "CALENDAR_EVENT", success=True, summary=str(payload.get("summary", ""))[:50])
-            else:
+            for attempt in range(2):
+                r = await client.post(
+                    "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=payload,
+                )
+                if r.status_code in (200, 201):
+                    _log_agent2_action(db, user_id, "CALENDAR_EVENT", success=True, summary=str(payload.get("summary", ""))[:50])
+                    return
+                if r.status_code == 401 and attempt == 0:
+                    new_token = await _get_token_with_refresh(db, user_id, "google_calendar", token)
+                    if new_token:
+                        token = new_token
+                        continue
                 _log_agent2_action(db, user_id, "CALENDAR_EVENT", success=False, summary=f"http {r.status_code}")
+                return
     except Exception as e:
         try:
             _log_agent2_action(db, user_id, "CALENDAR_EVENT", success=False, summary=str(e)[:80])
@@ -1127,7 +1186,7 @@ async def _exec_calendar_event(db: DatabaseManager, user_id: str, data: dict) ->
 
 
 async def _exec_drive_upload(db: DatabaseManager, user_id: str, data: dict) -> None:
-    """Upload un fichier sur Google Drive. Best-effort."""
+    """Upload un fichier sur Google Drive avec retry-on-401-refresh."""
     import httpx
     try:
         row = db.conn.execute(
@@ -1135,12 +1194,11 @@ async def _exec_drive_upload(db: DatabaseManager, user_id: str, data: dict) -> N
             (user_id,),
         ).fetchone()
         if not row or not row[0] or len(row[0]) < 20:
-            return  # Drive non connecte
+            return
         token = row[0]
         filename = str(data.get("filename", "Document.md"))
         content = str(data.get("content", ""))
         mime = str(data.get("mime_type", "text/markdown"))
-        # Multipart upload (simple)
         boundary = "sylea_drive_boundary_xyz"
         meta = json.dumps({"name": filename, "mimeType": mime})
         body = (
@@ -1153,18 +1211,25 @@ async def _exec_drive_upload(db: DatabaseManager, user_id: str, data: dict) -> N
             f"--{boundary}--"
         ).encode("utf-8")
         async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(
-                "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": f"multipart/related; boundary={boundary}",
-                },
-                content=body,
-            )
-            if r.status_code in (200, 201):
-                _log_agent2_action(db, user_id, "DRIVE_UPLOAD", success=True, summary=filename[:50])
-            else:
+            for attempt in range(2):
+                r = await client.post(
+                    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": f"multipart/related; boundary={boundary}",
+                    },
+                    content=body,
+                )
+                if r.status_code in (200, 201):
+                    _log_agent2_action(db, user_id, "DRIVE_UPLOAD", success=True, summary=filename[:50])
+                    return
+                if r.status_code == 401 and attempt == 0:
+                    new_token = await _get_token_with_refresh(db, user_id, "google_drive", token)
+                    if new_token:
+                        token = new_token
+                        continue
                 _log_agent2_action(db, user_id, "DRIVE_UPLOAD", success=False, summary=f"http {r.status_code}")
+                return
     except Exception as e:
         try:
             _log_agent2_action(db, user_id, "DRIVE_UPLOAD", success=False, summary=str(e)[:80])
