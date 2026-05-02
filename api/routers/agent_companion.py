@@ -24,7 +24,24 @@ from api.dependencies import get_db, get_optional_user
 from sylea.core.storage.database import DatabaseManager
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
 
+# v2 enrichments : shared memory + awareness (partages avec Agent 2 + Agent 3)
+try:
+    from api.agent_shared_memory import (
+        load_memories, format_memories, auto_extract_from_turns,
+    )
+except Exception:
+    load_memories = lambda *a, **k: []
+    format_memories = lambda m, **k: ""
+    async def auto_extract_from_turns(*a, **k): return []
+try:
+    from api.agent3_awareness import build_awareness_block
+except Exception:
+    def build_awareness_block(db, user_id): return ""
+
 router = APIRouter(prefix="/api/agent", tags=["agent"])
+
+# Track background tasks (avoid GC FastAPI annulant asyncio.create_task)
+_BG_TASKS: set = set()
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -123,6 +140,8 @@ def _build_agent_prompt(
     db: DatabaseManager | None = None,
     user_id: str | None = None,
     full_context: str = "",
+    awareness_block: str = "",
+    memory_block: str = "",
 ) -> str:
     # Build profile summary
     if profil_data:
@@ -191,7 +210,10 @@ PROFIL DE L'UTILISATEUR :
         except Exception:
             pass
 
-    return f"""Tu es l'Agent Sylea 1, un compagnon personnel bienveillant et intelligent.
+    awareness_section = (awareness_block + "\n") if awareness_block else ""
+    memory_section = (memory_block + "\n") if memory_block else ""
+
+    return f"""{awareness_section}{memory_section}Tu es l'Agent Sylea 1, un compagnon personnel bienveillant et intelligent.
 Tu parles comme un ami proche qui connait bien l'utilisateur. Tu es chaleureux, naturel, jamais robotique.
 
 REGLES ABSOLUES :
@@ -529,22 +551,39 @@ async def agent_chat(
         else []
     )
 
-    # Load sub-objectives
+    # Load sub-objectives (col `user_id`, pas `profil_id`)
     sous_objectifs: list[dict] = []
     try:
         cursor = db.conn.execute(
             "SELECT titre, progression FROM sous_objectifs "
-            "WHERE profil_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1)",
+            "WHERE user_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1)",
             (user_id or "",),
         )
         sous_objectifs = [{"titre": r[0], "progression": r[1]} for r in cursor.fetchall()]
     except Exception:
         pass
 
-    # Build prompt
+    # Build prompt + v2 enrichments (memory partagee + awareness contextuel)
     device_ctx = format_device_context(data.contexte_appareil) if data.contexte_appareil else ""
     full_ctx = build_full_user_context(db, user_id)
-    system_prompt = _build_agent_prompt(profil_data, decisions, sous_objectifs, device_ctx, db=db, user_id=user_id, full_context=full_ctx)
+    awareness_blk = ""
+    memory_blk = ""
+    if user_id:
+        try:
+            awareness_blk = build_awareness_block(db, user_id) or ""
+        except Exception:
+            pass
+        try:
+            mem = load_memories(db, user_id, limit=30)
+            memory_blk = format_memories(mem, max_items=25) if mem else ""
+        except Exception:
+            pass
+    system_prompt = _build_agent_prompt(
+        profil_data, decisions, sous_objectifs, device_ctx,
+        db=db, user_id=user_id, full_context=full_ctx,
+        awareness_block=awareness_blk,
+        memory_block=memory_blk,
+    )
 
     # Build chat context: load from DB if authenticated, else use what frontend sent
     if user_id:
@@ -617,6 +656,29 @@ async def agent_chat(
         # Fire-and-forget: extract and save personal info to collected_info table
         recent_for_info = _load_agent_messages(db, user_id, limit=4)
         asyncio.create_task(_extract_and_save_info(recent_for_info, profil_data, db, user_id))
+
+        # v2 : Auto-extract shared memory (Agent 1/2/3) — best-effort + fresh DB
+        try:
+            recent_msgs = _load_agent_messages(db, user_id, limit=10)
+            recent_msgs = list(reversed(recent_msgs))  # DESC -> ASC chrono
+            turns = [
+                {"role": "agent" if m["role"] == "agent" else "user", "content": m["content"]}
+                for m in recent_msgs if m.get("content", "").strip()
+            ]
+            if turns:
+                async def _bg_extract(uid: str, t: list):
+                    fresh = DatabaseManager()
+                    fresh.connect()
+                    try:
+                        await auto_extract_from_turns(fresh, uid, t, agent_label="agent1")
+                    finally:
+                        try: fresh.disconnect()
+                        except Exception: pass
+                _t = asyncio.create_task(_bg_extract(user_id, turns))
+                _BG_TASKS.add(_t)
+                _t.add_done_callback(_BG_TASKS.discard)
+        except Exception:
+            pass
 
     return AgentChatOut(
         message=agent_response,
@@ -692,7 +754,7 @@ async def generate_proactive_message(
 
     # Check last decision (indicates app usage)
     last_decision = db.conn.execute(
-        "SELECT cree_le FROM decisions WHERE profil_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1) ORDER BY cree_le DESC LIMIT 1",
+        "SELECT cree_le FROM decisions WHERE user_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1) ORDER BY cree_le DESC LIMIT 1",
         (user_id,),
     ).fetchone()
 
