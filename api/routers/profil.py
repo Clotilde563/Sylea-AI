@@ -188,6 +188,50 @@ async def upsert_profil(
     return _to_profil_out(profil)
 
 
+def _insert_recalc_marker(db: DatabaseManager, profil_id: str, prob_actuelle: float) -> None:
+    """Insere une decision-marker pour combler le gap entre la derniere decision
+    historique (qui peut etre vieille) et la prob_actuelle apres recalc.
+
+    Logique : verifier la derniere decision pour ce profil. Si son
+    probabilite_apres differe de prob_actuelle, inserer un marker.
+
+    Permet a Stats Chart2 de converger vers prob_actuelle (alignment
+    Dashboard <-> Stats).
+    """
+    try:
+        last = db.conn.execute(
+            "SELECT probabilite_apres FROM decisions WHERE user_id = ? "
+            "ORDER BY cree_le DESC LIMIT 1",
+            (profil_id,),
+        ).fetchone()
+        last_apres = float(last[0]) if last and last[0] is not None else 0.0
+        if abs(prob_actuelle - last_apres) < 0.01:
+            return  # Pas de gap, skip
+        import uuid
+        from datetime import datetime as _dt, timezone as _tz
+        db.conn.execute(
+            "INSERT INTO decisions (id, user_id, question, options_json, "
+            "probabilite_avant, option_choisie_id, probabilite_apres, "
+            "action_agent_json, cree_le, impact_temporel_jours) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                profil_id,
+                "[Recalcul probabilite]",
+                "[]",
+                last_apres,
+                None,
+                prob_actuelle,
+                None,
+                _dt.now(_tz.utc).isoformat(),
+                None,
+            ),
+        )
+        db.conn.commit()
+    except Exception:
+        pass
+
+
 @router.post("/probabilite", response_model=ProbabiliteOut)
 async def recalculer_probabilite(
     data: ProbabiliteIn,
@@ -202,12 +246,16 @@ async def recalculer_probabilite(
 
     1. Calcul déterministe local (MoteurProbabilite)
     2. Enrichissement IA si l'agent Claude est disponible
+    3. Insere un marker dans l'historique pour cohérence visualisation
     """
     if not repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
     profil = repo.charger(auth_user_id=user_id)
     if profil is None or not profil.objectif:
         raise HTTPException(status_code=400, detail="Profil ou objectif manquant.")
+
+    # Snapshot ancienne prob pour marker historique (cohérence Stats Chart2)
+    _prob_avant_recalc = profil.probabilite_actuelle or 0.0
 
     # Calcul local (synchrone mais rapide)
     prob_locale = moteur.calculer_probabilite_initiale(profil)
@@ -240,6 +288,8 @@ async def recalculer_probabilite(
                 profil.temps_gagne_jours = 0.0
             profil.marquer_modification()
             repo.sauvegarder(profil, auth_user_id=user_id)
+            # Marker historique pour Stats Chart2 (sinon courbe reste sur ancienne valeur)
+            _insert_recalc_marker(db, profil.id, analyse.probabilite)
             return ProbabiliteOut(
                 probabilite=analyse.probabilite,
                 temps_initial_jours=temps_initial,
@@ -270,6 +320,8 @@ async def recalculer_probabilite(
         profil.temps_gagne_jours = 0.0
     profil.marquer_modification()
     repo.sauvegarder(profil, auth_user_id=user_id)
+    # Marker historique pour cohérence (fallback local)
+    _insert_recalc_marker(db, profil.id, prob_locale)
     return ProbabiliteOut(
         probabilite=prob_locale,
         temps_initial_jours=temps_initial_local,

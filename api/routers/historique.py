@@ -77,7 +77,7 @@ def _decision_to_out(d: Decision) -> DecisionOut:
 
 @router.get("", response_model=List[DecisionOut])
 async def get_historique(
-    limite: int = Query(default=20, ge=1, le=100),
+    limite: int = Query(default=20, ge=1, le=1000),
     profil_repo: ProfilRepository = Depends(get_profil_repo),
     decision_repo: DecisionRepository = Depends(get_decision_repo),
     user_id: str | None = Depends(get_optional_user),
