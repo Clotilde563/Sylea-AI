@@ -57,7 +57,6 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
   const links = profil ? [
     { to: '/', label: t('nav.dashboard') },
     { to: '/network', label: 'Réseau Syléa' },
-    { to: '/marketplace', label: '🛒 Skills' },
     { to: '/statistiques', label: t('nav.statistiques') },
   ] : []
 
