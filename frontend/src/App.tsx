@@ -30,10 +30,10 @@ import WorkspacePage        from './pages/WorkspacePage'
 import CoachingPage         from './pages/CoachingPage'
 import IntegrationsPage     from './pages/IntegrationsPage'
 import NetworkPage          from './pages/NetworkPage'
-import MarketplacePage      from './pages/MarketplacePage'
 import OutilsPage           from './pages/OutilsPage'
 import AuthCallbackPage     from './pages/AuthCallbackPage'
 import QuotasPage           from './pages/QuotasPage'
+import AdminPage            from './pages/AdminPage'
 import WorkspacesPage       from './pages/WorkspacesPage'
 import { ToastProvider }    from './components/Toast'
 
@@ -91,10 +91,10 @@ function AppContent() {
                     {/* Backward-compat: /credentials → onglet "Clés API" de Intégrations */}
                     <Route path="/credentials"  element={<Navigate to="/integrations?tab=credentials" replace />} />
                     <Route path="/network"      element={<NetworkPage />} />
-                    <Route path="/marketplace"  element={<MarketplacePage />} />
                     <Route path="/outils"       element={<OutilsPage />} />
                     {/* Phase 10/11 */}
                     <Route path="/quotas"         element={<QuotasPage />} />
+                    <Route path="/admin"          element={<AdminPage />} />
                     <Route path="/workspaces"     element={<WorkspacesPage />} />
                     {/* Backward-compat: /api-keys → onglet "Tokens API B2B" de Intégrations */}
                     <Route path="/api-keys"       element={<Navigate to="/integrations?tab=tokens" replace />} />

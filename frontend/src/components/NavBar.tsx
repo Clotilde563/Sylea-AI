@@ -4,9 +4,13 @@ import { useState, useRef, useEffect } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { SyleaLogo } from './SyleaLogo'
 import { useStore } from '../store/useStore'
+import { useAuthStore } from '../auth/authStore'
 import { useT } from '../i18n/LanguageContext'
 import { ConfirmProfilModal } from './ConfirmProfilModal'
 import PlanBadge from './PlanBadge'
+
+// Email du compte owner (seul a voir l'entree menu Admin)
+const ADMIN_EMAIL = 'louisdeniau35@gmail.com'
 
 // Small red dot shown when there are unread proactive agent messages
 function AgentNotificationDot() {
@@ -36,6 +40,8 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
   const { pathname } = useLocation()
   const navigate = useNavigate()
   const profil = useStore((s) => s.profil)
+  const authUser = useAuthStore((s) => s.user)
+  const isAdmin = (authUser?.email || '').trim().toLowerCase() === ADMIN_EMAIL
   const t = useT()
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [showProfilModal, setShowProfilModal] = useState(false)
@@ -225,6 +231,30 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
                   <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Abonnement, consommation mensuelle</div>
                 </div>
               </button>
+
+              {/* Onglet Admin — visible uniquement pour le compte owner */}
+              {isAdmin && (
+                <button
+                  onClick={() => { setDropdownOpen(false); navigate('/admin') }}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '0.6rem',
+                    width: '100%', padding: '0.75rem 1rem',
+                    background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
+                    color: 'var(--text-secondary)', fontSize: '0.82rem',
+                    cursor: 'pointer', textAlign: 'left', transition: 'background 0.15s',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                  </svg>
+                  <div>
+                    <div style={{ fontWeight: 500, color: 'var(--text-primary)' }}>Admin</div>
+                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Dashboard owner (réservé)</div>
+                  </div>
+                </button>
+              )}
 
               {/* Onglet 1: Aide et ressources */}
               <button
