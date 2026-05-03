@@ -465,7 +465,6 @@ export function DashboardPage() {
         {/* Menu d'actions */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
           <ActionCard emoji={'\u27e1'} title={t('dashboard.analyser_choix')} desc="Soumettez un dilemme et recevez une analyse IA pros/cons" onClick={() => navigate('/dilemme')} highlight />
-          <ActionCard emoji={'\u2b22'} title="Formuler une hypothèse" desc="Simulez une décision et visualisez son impact avant de la prendre" onClick={() => navigate('/scenarios')} />
           <ActionCard emoji={'\u25eb'} title={t('dashboard.statistiques')} desc="Visualisez vos décisions passées et votre courbe de progression" onClick={() => navigate('/statistiques')} />
           <ActionCard emoji={'\u25c9'} title={t('dashboard.enregistrer_evenement')} desc="Notifiez un événement et découvrez son impact sur votre objectif" onClick={() => navigate('/evenement')} />
           <ActionCard

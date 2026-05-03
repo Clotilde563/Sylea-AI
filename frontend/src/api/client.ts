@@ -1261,12 +1261,6 @@ export const api = {
   searchKnowledge: (q: string) => request<any[]>(`/workspace/knowledge/search?q=${encodeURIComponent(q)}`),
   deleteKnowledge: (id: string) => request<void>(`/workspace/knowledge/${id}`, { method: 'DELETE' }),
 
-  // ── Scenarios ──────────────────────────────────────────────────────────────
-  getScenarios: () => request<any[]>('/scenarios'),
-  createScenario: (data: any) => request<any>('/scenarios/create', { method: 'POST', body: JSON.stringify(data) }),
-  deleteScenario: (id: string) => request<void>(`/scenarios/${id}`, { method: 'DELETE' }),
-  compareScenarios: (ids: string[]) => request<any>('/scenarios/compare', { method: 'POST', body: JSON.stringify({ scenario_ids: ids }) }),
-
   // ── Coaching ───────────────────────────────────────────────────────────────
   getCoachingPreferences: () => request<any>('/coaching/preferences'),
   updateCoachingPreferences: (data: any) => request<any>('/coaching/preferences', { method: 'PUT', body: JSON.stringify(data) }),

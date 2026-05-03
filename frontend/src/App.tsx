@@ -27,7 +27,6 @@ import PrivacyPolicyPage    from './pages/PrivacyPolicyPage'
 import TermsPage            from './pages/TermsPage'
 import HelpPage             from './pages/HelpPage'
 import WorkspacePage        from './pages/WorkspacePage'
-import ScenariosPage        from './pages/ScenariosPage'
 import CoachingPage         from './pages/CoachingPage'
 import IntegrationsPage     from './pages/IntegrationsPage'
 import NetworkPage          from './pages/NetworkPage'
@@ -91,9 +90,7 @@ function AppContent() {
                     <Route path="/bilan"        element={<BilanPage />} />
                     <Route path="/parametres"   element={<ParametresPage />} />
                     <Route path="/agents"       element={<AgentsPage />} />
-                    <Route path="/workspace"    element={<WorkspacePage />} />
-                    <Route path="/scenarios"    element={<ScenariosPage />} />
-                    <Route path="/coaching"     element={<CoachingPage />} />
+                    <Route path="/workspace"    element={<WorkspacePage />} />                    <Route path="/coaching"     element={<CoachingPage />} />
                     <Route path="/integrations" element={<IntegrationsPage />} />
                     {/* Backward-compat: /credentials → onglet "Clés API" de Intégrations */}
                     <Route path="/credentials"  element={<Navigate to="/integrations?tab=credentials" replace />} />
