@@ -205,52 +205,6 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
                 </div>
               </button>
 
-              {/* Onglet: Historique des actions (audit log) */}
-              <button
-                onClick={() => { setDropdownOpen(false); navigate('/audit') }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.6rem',
-                  width: '100%', padding: '0.75rem 1rem',
-                  background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
-                  color: 'var(--text-secondary)', fontSize: '0.82rem',
-                  cursor: 'pointer', textAlign: 'left',
-                  transition: 'background 0.15s',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-                </svg>
-                <div>
-                  <div style={{ fontWeight: 500, color: 'var(--text-primary)' }}>Historique des actions</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Ce que l'agent a fait en ton nom</div>
-                </div>
-              </button>
-
-              {/* Onglet: Metrics Agent 3 (retries, breakers, couts) */}
-              <button
-                onClick={() => { setDropdownOpen(false); navigate('/metrics') }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.6rem',
-                  width: '100%', padding: '0.75rem 1rem',
-                  background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
-                  color: 'var(--text-secondary)', fontSize: '0.82rem',
-                  cursor: 'pointer', textAlign: 'left',
-                  transition: 'background 0.15s',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 6-6"/>
-                </svg>
-                <div>
-                  <div style={{ fontWeight: 500, color: 'var(--text-primary)' }}>Observabilité</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Santé Gateway, retries, coûts APIs</div>
-                </div>
-              </button>
-
               {/* Phase 10/11 entries */}
               <button
                 onClick={() => { setDropdownOpen(false); navigate('/quotas') }}
@@ -270,69 +224,6 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
                 <div>
                   <div style={{ fontWeight: 500, color: 'var(--text-primary)' }}>Plan & Quotas</div>
                   <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Abonnement, consommation mensuelle</div>
-                </div>
-              </button>
-
-              <button
-                onClick={() => { setDropdownOpen(false); navigate('/network?tab=workspaces') }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.6rem',
-                  width: '100%', padding: '0.75rem 1rem',
-                  background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
-                  color: 'var(--text-secondary)', fontSize: '0.82rem',
-                  cursor: 'pointer', textAlign: 'left', transition: 'background 0.15s',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-                </svg>
-                <div>
-                  <div style={{ fontWeight: 500, color: 'var(--text-primary)' }}>Équipes</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Onglet du Réseau Syléa</div>
-                </div>
-              </button>
-
-              <button
-                onClick={() => { setDropdownOpen(false); navigate('/webhooks') }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.6rem',
-                  width: '100%', padding: '0.75rem 1rem',
-                  background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
-                  color: 'var(--text-secondary)', fontSize: '0.82rem',
-                  cursor: 'pointer', textAlign: 'left', transition: 'background 0.15s',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"/>
-                </svg>
-                <div>
-                  <div style={{ fontWeight: 500, color: 'var(--text-primary)' }}>Webhooks</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Notifications HTTP temps réel</div>
-                </div>
-              </button>
-
-              <button
-                onClick={() => { setDropdownOpen(false); navigate('/admin') }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.6rem',
-                  width: '100%', padding: '0.75rem 1rem',
-                  background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
-                  color: 'var(--text-secondary)', fontSize: '0.82rem',
-                  cursor: 'pointer', textAlign: 'left', transition: 'background 0.15s',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-                </svg>
-                <div>
-                  <div style={{ fontWeight: 500, color: 'var(--text-primary)' }}>Admin</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Dashboard owner (accès restreint)</div>
                 </div>
               </button>
 
