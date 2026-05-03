@@ -11,9 +11,15 @@ Routes :
 from __future__ import annotations
 
 import asyncio
+import base64
+import os
+import uuid as _uuid
+from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from sylea.core.models.user import ProfilUtilisateur, Objectif
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
@@ -25,6 +31,12 @@ from api.context_helper import format_device_context, build_full_user_context
 from sylea.core.storage.database import DatabaseManager
 
 router = APIRouter(prefix="/api/profil", tags=["profil"])
+
+# Photos uploads dir (gitignore via /data ?)
+_PHOTOS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "profil_photos"
+_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+_ALLOWED_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+_MAX_PHOTO_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
 def _to_profil_out(profil: ProfilUtilisateur) -> ProfilOut:
@@ -69,6 +81,7 @@ def _to_profil_out(profil: ProfilUtilisateur) -> ProfilOut:
         cree_le=profil.cree_le.isoformat(),
         mis_a_jour_le=profil.mis_a_jour_le.isoformat(),
         objectif_modifie_le=profil.objectif_modifie_le.isoformat() if profil.objectif_modifie_le else None,
+        photo_url=getattr(profil, "photo_url", None),
     )
 
 
@@ -519,3 +532,134 @@ async def supprimer_profil(
     if profil:
         repo.supprimer(profil.id, auth_user_id=user_id)
     return {"detail": "Profil supprimé."}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Photo de profil
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PhotoUploadOut(BaseModel):
+    photo_url: str
+    filename: str
+
+
+@router.post("/photo", response_model=PhotoUploadOut)
+async def upload_photo(
+    file: UploadFile = File(...),
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Upload de la photo de profil utilisateur.
+
+    Restrictions :
+      - Auth requise
+      - Extensions autorisees : jpg, jpeg, png, webp, gif
+      - Max 5 MB
+      - Stockee dans data/profil_photos/{user_id}_{uuid}.{ext}
+      - Retourne l'URL relative pour servir via GET /api/profil/photo/{filename}
+    """
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentification requise")
+
+    # Validation extension
+    fname = file.filename or "photo"
+    ext = os.path.splitext(fname)[1].lower()
+    if ext not in _ALLOWED_PHOTO_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Extension non autorisee. Autorisees : {', '.join(sorted(_ALLOWED_PHOTO_EXTS))}",
+        )
+
+    # Read content + check size
+    content = await file.read()
+    if len(content) > _MAX_PHOTO_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Fichier trop volumineux. Max {_MAX_PHOTO_SIZE_BYTES // 1024 // 1024} MB",
+        )
+    if len(content) < 32:
+        raise HTTPException(status_code=400, detail="Fichier vide ou invalide")
+
+    # Generate unique filename
+    safe_uid = "".join(c for c in user_id if c.isalnum() or c in "-_")[:20]
+    new_name = f"{safe_uid}_{_uuid.uuid4().hex[:12]}{ext}"
+    target = _PHOTOS_DIR / new_name
+    try:
+        target.write_bytes(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur ecriture fichier : {e}")
+
+    # Get profil id + delete old photo if exists
+    try:
+        row = db.conn.execute(
+            "SELECT id, photo_url FROM profil_utilisateur WHERE auth_user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Profil introuvable")
+        profil_id, old_photo = row[0], row[1]
+        # Delete old file if exists
+        if old_photo:
+            try:
+                old_name = old_photo.rsplit("/", 1)[-1]
+                old_path = _PHOTOS_DIR / old_name
+                if old_path.exists() and old_path.is_file():
+                    old_path.unlink()
+            except Exception:
+                pass
+        # Store new URL relative
+        photo_url = f"/api/profil/photo/{new_name}"
+        db.conn.execute(
+            "UPDATE profil_utilisateur SET photo_url = ? WHERE id = ?",
+            (photo_url, profil_id),
+        )
+        db.conn.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur DB : {e}")
+
+    return PhotoUploadOut(photo_url=photo_url, filename=new_name)
+
+
+@router.get("/photo/{filename}")
+async def get_photo(filename: str):
+    """Sert le fichier photo (public — l'URL est unique par UUID, suffisamment opaque)."""
+    # Path traversal protection
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Filename invalide")
+    target = _PHOTOS_DIR / filename
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Photo introuvable")
+    return FileResponse(target)
+
+
+@router.delete("/photo")
+async def delete_photo(
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Supprime la photo de profil de l'utilisateur courant."""
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentification requise")
+    try:
+        row = db.conn.execute(
+            "SELECT photo_url FROM profil_utilisateur WHERE auth_user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if row and row[0]:
+            try:
+                old_name = row[0].rsplit("/", 1)[-1]
+                old_path = _PHOTOS_DIR / old_name
+                if old_path.exists() and old_path.is_file():
+                    old_path.unlink()
+            except Exception:
+                pass
+        db.conn.execute(
+            "UPDATE profil_utilisateur SET photo_url = NULL WHERE auth_user_id = ?",
+            (user_id,),
+        )
+        db.conn.commit()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"deleted": True}

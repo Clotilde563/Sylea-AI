@@ -50,6 +50,7 @@ export interface Profil {
   cree_le: string
   mis_a_jour_le: string
   objectif_modifie_le: string | null
+  photo_url?: string | null
 }
 
 export interface ProfilIn {

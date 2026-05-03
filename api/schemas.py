@@ -118,6 +118,8 @@ class ProfilOut(BaseModel):
     mis_a_jour_le: str
     objectif_modifie_le: Optional[str] = None
 
+    photo_url: Optional[str] = None
+
 
 # ── Dilemme ───────────────────────────────────────────────────────────────────
 

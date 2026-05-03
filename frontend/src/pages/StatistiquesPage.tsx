@@ -67,9 +67,11 @@ export function StatistiquesPage() {
   }, [])
 
   // ── Stats résumées ────────────────────────────────────────────────────────
-  const probActuelle  = profil?.probabilite_actuelle ?? 0
+  // Unification : "probActuelle" = progression (% temps parcouru) pour aligner
+  // sur la card "PROGRESSION" et le Chart2 historique reel.
   const tempsInitial  = profil?.temps_initial_jours ?? 0
   const tempsGagneTotal = profil?.temps_gagne_jours ?? 0
+  const probActuelle  = tempsInitial > 0 ? (tempsGagneTotal / tempsInitial) * 100 : 0
   const tempsRestant  = tempsInitial - tempsGagneTotal
   const pctGauge      = gaugePercent(tempsInitial, tempsGagneTotal)
   const gainTotalJours = decisions.reduce((acc, d) => acc + (d.impact_net ?? 0), 0)
@@ -1013,12 +1015,15 @@ function buildHistoricalPoints(
   profil: Profil | null,
   decisions: Decision[],
 ): { histPoints: { elapsedMs: number; prob: number }[]; totalElapsedMs: number } {
+  // Unification : la courbe historique reflete maintenant la PROGRESSION
+  // (% temps parcouru sur temps total) au lieu de la probabilite IA.
+  // Cela aligne Stats Chart2 avec Dashboard et Statistiques card "Progression"
+  // qui sont tous deux calcules depuis temps_gagne / temps_initial.
   if (!profil) return { histPoints: [], totalElapsedMs: 1 }
 
+  const tempsInitial = profil.temps_initial_jours || 0
+
   // t0 = date du dernier reset de l'objectif
-  // Si pas de date de reset ET pas de decisions : J+0 (depart propre = maintenant)
-  // Si pas de date de reset MAIS des decisions : fallback cree_le (historique ancien)
-  // Trier les décisions par date croissante
   const sorted = [...decisions]
     .filter((d) => d.cree_le)
     .sort((a, b) => new Date(a.cree_le).getTime() - new Date(b.cree_le).getTime())
@@ -1027,34 +1032,39 @@ function buildHistoricalPoints(
     ? oml
     : (sorted.length === 0 ? new Date().toISOString() : profil.cree_le)
   const t0 = new Date(refDate).getTime()
-  const tNow       = Date.now()
-  const totalMs    = Math.max(tNow - t0, 1)
-  const probActuel = profil.probabilite_actuelle
+  const tNow = Date.now()
+  const totalMs = Math.max(tNow - t0, 1)
 
+  // Progression actuelle = temps_gagne / temps_initial * 100
+  const progressionActuelle = tempsInitial > 0
+    ? ((profil.temps_gagne_jours || 0) / tempsInitial) * 100
+    : 0
 
   const points: { elapsedMs: number; prob: number }[] = []
 
-  // Point de départ : prob initiale à t=0
-  // Si aucune décision (ex: après reset), partir de 0
-  const probInitiale = sorted.length > 0
-    ? sorted[0].probabilite_avant
-    : probActuel  // pas de decisions -> partir de la proba actuelle
-  points.push({ elapsedMs: 0, prob: probInitiale })
+  // Point de depart : 0% (debut au moment du reset objectif)
+  points.push({ elapsedMs: 0, prob: 0 })
 
-  // Chaque décision ajoute deux points (avant → après)
+  // Pour chaque decision : calcul de la progression cumulative
+  // On utilise temps_gagne_avant et temps_gagne_apres deja stockes en DB
   for (const d of sorted) {
     const tMs = new Date(d.cree_le).getTime() - t0
     if (tMs <= 0) continue
-    if (d.probabilite_avant !== undefined) {
-      points.push({ elapsedMs: tMs - 1, prob: d.probabilite_avant })
+    if (tempsInitial <= 0) continue
+    const tgAvant = (d as any).temps_gagne_avant
+    const tgApres = (d as any).temps_gagne_apres
+    if (tgAvant !== null && tgAvant !== undefined) {
+      const progAvant = (tgAvant / tempsInitial) * 100
+      points.push({ elapsedMs: tMs - 1, prob: progAvant })
     }
-    if (d.probabilite_apres !== null && d.probabilite_apres !== undefined) {
-      points.push({ elapsedMs: tMs, prob: d.probabilite_apres })
+    if (tgApres !== null && tgApres !== undefined) {
+      const progApres = (tgApres / tempsInitial) * 100
+      points.push({ elapsedMs: tMs, prob: progApres })
     }
   }
 
-  // Point final : aujourd'hui
-  points.push({ elapsedMs: totalMs, prob: probActuel })
+  // Point final : progression actuelle aujourd'hui
+  points.push({ elapsedMs: totalMs, prob: progressionActuelle })
 
   return { histPoints: points, totalElapsedMs: totalMs }
 }

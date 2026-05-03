@@ -133,6 +133,7 @@ class ProfilUtilisateur:
     cree_le: datetime = field(default_factory=datetime.now)
     mis_a_jour_le: datetime = field(default_factory=datetime.now)
     objectif_modifie_le: Optional[datetime] = None
+    photo_url: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Valide les données saisies."""
@@ -203,6 +204,7 @@ class ProfilUtilisateur:
             "cree_le": self.cree_le.isoformat(),
             "mis_a_jour_le": self.mis_a_jour_le.isoformat(),
             "objectif_modifie_le": self.objectif_modifie_le.isoformat() if self.objectif_modifie_le else None,
+            "photo_url": self.photo_url,
         }
 
     @classmethod
@@ -258,4 +260,5 @@ class ProfilUtilisateur:
         profil.mis_a_jour_le = datetime.fromisoformat(data["mis_a_jour_le"])
         oml = data.get("objectif_modifie_le")
         profil.objectif_modifie_le = datetime.fromisoformat(oml) if oml else None
+        profil.photo_url = data.get("photo_url")
         return profil

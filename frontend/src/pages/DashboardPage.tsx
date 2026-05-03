@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ProbabilityGauge } from '../components/ProbabilityGauge'
 import { SyleaLogo } from '../components/SyleaLogo'
+import ProfilePhotoAvatar from '../components/ProfilePhotoAvatar'
 import { useStore } from '../store/useStore'
 import { useT } from '../i18n/LanguageContext'
 import { useDeviceContext } from '../contexts/DeviceContext'
@@ -162,7 +163,13 @@ export function DashboardPage() {
 
         {/* En-tête chaleureux */}
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-          <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+            <ProfilePhotoAvatar
+              photoUrl={profil.photo_url}
+              nom={profil.nom}
+              onUpdated={(url) => setProfil(p => p ? { ...p, photo_url: url } : p)}
+            />
+            <div>
             <p style={{ color: 'var(--accent-violet-light)', fontSize: '0.82rem', letterSpacing: '0.06em', marginBottom: '0.35rem', opacity: 0.85 }}>{t('dashboard.bon_retour')}</p>
             <h1 style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.3rem', background: 'linear-gradient(135deg, var(--accent-silver), var(--accent-violet-light))', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>{profil.nom}</h1>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -170,6 +177,7 @@ export function DashboardPage() {
               <span style={{ color: 'var(--text-muted)', opacity: 0.4 }}>|</span>
               <span style={{ color: 'var(--accent-gold)' }}>{'\u25c7'}</span> {profil.ville}
             </p>
+            </div>
           </div>
           <SyleaLogo size={52} animated={false} />
         </div>

@@ -298,6 +298,7 @@ class DatabaseManager:
                 "ALTER TABLE profil_utilisateur ADD COLUMN objectif_modifie_le TEXT",
                 "ALTER TABLE profil_utilisateur ADD COLUMN phrase_personnalite TEXT DEFAULT NULL",
                 "ALTER TABLE profil_utilisateur ADD COLUMN objectif_probabilite_calculee REAL DEFAULT 0",
+                "ALTER TABLE profil_utilisateur ADD COLUMN photo_url TEXT DEFAULT NULL",
             ]:
                 try:
                     self._conn.execute(col_sql)

@@ -186,11 +186,17 @@ def _recent_wellbeing(db: Any, user_id: str) -> list[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _objective_snapshot(db: Any, user_id: str) -> list[str]:
-    """Resume de l'objectif de vie (depuis profil_utilisateur)."""
+    """Resume de l'objectif de vie (depuis profil_utilisateur).
+
+    Unification : on expose la PROGRESSION (% temps parcouru) au lieu de la
+    probabilite IA, pour avoir une metric unique partout (Dashboard, Stats,
+    agents).
+    """
     out: list[str] = []
     try:
         row = db.conn.execute(
-            "SELECT objectif_description, objectif_categorie, objectif_deadline, probabilite_actuelle "
+            "SELECT objectif_description, objectif_categorie, objectif_deadline, "
+            "       temps_initial_jours, temps_gagne_jours "
             "FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1",
             (user_id,),
         ).fetchone()
@@ -198,14 +204,15 @@ def _objective_snapshot(db: Any, user_id: str) -> list[str]:
             desc = str(row[0])[:150]
             cat = row[1] or ""
             deadline = row[2]  # ISO date string (ex: "2026-12-31")
-            prob = row[3]
+            t_init = row[3] or 0
+            t_gagne = row[4] or 0
+            progression = (t_gagne / t_init * 100) if t_init > 0 else 0
             bits = [f"'{desc}'"]
             if cat:
                 bits.append(f"cat: {cat}")
             if deadline:
                 bits.append(f"deadline: {deadline}")
-            if prob is not None:
-                bits.append(f"proba actuelle: {prob:.1f}%")
+            bits.append(f"progression: {progression:.1f}%")
             out.append(f"- **Objectif de vie** : {' | '.join(bits)}")
     except Exception as e:
         logger.debug(f"objective failed: {e}")

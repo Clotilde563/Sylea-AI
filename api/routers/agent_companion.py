@@ -154,7 +154,7 @@ PROFIL DE L'UTILISATEUR :
 - Ville : {profil_data.get('ville', 'Non renseigne')}
 - Situation familiale : {profil_data.get('situation_familiale', 'Non renseigne')}
 - Objectif de vie : {profil_data.get('objectif_description', 'Non defini')}
-- Probabilite actuelle : {profil_data.get('probabilite_actuelle', 0):.1f}%
+- Progression vers l'objectif : {profil_data.get('probabilite_actuelle', 0):.1f}% (temps parcouru / temps total)
 """
     else:
         profil_info = "AUCUN PROFIL CREE - L'utilisateur n'a pas encore cree son profil."
@@ -530,7 +530,12 @@ async def agent_chat(
             "diplomes": getattr(profil, 'diplomes', []),
             "langues": getattr(profil, 'langues', []),
             "objectif_description": profil.objectif.description if profil.objectif else None,
-            "probabilite_actuelle": profil.probabilite_actuelle,
+            # Unification : on expose progression (% temps gagne sur temps initial)
+            # comme metric unique, plus comprehensible que la probabilite IA.
+            "probabilite_actuelle": (
+                round((profil.temps_gagne_jours or 0) / profil.temps_initial_jours * 100, 1)
+                if (profil.temps_initial_jours or 0) > 0 else 0.0
+            ),
             "scores_bien_etre": {
                 "sante": getattr(profil, 'score_sante', None),
                 "stress": getattr(profil, 'score_stress', None),

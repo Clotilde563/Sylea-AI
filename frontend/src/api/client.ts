@@ -111,6 +111,26 @@ export const api = {
   supprimerProfil: (): Promise<{ detail: string }> =>
     request<{ detail: string }>('/profil', { method: 'DELETE' }),
 
+  // Upload photo de profil (multipart/form-data)
+  uploadProfilPhoto: async (file: File): Promise<{ photo_url: string; filename: string }> => {
+    const token = localStorage.getItem(AUTH_TOKEN_KEY)
+    const fd = new FormData()
+    fd.append('file', file)
+    const r = await fetch(`${BASE}/profil/photo`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: fd,
+    })
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error(err.detail || `HTTP ${r.status}`)
+    }
+    return r.json()
+  },
+
+  deleteProfilPhoto: (): Promise<{ deleted: boolean }> =>
+    request<{ deleted: boolean }>('/profil/photo', { method: 'DELETE' }),
+
   // ── Dilemme ────────────────────────────────────────────────────────────────
 
   // Analyser un dilemme (appel IA) — N options

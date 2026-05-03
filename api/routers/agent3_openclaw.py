@@ -1605,7 +1605,7 @@ PROFIL DE L'UTILISATEUR :
 - Diplomes : {', '.join(profil_data.get('diplomes', [])) or 'Non renseigne'}
 - Langues : {', '.join(profil_data.get('langues', [])) or 'Non renseigne'}
 - Objectif de vie : {profil_data.get('objectif_description', 'Non defini')}
-- Probabilite actuelle : {profil_data.get('probabilite_actuelle', 0):.1f}%
+- Progression vers l'objectif : {profil_data.get('probabilite_actuelle', 0):.1f}% (temps parcouru / temps total)
 """
     else:
         profil_info = "AUCUN PROFIL CREE - L'utilisateur n'a pas encore cree son profil."
@@ -4396,7 +4396,11 @@ async def agent3_chat_native(
                             "diplomes": getattr(_p, "diplomes", []),
                             "langues": getattr(_p, "langues", []),
                             "objectif_description": _p.objectif.description if _p.objectif else None,
-                            "probabilite_actuelle": _p.probabilite_actuelle or 0,
+                            # Unification : on expose progression (% temps parcouru)
+                            "probabilite_actuelle": (
+                                round((_p.temps_gagne_jours or 0) / _p.temps_initial_jours * 100, 1)
+                                if (_p.temps_initial_jours or 0) > 0 else 0.0
+                            ),
                         }
                 except Exception as _pe:
                     logger.debug(f"profil load failed (non-fatal): {_pe}")
@@ -5523,7 +5527,7 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
             # Contexte utilisateur compact (au lieu du full system prompt de ~13KB)
             _user_ctx_parts = []
             if profil_data:
-                _user_ctx_parts.append(f"[Utilisateur: {profil_data.get('nom', '?')}, {profil_data.get('age', '?')} ans, {profil_data.get('profession', '?')}, {profil_data.get('ville', '?')}. Objectif: {profil_data.get('objectif_description', 'Non defini')} (proba: {profil_data.get('probabilite_actuelle', 0):.0f}%)]")
+                _user_ctx_parts.append(f"[Utilisateur: {profil_data.get('nom', '?')}, {profil_data.get('age', '?')} ans, {profil_data.get('profession', '?')}, {profil_data.get('ville', '?')}. Objectif: {profil_data.get('objectif_description', 'Non defini')} (progression: {profil_data.get('probabilite_actuelle', 0):.0f}%)]")
             if sous_objectifs:
                 _so_list = ", ".join(f"{so.get('titre', '?')} ({so.get('progression', 0):.0f}%)" for so in sous_objectifs[:4])
                 _user_ctx_parts.append(f"[Sous-objectifs: {_so_list}]")
@@ -6200,7 +6204,7 @@ PROFIL UTILISATEUR :
 - Profession : {profil_data.get('profession', 'Non renseigne')}
 - Ville : {profil_data.get('ville', 'Non renseigne')}
 - Objectif de vie : {profil_data.get('objectif_description', 'Non defini')}
-- Probabilite de reussite : {profil_data.get('probabilite_actuelle', 0):.0f}%"""
+- Progression vers l'objectif : {profil_data.get('probabilite_actuelle', 0):.0f}%"""
 
             _conv_decisions = ""
             if decisions:
