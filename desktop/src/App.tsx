@@ -1,7 +1,10 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import OpenClawOnboarding from './OpenClawOnboarding'
 import { SyleaLogo, SyleaWordmark, AgentSyleaLogo, type AgentVariant } from './SyleaLogo'
+import { DesktopTitlebar } from './DesktopTitlebar'
+import { useDragDrop, type DroppedFile } from './useDragDrop'
 
 const API_BASE = 'http://localhost:8000'
 
@@ -173,6 +176,42 @@ function App() {
   const wsRef = useRef<WebSocket | null>(null)
   const stepsEndRef = useRef<HTMLDivElement>(null)
 
+  // Sprint 1 — Pill compact mode + notifs pause + drag-drop
+  const [pillMode, setPillMode] = useState(false)
+  const [notifsPaused, setNotifsPaused] = useState(false)
+  const notifsPausedRef = useRef(false)
+  useEffect(() => { notifsPausedRef.current = notifsPaused }, [notifsPaused])
+
+  const onDropFiles = useCallback(async (files: DroppedFile[]) => {
+    // Inline addStep (la fonction `addStep` est definie plus bas)
+    const append = (action: string, detail: string, status: ActionStep['status']) => {
+      const id = Math.random().toString(36).slice(2, 9)
+      setSteps(prev => [...prev, {
+        id, action, status, detail,
+        time: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
+      }])
+    }
+    append('FILE_DROP', `${files.length} fichier(s) dropped depuis l'OS`, 'running')
+    for (const f of files) {
+      append('FILE_DROP', `📄 ${f.name} (${(f.size/1024).toFixed(1)} KB)`, 'done')
+    }
+  }, [])
+  const { hovering: dragHover } = useDragDrop(onDropFiles)
+
+  const togglePill = useCallback(async () => {
+    const next = !pillMode
+    try { await invoke('toggle_pill_mode', { pill: next }) } catch {}
+    setPillMode(next)
+  }, [pillMode])
+
+  useEffect(() => {
+    let unsub: (() => void) | undefined
+    listen<boolean>('tray:notifs', (evt) => {
+      setNotifsPaused(!evt.payload)
+    }).then(fn => { unsub = fn }).catch(() => {})
+    return () => { try { unsub?.() } catch {} }
+  }, [])
+
   useEffect(() => {
     stepsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [steps])
@@ -222,7 +261,7 @@ function App() {
           if (Math.abs(now.getTime() - reminderTime.getTime()) < 60000 && !r.completed) {
             firedReminders.add(r.id)
             addStep('REMINDER', `⏰ RAPPEL : ${r.message}`, 'done')
-            if ('Notification' in window && Notification.permission === 'granted') {
+            if (!notifsPausedRef.current && 'Notification' in window && Notification.permission === 'granted') {
               new Notification('⏰ Sylea Agent — Rappel', { body: r.message })
             }
             // Mark as completed
@@ -889,10 +928,86 @@ function App() {
   // ── DASHBOARD 3 COLONNES ──
   const wsColor = wsConnected ? SY.success : SY.error
 
+  // En mode pill compact, on affiche un mini-display ambient (Sprint 1.4)
+  if (pillMode) {
+    return (
+      <div style={{
+        display: 'flex', flexDirection: 'column', height: '100vh',
+        background: 'rgba(5,8,16,0.92)', backdropFilter: 'blur(12px)',
+        borderRadius: 12, overflow: 'hidden',
+        border: `1px solid ${SY.borderHi}`,
+        boxShadow: `0 8px 24px rgba(0,200,255,0.18)`,
+      }}>
+        <DesktopTitlebar onTogglePill={togglePill} isPill />
+        <div
+          data-tauri-drag-region
+          onDoubleClick={togglePill}
+          style={{
+            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '0 0.6rem', gap: 8, cursor: 'pointer',
+            fontFamily: SY.mono,
+          }}
+          title="Double-clic = mode plein"
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: '50%',
+              background: wsConnected ? SY.success : SY.error,
+              boxShadow: `0 0 8px ${wsConnected ? SY.success : SY.error}`,
+              animation: 'sy-pulse 2s ease-in-out infinite',
+            }} />
+            <span style={{ fontSize: 10, color: SY.text, fontWeight: 600, letterSpacing: '0.04em' }}>
+              {wsConnected ? 'CONNECTÉ' : 'OFFLINE'}
+            </span>
+          </div>
+          <span style={{ fontSize: 9, color: SY.textMute }}>
+            {steps.filter(s => s.status === 'done').length} act.
+          </span>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div style={{
-      display: 'flex', height: '100vh',
+      display: 'flex', flexDirection: 'column', height: '100vh',
       background: SY.bg, overflow: 'hidden',
+      position: 'relative',
+    }}>
+      <DesktopTitlebar onTogglePill={togglePill} isPill={false} />
+
+      {/* Drag overlay (Sprint 1.6) */}
+      {dragHover && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9000,
+          background: 'rgba(0,200,255,0.12)',
+          backdropFilter: 'blur(2px)',
+          border: `2px dashed ${SY.cyan}`,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          pointerEvents: 'none',
+          fontFamily: SY.mono, fontSize: 14, fontWeight: 600,
+          color: SY.cyan, letterSpacing: '0.08em',
+        }}>
+          ↓ DROP ICI POUR ANALYSER ↓
+        </div>
+      )}
+
+      {/* Notifs pause indicator */}
+      {notifsPaused && (
+        <div style={{
+          position: 'absolute', top: 40, right: 12, zIndex: 100,
+          padding: '4px 8px', borderRadius: 6,
+          background: 'rgba(245,158,11,0.16)',
+          border: '1px solid rgba(245,158,11,0.4)',
+          fontSize: 10, fontFamily: SY.mono, color: SY.warn,
+          letterSpacing: '0.06em',
+        }}>
+          🔕 NOTIFS EN PAUSE
+        </div>
+      )}
+
+    <div style={{
+      display: 'flex', flex: 1, overflow: 'hidden',
       position: 'relative',
     }}>
 
@@ -1602,6 +1717,7 @@ function App() {
           </div>
         </div>
       </div>
+    </div>
     </div>
   )
 }

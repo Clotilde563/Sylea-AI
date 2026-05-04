@@ -4,7 +4,9 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Systeme de fichiers — Commandes v1 (inchangees)
@@ -683,14 +685,196 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Main — Enregistrement des commandes Tauri
+//  Sprint 1 — Commandes window/pill/autostart/updater
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Bascule entre la fenetre normale (720x820) et le mode "pill" compact
+/// (240x80, always-on-top, en bas a droite). Idéal pour presence ambiante
+/// type Spotify mini-player.
+#[tauri::command]
+async fn toggle_pill_mode(window: WebviewWindow, pill: bool) -> Result<(), String> {
+    use tauri::{LogicalSize, PhysicalPosition};
+    if pill {
+        // Place pill en bas a droite (offset 16px)
+        let monitor = window.current_monitor().map_err(|e| e.to_string())?;
+        let (mw, mh, scale) = if let Some(m) = monitor {
+            let s = m.size();
+            (s.width as i32, s.height as i32, m.scale_factor())
+        } else {
+            (1920, 1080, 1.0)
+        };
+        let pill_w_logical = 240.0_f64;
+        let pill_h_logical = 80.0_f64;
+        let pill_w_phys = (pill_w_logical * scale) as i32;
+        let pill_h_phys = (pill_h_logical * scale) as i32;
+        let margin = (16.0 * scale) as i32;
+        let x = mw - pill_w_phys - margin;
+        let y = mh - pill_h_phys - margin;
+        window.set_decorations(false).map_err(|e| e.to_string())?;
+        window
+            .set_size(LogicalSize::new(pill_w_logical, pill_h_logical))
+            .map_err(|e| e.to_string())?;
+        window
+            .set_position(PhysicalPosition::new(x as f64, y as f64))
+            .map_err(|e| e.to_string())?;
+        window.set_always_on_top(true).map_err(|e| e.to_string())?;
+    } else {
+        // Mode normal — taille initiale, centre, AOT off
+        window.set_decorations(false).map_err(|e| e.to_string())?;
+        window
+            .set_size(LogicalSize::new(720.0, 820.0))
+            .map_err(|e| e.to_string())?;
+        window.center().map_err(|e| e.to_string())?;
+        window.set_always_on_top(false).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Affiche/cache la fenetre principale (utilise par tray + hotkey global)
+#[tauri::command]
+fn toggle_main_window(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("main") {
+        let visible = win.is_visible().unwrap_or(false);
+        if visible {
+            win.hide().map_err(|e| e.to_string())?;
+        } else {
+            win.show().map_err(|e| e.to_string())?;
+            win.set_focus().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Quit propre (utilise par tray menu)
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Tray icon — barre systeme Windows / macOS
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::menu::MenuBuilder;
+    let menu = MenuBuilder::new(app)
+        .text("show", "Ouvrir Sylea Agent")
+        .separator()
+        .text("pause_notif", "Mettre les notifs en pause")
+        .text("resume_notif", "Reprendre les notifs")
+        .separator()
+        .text("quit", "Quitter")
+        .build()?;
+
+    let _ = TrayIconBuilder::with_id("main")
+        .tooltip("Sylea Agent — assistant local")
+        .icon(app.default_window_icon().unwrap().clone())
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            "pause_notif" => {
+                let _ = app.emit("tray:notifs", false);
+            }
+            "resume_notif" => {
+                let _ = app.emit("tray:notifs", true);
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            // Double-click -> toggle window visibility
+            if let TrayIconEvent::DoubleClick { .. } = event {
+                let app = tray.app_handle();
+                if let Some(w) = app.get_webview_window("main") {
+                    let visible = w.is_visible().unwrap_or(false);
+                    if visible {
+                        let _ = w.hide();
+                    } else {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Main — Enregistrement des commandes Tauri + plugins Sprint 1
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn main() {
+    // Hotkey global : Ctrl+Shift+S (Windows) / Cmd+Shift+S (macOS via Modifiers::SUPER)
+    let toggle_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyS);
+    let toggle_shortcut_handler = toggle_shortcut.clone();
+    let toggle_shortcut_setup = toggle_shortcut.clone();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin({
+            // macos_launcher est gate par cfg(target_os = "macos")
+            #[cfg(target_os = "macos")]
+            {
+                tauri_plugin_autostart::Builder::new()
+                    .app_name("Sylea Agent")
+                    .args(vec!["--minimized"])
+                    .macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent)
+                    .build()
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                tauri_plugin_autostart::Builder::new()
+                    .app_name("Sylea Agent")
+                    .args(vec!["--minimized"])
+                    .build()
+            }
+        })
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(move |app, shortcut, event| {
+                    if shortcut == &toggle_shortcut_handler && event.state == ShortcutState::Pressed {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let visible = w.is_visible().unwrap_or(false);
+                            if visible {
+                                let _ = w.hide();
+                            } else {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(),
+        )
+        .setup(move |app| {
+            // Tray icon
+            if let Err(e) = build_tray(app.handle()) {
+                eprintln!("Tray init failed: {}", e);
+            }
+            // Register global shortcut Ctrl+Shift+S
+            if let Err(e) = app.global_shortcut().register(toggle_shortcut_setup) {
+                eprintln!("Global shortcut register failed: {}", e);
+            }
+            // If launched with --minimized (autostart), hide window at boot
+            let args: Vec<String> = std::env::args().collect();
+            if args.iter().any(|a| a == "--minimized") {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // Systeme de fichiers (v1)
             write_file,
@@ -717,6 +901,10 @@ fn main() {
             list_installed_clawhub_skills,
             // Phase 2c — Bridge desktop -> web
             open_url,
+            // Sprint 1 — Window/pill/quit
+            toggle_pill_mode,
+            toggle_main_window,
+            quit_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

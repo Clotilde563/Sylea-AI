@@ -11,13 +11,17 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Sylea Agent",
         "width": 720,
         "height": 820,
-        "minWidth": 480,
-        "minHeight": 620,
+        "minWidth": 240,
+        "minHeight": 80,
         "resizable": true,
-        "center": true
+        "center": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true
       }
     ]
   },
@@ -30,9 +34,19 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
-    "shortDescription": "Assistant AI Syléa — moteur OpenClaw local",
-    "longDescription": "Syléa installe son moteur AI OpenClaw (licence MIT, 38 outils) et connecte vos skills ClawHub preferes — calendrier, email, notes, communication, taches — pour vous accompagner dans vos decisions au quotidien.",
+    "shortDescription": "Assistant AI Sylea — moteur OpenClaw local",
+    "longDescription": "Sylea installe son moteur AI OpenClaw (licence MIT, 38 outils) et connecte vos skills ClawHub preferes — calendrier, email, notes, communication, taches — pour vous accompagner dans vos decisions au quotidien.",
     "category": "Productivity",
-    "copyright": "(c) 2026 Syléa"
+    "copyright": "(c) 2026 Sylea"
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/Clotilde563/Sylea-AI/releases/latest/download/latest.json"
+      ],
+      "dialog": false,
+      "pubkey": ""
+    }
   }
 }
