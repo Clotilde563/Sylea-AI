@@ -8,11 +8,13 @@
 // bleu-or anime / violet) — alignee sur les logos des agents dans la page
 // web AgentsPage.tsx (source de verite, conservee a l'identique).
 
-import { useId } from 'react'
+import { useId, useRef, useState } from 'react'
 
 interface SyleaLogoProps {
   size?: number
   animated?: boolean
+  /** Active la rotation 3D au hover (Sprint 2.10) */
+  hover3d?: boolean
 }
 
 // Chemin S dans un viewBox 120×120, centre (60, 54)
@@ -20,12 +22,38 @@ interface SyleaLogoProps {
 const CX = 60, CY = 54
 const S_PATH = `M ${CX} ${CY-33} C ${CX+28} ${CY-33}, ${CX+28} ${CY-9}, ${CX} ${CY} C ${CX-28} ${CY+9}, ${CX-28} ${CY+33}, ${CX} ${CY+33}`
 
-export function SyleaLogo({ size = 40, animated = true }: SyleaLogoProps) {
+// Hook interne : retourne {ref, transform, onHover} pour effet 3D tilt sur hover.
+// Suit la position du curseur sur le logo et applique perspective + rotateX/Y.
+function use3dTilt(enabled: boolean) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [transform, setTransform] = useState('')
+  const [hovering, setHovering] = useState(false)
+
+  const onMove = (e: React.MouseEvent) => {
+    if (!enabled || !ref.current) return
+    const rect = ref.current.getBoundingClientRect()
+    const x = (e.clientX - rect.left) / rect.width   // 0..1
+    const y = (e.clientY - rect.top) / rect.height
+    const rotY = (x - 0.5) *  28   // -14 .. +14 deg
+    const rotX = (y - 0.5) * -28
+    setTransform(`perspective(380px) rotateX(${rotX.toFixed(1)}deg) rotateY(${rotY.toFixed(1)}deg) scale(1.06)`)
+  }
+  const onEnter = () => { if (enabled) setHovering(true) }
+  const onLeave = () => {
+    setHovering(false)
+    setTransform('')
+  }
+
+  return { ref, transform, hovering, onMove, onEnter, onLeave }
+}
+
+export function SyleaLogo({ size = 40, animated = true, hover3d = false }: SyleaLogoProps) {
   const uid = useId().replace(/\W/g, '')
   const gradId = `sld-g-${uid}`
   const haloId = `sld-halo-${uid}`
+  const tilt = use3dTilt(hover3d)
 
-  return (
+  const inner = (
     <svg
       width={size}
       height={size}
@@ -113,6 +141,32 @@ export function SyleaLogo({ size = 40, animated = true }: SyleaLogoProps) {
       />
     </svg>
   )
+
+  // Si hover3d off → retour direct du SVG (perf, pas de wrapper inutile)
+  if (!hover3d) return inner
+
+  // Wrapper avec tilt 3D sur hover
+  return (
+    <div
+      ref={tilt.ref}
+      onMouseEnter={tilt.onEnter}
+      onMouseLeave={tilt.onLeave}
+      onMouseMove={tilt.onMove}
+      style={{
+        display: 'inline-block',
+        cursor: 'pointer',
+        transformStyle: 'preserve-3d',
+        transform: tilt.transform || 'perspective(380px)',
+        transition: tilt.hovering
+          ? 'transform 0.05s linear, filter 0.2s'
+          : 'transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.2s',
+        filter: tilt.hovering ? 'drop-shadow(0 8px 18px rgba(0,200,255,0.35))' : 'none',
+        willChange: 'transform',
+      }}
+    >
+      {inner}
+    </div>
+  )
 }
 
 /**
@@ -125,6 +179,7 @@ interface SyleaWordmarkProps {
   gap?: number
   agent?: boolean // affiche "SYLEA AGENT" (true) ou juste "SYLEA" (false)
   animated?: boolean
+  hover3d?: boolean
 }
 
 export function SyleaWordmark({
@@ -133,6 +188,7 @@ export function SyleaWordmark({
   gap = 10,
   agent = true,
   animated = false,
+  hover3d = false,
 }: SyleaWordmarkProps) {
   return (
     <div
@@ -143,7 +199,7 @@ export function SyleaWordmark({
         userSelect: 'none',
       }}
     >
-      <SyleaLogo size={logoSize} animated={animated} />
+      <SyleaLogo size={logoSize} animated={animated} hover3d={hover3d} />
       <span
         style={{
           fontWeight: 800,

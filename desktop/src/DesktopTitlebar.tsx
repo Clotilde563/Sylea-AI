@@ -14,9 +14,18 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 interface Props {
   onTogglePill?: () => void
   isPill?: boolean
+  /** Slots optionnels affiches a gauche des boutons systeme (theme switcher, sound toggle) */
+  extraButtons?: React.ReactNode
+  /** Couleur d'accent — depend du theme actif */
+  accent?: string
 }
 
-export function DesktopTitlebar({ onTogglePill, isPill = false }: Props) {
+export function DesktopTitlebar({
+  onTogglePill,
+  isPill = false,
+  extraButtons,
+  accent = '#7ad9ff',
+}: Props) {
   const [maximized, setMaximized] = useState(false)
   const win = getCurrentWindow()
 
@@ -79,12 +88,14 @@ export function DesktopTitlebar({ onTogglePill, isPill = false }: Props) {
 
       {/* Boutons systeme */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        {/* Slots extras (theme, son, ...) */}
+        {extraButtons}
         {/* Pill toggle */}
         {onTogglePill && (
           <TitlebarButton
             onClick={onTogglePill}
             title={isPill ? 'Mode plein' : 'Mode pill compact'}
-            color="#7ad9ff"
+            color={accent}
           >
             {isPill ? (
               <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
@@ -98,14 +109,14 @@ export function DesktopTitlebar({ onTogglePill, isPill = false }: Props) {
           </TitlebarButton>
         )}
         {!isPill && (
-          <TitlebarButton onClick={onMin} title="Reduire" color="#7ad9ff">
+          <TitlebarButton onClick={onMin} title="Reduire" color={accent}>
             <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
               <line x1="3" y1="13" x2="13" y2="13" stroke="currentColor" strokeWidth="1.2" />
             </svg>
           </TitlebarButton>
         )}
         {!isPill && (
-          <TitlebarButton onClick={onMax} title={maximized ? 'Restaurer' : 'Agrandir'} color="#7ad9ff">
+          <TitlebarButton onClick={onMax} title={maximized ? 'Restaurer' : 'Agrandir'} color={accent}>
             {maximized ? (
               <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
                 <rect x="3" y="5" width="8" height="8" stroke="currentColor" strokeWidth="1.2" />

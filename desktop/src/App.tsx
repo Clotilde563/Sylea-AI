@@ -5,6 +5,16 @@ import OpenClawOnboarding from './OpenClawOnboarding'
 import { SyleaLogo, SyleaWordmark, AgentSyleaLogo, type AgentVariant } from './SyleaLogo'
 import { DesktopTitlebar } from './DesktopTitlebar'
 import { useDragDrop, type DroppedFile } from './useDragDrop'
+import { SplashScreen } from './SplashScreen'
+import { BackgroundParticles } from './BackgroundParticles'
+import { useSound } from './useSound'
+import { useTheme } from './useTheme'
+import { ThemeSwitcher } from './ThemeSwitcher'
+import { SoundToggle } from './SoundToggle'
+import { LiveActivityFeed, type LiveActivity } from './LiveActivityFeed'
+import { StatsHUD, type StatsHUDData, pushHist } from './StatsHUD'
+import { CountUp } from './CountUp'
+import { FadeIn, SlideIn } from './Motion'
 
 const API_BASE = 'http://localhost:8000'
 
@@ -141,6 +151,58 @@ function StatusDot({ color, pulsing = false, size = 7 }: { color: string; pulsin
 }
 
 function App() {
+  // Sprint 2.1 — Splash screen au premier mount (1.4s). Une seule fois par
+  // session, pas re-affiche apres login/logout.
+  const [splashDone, setSplashDone] = useState(false)
+
+  // Sprint 2.8 — Theme actif (dark | cyber | aurora). La palette s'applique
+  // aussi via CSS variables (--sy-*) dans useTheme.ts.
+  const { palette, theme: _theme } = useTheme()
+
+  // Sprint 2.3 — Sound design (clic / succes / erreur / notify).
+  const { play: playSound } = useSound()
+
+  // Sprint 2.6 — Live activity feed : map agentId → derniere activite
+  const [liveActivities, setLiveActivities] = useState<LiveActivity[]>([])
+  const pushActivity = useCallback((activity: Omit<LiveActivity, 'since'>) => {
+    setLiveActivities(prev => {
+      const next = prev.filter(a => a.agentId !== activity.agentId)
+      next.push({ ...activity, since: Date.now() })
+      return next.slice(-5)
+    })
+  }, [])
+
+  // Sprint 2.7 — Stats HUD : compteurs + historiques pour sparklines
+  const [stats, setStats] = useState<StatsHUDData>({
+    reqPerMin: 0,
+    reqHistory: [],
+    latencyMs: 0,
+    latencyHistory: [],
+    tokens: 0,
+    tokensHistory: [],
+    actions: 0,
+    actionsHistory: [],
+  })
+  // Compteur de requetes (incremente a chaque WS message), reset toutes les 60s
+  const reqCountRef = useRef(0)
+  useEffect(() => {
+    const id = setInterval(() => {
+      setStats(prev => {
+        const reqMin = reqCountRef.current
+        reqCountRef.current = 0
+        return {
+          ...prev,
+          reqPerMin: reqMin,
+          reqHistory: pushHist(prev.reqHistory, reqMin),
+          latencyHistory: pushHist(prev.latencyHistory, prev.latencyMs),
+          tokensHistory: pushHist(prev.tokensHistory, prev.tokens),
+          actionsHistory: pushHist(prev.actionsHistory, prev.actions),
+        }
+      })
+    }, 1000) // 1 sample / seconde
+    return () => clearInterval(id)
+  }, [])
+
   // Phase 2b — Onboarding OpenClaw au 1er lancement.
   // null = verification en cours, false = afficher wizard, true = passer au login.
   // On verifie le flag ~/.sylea-agent/onboarded.json via la commande Rust
@@ -219,6 +281,7 @@ function App() {
   // Login
   const handleLogin = async () => {
     setError('')
+    playSound('click')
     try {
       const res = await fetch(`${API_BASE}/api/auth/login`, {
         method: 'POST',
@@ -227,12 +290,15 @@ function App() {
       })
       const data = await res.json()
       if (data.access_token) {
+        playSound('success')
         setToken(data.access_token)
         localStorage.setItem('sylea_desktop_token', data.access_token)
       } else {
+        playSound('error')
         setError(data.detail || 'Identifiants incorrects')
       }
     } catch {
+      playSound('error')
       setError('Serveur inaccessible (localhost:8000)')
     }
   }
@@ -325,10 +391,44 @@ function App() {
 
       ws.onmessage = async (event) => {
         if (event.data === 'pong') return
+        // Stats: count incoming WS messages (Sprint 2.7)
+        reqCountRef.current += 1
         try {
           const data = JSON.parse(event.data)
           const sourceAgent = data.agent || 'agent2'  // Default to agent2 for backward compat
           const agentLabel = sourceAgent === 'agent3' ? '[Agent 3]' : '[Agent 2]'
+
+          // Sprint 2.6 — Push activite dans le live feed
+          const agentInfo = AGENTS.find(a => a.id === sourceAgent)
+          if (agentInfo && (data.message || data.type === 'agent3_log')) {
+            const verb =
+              data.type === 'agent3_log' && data.log_type === 'tool'    ? 'execute'   :
+              data.type === 'agent3_log' && data.log_type === 'success' ? 'a termine' :
+              data.type === 'agent3_steps'                              ? 'planifie'  :
+              data.type === 'agent3_step_update'                        ? 'avance'    :
+                                                                          'ecrit'
+            pushActivity({
+              agentId: sourceAgent,
+              agentName: agentInfo.name,
+              agentColor: agentInfo.color,
+              verb,
+              detail: (data.message || data.text || '').slice(0, 60),
+            })
+          }
+
+          // Sprint 2.7 — Estimation tokens (heuristique : 1 token ~ 4 chars)
+          if (data.message) {
+            setStats(prev => ({
+              ...prev,
+              tokens: prev.tokens + Math.ceil((data.message?.length || 0) / 4),
+            }))
+          }
+          if (data.text) {
+            setStats(prev => ({
+              ...prev,
+              tokens: prev.tokens + Math.ceil((data.text?.length || 0) / 4),
+            }))
+          }
 
           // Handle Gmail open command — open Gmail compose in browser
           if (data.type === 'open_gmail' && data.url) {
@@ -426,6 +526,13 @@ function App() {
       action, detail, status, agent,
       time: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
     }])
+    // Sprint 2.7 — Counter actions terminees pour le HUD
+    if (status === 'done') {
+      setStats(prev => ({ ...prev, actions: prev.actions + 1 }))
+    }
+    // Sprint 2.3 — Sound feedback discret sur completions et erreurs
+    if (status === 'done')  playSound('notify')
+    if (status === 'error') playSound('error')
   }
 
   const updatePlan = (idx: number, status: 'done' | 'running' | 'pending') => {
@@ -785,12 +892,20 @@ function App() {
   }
 
   const handleLogout = () => {
+    playSound('click')
     wsRef.current?.close()
     setToken(null)
     localStorage.removeItem('sylea_desktop_token')
     setSteps([])
     setPlan([])
     setWsConnected(false)
+  }
+
+  // ── SPLASH SCREEN (Sprint 2.1) ──
+  // Affiche logo Sylea + particules + barre "INITIALIZING SYSTEM" pendant 1.4s.
+  // Une seule fois au boot de l'app, avant tout le reste (incl. onboarding).
+  if (!splashDone) {
+    return <SplashScreen onComplete={() => setSplashDone(true)} />
   }
 
   // ── ONBOARDING OPENCLAW (Phase 2b) ──
@@ -831,8 +946,8 @@ function App() {
         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
         minHeight: '100vh', padding: '2rem',
       }}>
-        {/* Logo officiel + wordmark */}
-        <SyleaWordmark logoSize={48} fontSize={20} gap={14} animated />
+        {/* Logo officiel + wordmark — 3D hover (Sprint 2.10) */}
+        <SyleaWordmark logoSize={48} fontSize={20} gap={14} animated hover3d />
 
         {/* Sous-titre mono */}
         <div style={{
@@ -938,7 +1053,7 @@ function App() {
         border: `1px solid ${SY.borderHi}`,
         boxShadow: `0 8px 24px rgba(0,200,255,0.18)`,
       }}>
-        <DesktopTitlebar onTogglePill={togglePill} isPill />
+        <DesktopTitlebar onTogglePill={togglePill} isPill accent={palette.cyanSoft} />
         <div
           data-tauri-drag-region
           onDoubleClick={togglePill}
@@ -974,7 +1089,20 @@ function App() {
       background: SY.bg, overflow: 'hidden',
       position: 'relative',
     }}>
-      <DesktopTitlebar onTogglePill={togglePill} isPill={false} />
+      {/* Sprint 2.2 — Particules de fond (canvas plein-ecran derriere tout) */}
+      <BackgroundParticles count={50} color={palette.particleRgb} />
+
+      <DesktopTitlebar
+        onTogglePill={togglePill}
+        isPill={false}
+        accent={palette.cyanSoft}
+        extraButtons={
+          <>
+            <SoundToggle color={palette.cyanSoft} />
+            <ThemeSwitcher />
+          </>
+        }
+      />
 
       {/* Drag overlay (Sprint 1.6) */}
       {dragHover && (
@@ -1062,6 +1190,68 @@ function App() {
           border-color: ${SY.borderHi} !important;
           background: ${SY.surfaceHi} !important;
         }
+
+        /* ── Sprint 2.4 — Glow + pulse animations sur agents actifs ── */
+        @keyframes sy-spin {
+          from { transform: rotate(0deg); }
+          to   { transform: rotate(360deg); }
+        }
+        @keyframes sy-glow-pulse {
+          0%, 100% {
+            box-shadow:
+              0 0 6px var(--sy-glow, rgba(0,200,255,0.45)),
+              0 0 14px var(--sy-glow, rgba(0,200,255,0.18));
+          }
+          50% {
+            box-shadow:
+              0 0 12px var(--sy-glow, rgba(0,200,255,0.65)),
+              0 0 26px var(--sy-glow, rgba(0,200,255,0.32));
+          }
+        }
+        @keyframes sy-halo-rotate {
+          0%   { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+        /* Halo conique tournant autour d'un agent actif (utilisable en pseudo-element) */
+        .sy-agent-active {
+          position: relative;
+        }
+        .sy-agent-active::before {
+          content: '';
+          position: absolute;
+          inset: -3px;
+          border-radius: inherit;
+          padding: 1px;
+          background: conic-gradient(
+            from var(--sy-glow-angle, 0deg),
+            var(--sy-glow-color, ${SY.cyan}) 0deg,
+            transparent 90deg,
+            var(--sy-glow-color, ${SY.cyan}) 180deg,
+            transparent 270deg
+          );
+          -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+                  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+          -webkit-mask-composite: xor;
+                  mask-composite: exclude;
+          opacity: 0.55;
+          animation: sy-halo-rotate 4s linear infinite;
+          pointer-events: none;
+        }
+        .sy-agent-active::after {
+          content: '';
+          position: absolute;
+          inset: 0;
+          border-radius: inherit;
+          animation: sy-glow-pulse 2.4s ease-in-out infinite;
+          pointer-events: none;
+        }
+        /* Petite anim de tilt sur clic d'un bouton agent */
+        @keyframes sy-tap {
+          0%   { transform: scale(1); }
+          50%  { transform: scale(0.97); }
+          100% { transform: scale(1); }
+        }
+        .sy-tap:active { animation: sy-tap 0.15s ease-out; }
       `}</style>
 
       {/* ── SIDEBAR GAUCHE : Agents ── */}
@@ -1078,7 +1268,7 @@ function App() {
           borderBottom: `1px solid ${SY.border}`,
           display: 'flex', alignItems: 'center', gap: 10,
         }}>
-          <SyleaLogo size={22} animated={false} />
+          <SyleaLogo size={22} animated={false} hover3d />
           <div style={{ flex: 1, minWidth: 0, lineHeight: 1.1 }}>
             <div style={{
               fontSize: 11, fontWeight: 800, letterSpacing: '0.14em',
@@ -1122,8 +1312,18 @@ function App() {
             return (
               <button
                 key={agent.id}
-                onClick={() => agent.status !== 'locked' && setSelectedAgent(agent.id)}
-                className="tech-btn-hover"
+                onClick={() => {
+                  if (agent.status === 'locked') {
+                    playSound('error')
+                    return
+                  }
+                  playSound('click')
+                  setSelectedAgent(agent.id)
+                }}
+                onMouseEnter={() => { if (agent.status !== 'locked') playSound('hover') }}
+                className={`tech-btn-hover sy-tap ${
+                  isSelected && agent.status === 'active' ? 'sy-agent-active' : ''
+                }`}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 10,
                   padding: '8px 10px', borderRadius: 6,
@@ -1139,6 +1339,9 @@ function App() {
                   opacity: agent.status === 'locked' ? 0.35 : 1,
                   width: '100%', textAlign: 'left',
                   position: 'relative',
+                  // CSS vars pour le glow halo (Sprint 2.4)
+                  ['--sy-glow-color' as any]: agent.color,
+                  ['--sy-glow' as any]: `${agent.color}55`,
                   ...(isAgent3 && isSelected ? { animation: 'a3-border 3s ease-in-out infinite' } : {}),
                 }}
               >
@@ -1325,11 +1528,18 @@ function App() {
                 padding: '2px 8px', borderRadius: 4,
                 border: `1px solid ${SY.border}`,
               }}>
-                {steps.length} etape{steps.length > 1 ? 's' : ''}
+                <CountUp to={steps.length} durationMs={400} /> etape{steps.length > 1 ? 's' : ''}
               </span>
             </>
           )}
         </div>
+
+        {/* Sprint 2.6 — Live activity feed sous le header */}
+        <LiveActivityFeed
+          activities={liveActivities}
+          accent={palette.cyan}
+          style={{ padding: '4px 14px 0' }}
+        />
 
         {/* Agent 3 Claude Code-like log panel */}
         {selectedAgent === 'agent3' && agent3Logs.length > 0 && (
@@ -1401,7 +1611,7 @@ function App() {
                   background: 'radial-gradient(circle, rgba(0,200,255,0.08), transparent 60%)',
                 }} />
                 <div style={{ opacity: 0.55 }}>
-                  <SyleaLogo size={80} animated />
+                  <SyleaLogo size={80} animated hover3d />
                 </div>
               </div>
               <div style={{
@@ -1435,7 +1645,8 @@ function App() {
                 }
                 const isA3 = step.agent === 'agent3'
                 return (
-                  <div key={step.id} style={{
+                  <SlideIn key={step.id} from="left" distance={12} duration={280}>
+                  <div style={{
                     display: 'flex', alignItems: 'flex-start', gap: 10,
                     padding: '8px 12px', borderRadius: 6,
                     background: step.status === 'error'
@@ -1446,6 +1657,7 @@ function App() {
                         : isA3 ? `${AGENT3_CYAN}22`
                         : SY.border
                     }`,
+                    transition: 'all 0.2s',
                   }}>
                     <span style={{
                       fontFamily: SY.mono, fontSize: 13,
@@ -1471,6 +1683,7 @@ function App() {
                       <span style={{ fontSize: 9, color: SY.textDim, letterSpacing: '0.08em' }}>{step.time}</span>
                     </div>
                   </div>
+                  </SlideIn>
                 )
               })}
               <div ref={stepsEndRef} />
@@ -1696,6 +1909,28 @@ function App() {
             )}
           </div>
         )}
+
+        {/* Sprint 2.7 — Stats real-time HUD avec sparklines */}
+        <div style={{
+          padding: '10px 10px 0', borderTop: `1px solid ${SY.border}`,
+        }}>
+          <div style={{
+            fontFamily: SY.mono, fontSize: 9, letterSpacing: '0.18em',
+            color: SY.textDim, textTransform: 'uppercase', marginBottom: 6,
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <span style={{ color: palette.cyan }}>▸</span> System HUD
+          </div>
+          <StatsHUD
+            data={stats}
+            cyan={palette.cyan}
+            textMute={palette.textMute}
+            textDim={palette.textDim}
+            border={palette.border}
+            surface={palette.surface}
+            text={palette.text}
+          />
+        </div>
 
         {/* Status footer */}
         <div style={{
