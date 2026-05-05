@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio_capture;
+
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -905,6 +907,13 @@ fn main() {
             toggle_pill_mode,
             toggle_main_window,
             quit_app,
+            // Sprint dev — Ecoute active (cours universite/prepa)
+            audio_capture::start_recording,
+            audio_capture::stop_recording,
+            audio_capture::pause_recording,
+            audio_capture::resume_recording,
+            audio_capture::get_recording_status,
+            audio_capture::list_audio_input_devices,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

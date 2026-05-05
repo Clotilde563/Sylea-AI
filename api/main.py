@@ -249,6 +249,25 @@ async def get_agents_activation(user_id: str = Depends(get_optional_user)):
     return {"active": _agents_activation_state.get(user_id, {"agent1": False, "agent2": False, "agent3": False})}
 
 
+# ── Ecoute active : web -> desktop bridge ──────────────────────────────────
+#
+# La feature "Ecoute active" (cours univ/prepa) vit dans l'app desktop
+# (cpal natif Rust, recording 4h+, wake lock, faster-whisper local). Le
+# bouton sur le web (Agent 2) n'est qu'un trigger : on broadcast un event
+# WS au desktop pour qu'il ouvre la fenetre EcouteActive.
+
+@app.post("/api/desktop/start-lecture", tags=["desktop"])
+async def start_lecture(user_id: str = Depends(get_optional_user)):
+    """Web frontend declenche une session d'ecoute active sur l'app desktop."""
+    if not user_id:
+        return {"ok": False, "error": "auth_required"}
+    from api.websocket import ws_manager
+    if not ws_manager.is_connected(user_id):
+        return {"ok": False, "error": "desktop_not_connected"}
+    await ws_manager.send_to_user(user_id, {"type": "start_lecture"})
+    return {"ok": True}
+
+
 @app.get("/", include_in_schema=False)
 def root():
     """Redirect info vers le frontend."""

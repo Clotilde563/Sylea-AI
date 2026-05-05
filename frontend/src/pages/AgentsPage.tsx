@@ -5796,26 +5796,55 @@ export default function AgentsPage() {
               </button>
             )}
 
-            {/* Voice call button */}
+            {/* Ecoute active — remplace l'ancien bouton Appeler.
+                Declenche la fenetre d'enregistrement sur l'app desktop
+                (cours univ/prepa, jusqu'a 4h+, transcription locale). */}
             <button
-              onClick={() => { setChat2Open(false); setInCall(true) }}
-              title="Appeler l'Agent Sylea 2"
+              onClick={async () => {
+                const tkn = localStorage.getItem('sylea_auth_token')
+                if (!tkn) return
+                try {
+                  const r = await fetch(`${import.meta.env.VITE_API_URL || ''}/api/desktop/start-lecture`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tkn}` },
+                  })
+                  const data = await r.json()
+                  if (data?.ok === false) {
+                    setActionToast(data.error === 'desktop_not_connected'
+                      ? "Lance l'app Sylea Agent (desktop) pour utiliser l'ecoute active."
+                      : "Erreur. Reessaie."
+                    )
+                    setTimeout(() => setActionToast(null), 4500)
+                  } else {
+                    setActionToast("Ecoute active demarree sur le desktop")
+                    setTimeout(() => setActionToast(null), 3000)
+                  }
+                } catch {
+                  setActionToast("Backend inaccessible")
+                  setTimeout(() => setActionToast(null), 3000)
+                }
+              }}
+              title="Enregistre ton cours, l'agent en fait la fiche (sur le desktop)"
               style={{
                 display: 'flex', alignItems: 'center', gap: '0.35rem',
                 padding: '0.3rem 0.65rem', borderRadius: '999px',
-                border: '1px solid rgba(239,68,68,0.3)',
-                background: 'rgba(239,68,68,0.08)',
+                border: '1px solid rgba(239,68,68,0.35)',
+                background: 'linear-gradient(135deg, rgba(239,68,68,0.12), rgba(248,113,113,0.05))',
                 color: '#f87171',
-                cursor: 'pointer', fontSize: '0.72rem', fontWeight: 600,
+                cursor: 'pointer', fontSize: '0.72rem', fontWeight: 700,
                 transition: 'all 0.2s',
+                letterSpacing: '0.02em',
               }}
-              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.15)' }}
-              onMouseLeave={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.08)' }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'linear-gradient(135deg, rgba(239,68,68,0.20), rgba(248,113,113,0.08))' }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'linear-gradient(135deg, rgba(239,68,68,0.12), rgba(248,113,113,0.05))' }}
             >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2z" />
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="23"/>
+                <line x1="8" y1="23" x2="16" y2="23"/>
               </svg>
-              Appeler
+              Ecoute active
             </button>
           </div>
 

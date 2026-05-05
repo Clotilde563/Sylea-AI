@@ -11,6 +11,7 @@ import { LiveActivityFeed, type LiveActivity } from './LiveActivityFeed'
 import { StatsHUD, type StatsHUDData, pushHist } from './StatsHUD'
 import { CountUp } from './CountUp'
 import { SlideIn } from './Motion'
+import { EcouteActive } from './EcouteActive'
 
 const API_BASE = 'http://localhost:8000'
 
@@ -152,6 +153,11 @@ function StatusDot({ color, pulsing = false, size = 7 }: { color: string; pulsin
 }
 
 function App() {
+  // Ecoute active — Sprint dev cours universite/prepa.
+  // Ouvert quand le web frontend declenche start_lecture via WS, OU
+  // depuis le bouton sidebar (Agent 2 only).
+  const [ecouteActiveOpen, setEcouteActiveOpen] = useState(false)
+
   // Sprint 2.1 — Splash screen au premier mount (1.4s). Une seule fois par
   // session, pas re-affiche apres login/logout.
   const [splashDone, setSplashDone] = useState(false)
@@ -476,6 +482,13 @@ function App() {
           // Etat d'activation des agents change cote web (toggle "Activer
           // cet agent"). Met a jour la sidebar + bascule selectedAgent vers
           // le 1er agent active si l'utilisateur n'a pas pinned manuellement.
+          // Ecoute active — declenche depuis le web (bouton sur Agent 2)
+          if (data.type === 'start_lecture') {
+            setEcouteActiveOpen(true)
+            addStep('LECTURE', `[Agent 2] Ecoute active demandee depuis le web`, 'done', 'agent2')
+            return
+          }
+
           if (data.type === 'agents_activation' && data.active) {
             const next = data.active as Record<string, boolean>
             setActivatedAgents(next)
@@ -1190,6 +1203,11 @@ function App() {
       background: SY.bg, overflow: 'hidden',
       position: 'relative',
     }}>
+      {/* Ecoute active — overlay plein-ecran si declenche (cours universite/prepa) */}
+      {ecouteActiveOpen && (
+        <EcouteActive onClose={() => setEcouteActiveOpen(false)} />
+      )}
+
       {/* Sprint 2.2 — Particules de fond (canvas plein-ecran derriere tout) */}
       <BackgroundParticles count={50} color="0, 200, 255" />
 
@@ -1534,6 +1552,40 @@ function App() {
           padding: '10px 12px', borderTop: `1px solid ${SY.border}`,
           display: 'flex', flexDirection: 'column', gap: 8,
         }}>
+          {/* Ecoute active — bouton vedette pour cours univ/prepa.
+              Disponible uniquement si Agent 2 est actif. */}
+          {(activatedAgents.agent2 || lastActivityByAgent.agent2) && (
+            <button
+              onClick={() => setEcouteActiveOpen(true)}
+              title="Enregistre un cours, l'agent en fait la fiche (univ/prepa)"
+              style={{
+                width: '100%', padding: '10px 12px', borderRadius: 7,
+                background: 'linear-gradient(135deg, rgba(239,68,68,0.12), rgba(248,113,113,0.05))',
+                border: '1px solid rgba(239,68,68,0.35)',
+                color: '#fca5a5', fontSize: 11, fontFamily: SY.mono,
+                letterSpacing: '0.1em', textTransform: 'uppercase',
+                cursor: 'pointer', transition: 'all 0.18s',
+                display: 'flex', alignItems: 'center', gap: 8,
+                fontWeight: 700,
+                boxShadow: '0 2px 10px rgba(239,68,68,0.10)',
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.background = 'linear-gradient(135deg, rgba(239,68,68,0.20), rgba(248,113,113,0.08))'
+                e.currentTarget.style.boxShadow = '0 4px 14px rgba(239,68,68,0.25)'
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.background = 'linear-gradient(135deg, rgba(239,68,68,0.12), rgba(248,113,113,0.05))'
+                e.currentTarget.style.boxShadow = '0 2px 10px rgba(239,68,68,0.10)'
+              }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+              </svg>
+              <span style={{ flex: 1, textAlign: 'left' }}>Ecoute active</span>
+            </button>
+          )}
+
           {/* Mini status system */}
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8,

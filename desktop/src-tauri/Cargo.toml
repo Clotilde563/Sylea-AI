@@ -15,6 +15,20 @@ tauri-plugin-window-state = "2"
 dirs = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Audio capture cross-platform pour la feature "Ecoute active" (cours
+# universite/prepa). cpal expose le microphone en streaming, hound serialise
+# en WAV PCM 16-bit mono qu'on chunke par 30s sur disque (faster-whisper
+# consume du WAV nativement, pas besoin d'encoder Opus en sprint 1).
+cpal = "0.15"
+hound = "3.5"
+chrono = { version = "0.4", features = ["serde"] }
+lazy_static = "1.5"
+
+# Wake lock — empeche le laptop de se mettre en veille pendant 4h de recording.
+# Cross-platform : Windows utilise SetThreadExecutionState (ES_DISPLAY_REQUIRED
+# | ES_SYSTEM_REQUIRED | ES_CONTINUOUS).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_System_Power"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
