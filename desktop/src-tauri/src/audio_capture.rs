@@ -39,6 +39,14 @@ const TARGET_SAMPLE_RATE: u32 = 16_000;
 const CHUNK_DURATION_S: u64 = 30;
 const CHUNK_SAMPLES: usize = (TARGET_SAMPLE_RATE as usize) * (CHUNK_DURATION_S as usize);
 
+// Cap dur de 8h (28 800s = 960 chunks de 30s = ~960 MB sur disque).
+// L'UI desktop affiche un warning progressif a partir de 7h45 et stop auto
+// l'enregistrement avant qu'on l'atteigne ; ce cap est une defense en
+// profondeur si le JS plante (laptop ferme, app freeze, etc.) — evite
+// des sessions de plusieurs jours qui satureraient le disque.
+const MAX_DURATION_S: u64 = 8 * 3600;
+const MAX_CHUNKS: u32 = (MAX_DURATION_S / CHUNK_DURATION_S) as u32; // 960
+
 // ── Etat de la session ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -353,6 +361,15 @@ pub fn start_recording(
 
         loop {
             if *stop_clone.lock().unwrap() {
+                break;
+            }
+            // Hard cap 8h (defense in depth si JS UI defaillante) : si on
+            // a deja roule MAX_CHUNKS chunks complets, on signale le stop
+            // depuis l'interieur du thread. Le cleanup ci-dessous finalise
+            // le chunk en cours puis sort proprement.
+            if chunk_idx >= MAX_CHUNKS {
+                eprintln!("[audio] Hard cap atteint (8h, {} chunks) — stop auto", MAX_CHUNKS);
+                *stop_clone.lock().unwrap() = true;
                 break;
             }
             thread::sleep(Duration::from_millis(100));
@@ -687,5 +704,15 @@ mod tests {
         assert_eq!(CHUNK_SAMPLES, 480_000);
         assert_eq!(CHUNK_DURATION_S, 30);
         assert_eq!(TARGET_SAMPLE_RATE, 16_000);
+    }
+
+    #[test]
+    fn max_duration_is_8_hours() {
+        // 8h × 3600 = 28 800 secondes, 28 800 / 30 = 960 chunks max.
+        assert_eq!(MAX_DURATION_S, 28_800);
+        assert_eq!(MAX_CHUNKS, 960);
+        // Sanity : 8h × ~1MB/min = ~480MB. Ordre de grandeur correct.
+        let estimated_mb = (MAX_CHUNKS as u64 * (CHUNK_SAMPLES as u64 * 2)) / 1_000_000;
+        assert!(estimated_mb > 800 && estimated_mb < 1100, "estimated_mb = {}", estimated_mb);
     }
 }

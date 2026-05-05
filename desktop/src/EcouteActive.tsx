@@ -46,6 +46,13 @@ const MATIERES = [
   { id: 'autre',    label: 'Autre / Auto-detect', emoji: '?' },
 ]
 
+// Cap dur 8h aligne sur Rust (audio_capture.rs::MAX_DURATION_S).
+// Au-dela, l'enregistrement s'arrete automatiquement pour eviter une
+// surconsommation de donnees (~1 GB sur disque + transcription).
+const MAX_DURATION_MS = 8 * 60 * 60 * 1000        // 8h
+const WARN_DURATION_MS = MAX_DURATION_MS - 15 * 60 * 1000  // 7h45 — banner orange
+const URGENT_DURATION_MS = MAX_DURATION_MS - 5 * 60 * 1000  // 7h55 — banner rouge
+
 const FORMATIONS = [
   'MPSI', 'PCSI', 'PTSI', 'BCPST',
   'MP', 'PC', 'PSI',
@@ -161,6 +168,19 @@ export function EcouteActive({
     }, 200)
     return () => clearInterval(id)
   }, [phase])
+
+  // Auto-stop a 8h pour eviter surconsommation (data + disque + transcription).
+  // Utilise un ref-flag pour ne pas declencher stopRecording 2 fois.
+  const autoStopTriggeredRef = useRef(false)
+  useEffect(() => {
+    if (phase !== 'recording') return
+    if (autoStopTriggeredRef.current) return
+    if (status.elapsed_ms >= MAX_DURATION_MS) {
+      autoStopTriggeredRef.current = true
+      stopRecording()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status.elapsed_ms, phase])
 
   // ── Sprint 2 — Detection + upload des chunks transcrits ────────────────────
   //
@@ -301,6 +321,7 @@ export function EcouteActive({
     levelHistoryRef.current = []
     setTranscript([])
     lastUploadedChunkRef.current = -1
+    autoStopTriggeredRef.current = false
     const session_id = `lec_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
     try {
       await invoke('start_recording', {
@@ -637,16 +658,20 @@ export function EcouteActive({
             </div>
           </Section>
 
-          {/* Privacy notice */}
+          {/* Privacy notice + limite duree */}
           <div style={{
             marginTop: 16, padding: '10px 12px', borderRadius: 6,
             background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.25)',
             fontSize: 11, color: SY.text, lineHeight: 1.55,
           }}>
             <div style={{ color: SY.success, fontWeight: 700, marginBottom: 4, fontFamily: SY.mono, letterSpacing: '0.08em' }}>
-              ▸ 100% LOCAL
+              ▸ 100% LOCAL · LIMITE 8H
             </div>
             L'audio reste sur ton ordinateur (~/Documents/Sylea/cours/). La transcription utilisera faster-whisper en local — aucune donnee n'est envoyee a un serveur tiers.
+            <br/>
+            <span style={{ color: SY.textMute, fontSize: 10, fontFamily: SY.mono }}>
+              ▸ Auto-stop apres 8h pour eviter surconsommation (~1 GB max sur disque).
+            </span>
           </div>
 
           {error && (
@@ -729,16 +754,57 @@ export function EcouteActive({
             }}>← Reduire</button>
           </div>
 
-          {/* Big timer */}
+          {/* Big timer + countdown si on approche du cap 8h */}
           <div style={{
             fontFamily: SY.mono, fontSize: 56, fontWeight: 700,
             color: SY.text, textAlign: 'center', letterSpacing: '0.04em',
-            margin: '12px 0 18px',
+            margin: '12px 0 6px',
             fontVariantNumeric: 'tabular-nums',
             textShadow: status.is_paused ? 'none' : `0 0 18px ${SY.red}40`,
           }}>
             {fmtTime(status.elapsed_ms)}
           </div>
+          {/* Limite 8h : countdown discret en dessous du timer */}
+          <div style={{
+            textAlign: 'center', marginBottom: 14,
+            fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.14em',
+            color: status.elapsed_ms >= URGENT_DURATION_MS ? SY.red
+                 : status.elapsed_ms >= WARN_DURATION_MS ? SY.warn
+                 : SY.textDim,
+            textTransform: 'uppercase',
+          }}>
+            limite 8h · reste {fmtTime(Math.max(0, MAX_DURATION_MS - status.elapsed_ms))}
+          </div>
+
+          {/* Banner warning visible a -15min puis -5min */}
+          {status.elapsed_ms >= WARN_DURATION_MS && status.elapsed_ms < MAX_DURATION_MS && (
+            <div style={{
+              padding: '10px 14px', borderRadius: 8, marginBottom: 14,
+              background: status.elapsed_ms >= URGENT_DURATION_MS
+                ? 'rgba(239,68,68,0.12)' : 'rgba(245,158,11,0.10)',
+              border: `1px solid ${status.elapsed_ms >= URGENT_DURATION_MS
+                ? 'rgba(239,68,68,0.45)' : 'rgba(245,158,11,0.40)'}`,
+              fontSize: 11, fontFamily: SY.mono,
+              display: 'flex', alignItems: 'center', gap: 10,
+              color: status.elapsed_ms >= URGENT_DURATION_MS ? '#fca5a5' : SY.warn,
+            }}>
+              <span style={{
+                width: 8, height: 8, borderRadius: '50%',
+                background: 'currentColor',
+                animation: 'sy-pulse 1.2s ease-in-out infinite',
+                flexShrink: 0,
+              }} />
+              <div style={{ flex: 1, lineHeight: 1.5 }}>
+                <strong style={{ letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                  ▸ {status.elapsed_ms >= URGENT_DURATION_MS ? 'ARRET IMMINENT' : 'LIMITE BIENTOT ATTEINTE'}
+                </strong>
+                <br/>
+                Stop automatique a 8h pour eviter une surconsommation
+                ({Math.ceil((MAX_DURATION_MS - status.elapsed_ms) / 60_000)} min restantes).
+                {' '}Termine ton cours ou clique Stop pour avoir ta fiche.
+              </div>
+            </div>
+          )}
 
           {/* Waveform canvas */}
           <div style={{
