@@ -6943,22 +6943,48 @@ export default function AgentsPage() {
                     Discuter
                   </button>
                   <button
-                    onClick={() => setInCall(true)}
+                    onClick={async () => {
+                      const tkn = localStorage.getItem('sylea_auth_token')
+                      if (!tkn) return
+                      try {
+                        const r = await fetch(`${import.meta.env.VITE_API_URL || ''}/api/desktop/start-lecture`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tkn}` },
+                        })
+                        const data = await r.json()
+                        if (data?.ok === false) {
+                          setActionToast(data.error === 'desktop_not_connected'
+                            ? "Lance l'app Sylea Agent (desktop) pour utiliser l'ecoute active."
+                            : "Erreur. Reessaie."
+                          )
+                        } else {
+                          setActionToast("Ecoute active demarree sur le desktop")
+                        }
+                        setTimeout(() => setActionToast(null), 4500)
+                      } catch {
+                        setActionToast("Backend inaccessible")
+                        setTimeout(() => setActionToast(null), 3000)
+                      }
+                    }}
+                    title="Enregistre ton cours, l'agent en fait la fiche (sur le desktop)"
                     style={{
-                      padding: '0.55rem 0.8rem', borderRadius: 'var(--radius-md)',
+                      padding: '0.55rem 0.9rem', borderRadius: 'var(--radius-md)',
                       border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '0.82rem',
                       background: 'linear-gradient(135deg, #b91c1c, #ef4444)',
                       color: '#fff', transition: 'all 0.2s', whiteSpace: 'nowrap',
                       boxShadow: '0 2px 10px rgba(239,68,68,0.3)',
-                      display: 'flex', alignItems: 'center', gap: '0.3rem',
+                      display: 'flex', alignItems: 'center', gap: '0.4rem',
                     }}
                     onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-1px)'}
                     onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2z" />
+                      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                      <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                      <line x1="12" y1="19" x2="12" y2="23"/>
+                      <line x1="8" y1="23" x2="16" y2="23"/>
                     </svg>
-                    Appeler
+                    Ecoute active
                   </button>
                 </div>
                 <button
