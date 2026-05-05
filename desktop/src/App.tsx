@@ -195,15 +195,10 @@ function App() {
   //  1. activatedAgents (source de verite : toggle "Activer cet agent" du web)
   //  2. lastActivityByAgent (recent WS message → agent en train d'agir)
   // Un agent est 'active' s'il est ACTIVE dans le web OU s'il a recemment agi.
-  // agent1 reste 'active' par defaut (pas de toggle pour lui dans le web).
-  // agent4 est toujours 'locked'.
+  // agent4 est toujours 'locked' (Super Agent — bientot disponible).
   const AGENTS: AgentInfo[] = AGENTS_BASE.map(base => {
     if (base.id === 'agent4') {
       return { ...base, status: 'locked', unread: 0 }
-    }
-    if (base.id === 'agent1') {
-      // Agent 1 = compagnon personnel, toujours actif
-      return { ...base, status: 'active', unread: 0 }
     }
     const explicitlyActivated = activatedAgents[base.id] === true
     const last = lastActivityByAgent[base.id]
@@ -484,10 +479,11 @@ function App() {
           if (data.type === 'agents_activation' && data.active) {
             const next = data.active as Record<string, boolean>
             setActivatedAgents(next)
-            // Auto-select le 1er agent active (priorite agent3 > agent2)
+            // Auto-select le 1er agent active (priorite agent3 > agent2 > agent1)
             if (!agentPinned) {
-              if (next.agent3) setSelectedAgentRaw('agent3')
+              if (next.agent3)      setSelectedAgentRaw('agent3')
               else if (next.agent2) setSelectedAgentRaw('agent2')
+              else if (next.agent1) setSelectedAgentRaw('agent1')
             }
             // Step info pour traçabilité
             const activeList = Object.entries(next).filter(([, v]) => v).map(([k]) => k.replace('agent', 'Sylea '))
@@ -1497,16 +1493,25 @@ function App() {
                   >
                     <span>{statusSymbol}</span>
                     <span>{statusLabel}</span>
+                    {/* Mini badge OpenClaw — texte explicite "CLAW" au lieu d'un dot
+                        qui pouvait etre confondu avec un indicateur "actif".
+                        Cyan = connecte, jaune = fallback Claude (offline). */}
                     {isAgent3 && (
                       <span
                         title={openclawConnected ? 'OpenClaw connecte' : 'OpenClaw — fallback Claude'}
                         style={{
-                          display: 'inline-block', marginLeft: 2,
-                          width: 4, height: 4, borderRadius: '50%',
-                          background: openclawConnected ? SY.success : SY.warn,
-                          boxShadow: openclawConnected ? `0 0 4px ${SY.success}` : 'none',
+                          marginLeft: 4, padding: '0 4px',
+                          fontSize: 7, lineHeight: '11px',
+                          letterSpacing: '0.08em',
+                          borderRadius: 2,
+                          color: openclawConnected ? SY.cyan : SY.warn,
+                          background: openclawConnected ? 'rgba(0,200,255,0.10)' : 'rgba(245,158,11,0.10)',
+                          border: `1px solid ${openclawConnected ? 'rgba(0,200,255,0.35)' : 'rgba(245,158,11,0.35)'}`,
+                          fontWeight: 700,
                         }}
-                      />
+                      >
+                        {openclawConnected ? 'CLAW' : 'CLAW✗'}
+                      </span>
                     )}
                   </div>
                 </div>

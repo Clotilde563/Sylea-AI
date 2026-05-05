@@ -724,6 +724,17 @@ export default function AgentsPage() {
   useEffect(() => { saveActive(active) }, [active])
   useEffect(() => { saveVoiceEnabled(voiceEnabled) }, [voiceEnabled])
 
+  // Sync activation state vers desktop via WS broadcast
+  useEffect(() => {
+    const token = localStorage.getItem('sylea_auth_token')
+    if (!token) return
+    fetch(`${import.meta.env.VITE_API_URL || ''}/api/desktop/agents-activation`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ agent1: active, agent2: loadActive2(), agent3: loadActive3() }),
+    }).catch(() => { /* silent */ })
+  }, [active])
+
   // Auto-scroll on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -1230,7 +1241,7 @@ export default function AgentsPage() {
     fetch(`${import.meta.env.VITE_API_URL || ''}/api/desktop/agents-activation`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ agent2: active2, agent3: loadActive3() }),
+      body: JSON.stringify({ agent1: loadActive(), agent2: active2, agent3: loadActive3() }),
     }).catch(() => { /* silent — pas critique */ })
   }, [active2])
   useEffect(() => {
@@ -2003,7 +2014,7 @@ export default function AgentsPage() {
     fetch(`${import.meta.env.VITE_API_URL || ''}/api/desktop/agents-activation`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ agent2: loadActive2(), agent3: active3 }),
+      body: JSON.stringify({ agent1: loadActive(), agent2: loadActive2(), agent3: active3 }),
     }).catch(() => { /* silent */ })
   }, [active3])
   // Scroll vers le bas du conteneur de messages

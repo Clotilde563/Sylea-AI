@@ -225,8 +225,9 @@ async def set_agents_activation(
     if not user_id:
         return {"ok": False, "error": "auth_required"}
     from api.websocket import ws_manager
-    # Sanitise : ne garde que agent2/agent3 boolean
+    # Sanitise : ne garde que agent1/agent2/agent3 boolean
     next_state = {
+        "agent1": bool(payload.get("agent1", False)),
         "agent2": bool(payload.get("agent2", False)),
         "agent3": bool(payload.get("agent3", False)),
     }
@@ -244,8 +245,8 @@ async def get_agents_activation(user_id: str = Depends(get_optional_user)):
     """Retourne l'etat d'activation des agents pour l'user courant.
     Utilise par l'app desktop au boot pour afficher le bon etat initial."""
     if not user_id:
-        return {"active": {"agent2": False, "agent3": False}}
-    return {"active": _agents_activation_state.get(user_id, {"agent2": False, "agent3": False})}
+        return {"active": {"agent1": False, "agent2": False, "agent3": False}}
+    return {"active": _agents_activation_state.get(user_id, {"agent1": False, "agent2": False, "agent3": False})}
 
 
 @app.get("/", include_in_schema=False)
