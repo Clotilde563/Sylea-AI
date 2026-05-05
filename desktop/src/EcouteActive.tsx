@@ -67,11 +67,28 @@ interface RecordingStatus {
 
 interface Props {
   onClose: () => void
+  /** Token JWT pour authentifier les uploads de chunks vers le backend */
+  authToken?: string
+  /** Base URL du backend (default localhost:8000) */
+  apiBase?: string
+}
+
+interface TranscriptChunk {
+  index: number
+  text: string
+  language: string
+  duration_s: number
+  status: 'uploading' | 'done' | 'error'
+  segments?: Array<{ start: number; end: number; text: string }>
 }
 
 type Phase = 'preflight' | 'recording' | 'stopped'
 
-export function EcouteActive({ onClose }: Props) {
+export function EcouteActive({
+  onClose,
+  authToken,
+  apiBase = 'http://localhost:8000',
+}: Props) {
   const [phase, setPhase] = useState<Phase>('preflight')
 
   // Pre-flight form
@@ -88,6 +105,13 @@ export function EcouteActive({ onClose }: Props) {
   const [stopResult, setStopResult] = useState<{
     session_dir: string; duration_ms: number; chunks_count: number
   } | null>(null)
+
+  // Sprint 2 — Live transcript : tableau de chunks transcribed.
+  // Each chunk index est sauvegarde sur disque par Rust, on detecte l'arrivee
+  // d'un nouveau chunk via chunks_count, on upload via fetch multipart.
+  const [transcript, setTranscript] = useState<TranscriptChunk[]>([])
+  const lastUploadedChunkRef = useRef<number>(-1)
+  const transcriptEndRef = useRef<HTMLDivElement>(null)
 
   // Waveform canvas
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -107,6 +131,92 @@ export function EcouteActive({ onClose }: Props) {
     }, 200)
     return () => clearInterval(id)
   }, [phase])
+
+  // ── Sprint 2 — Detection + upload des chunks transcrits ────────────────────
+  //
+  // Le Rust audio_capture finalise chunk_NNNN.wav toutes les 30s. Quand
+  // status.chunks_count augmente, on lit le fichier le plus recent
+  // (tous ceux pas encore uploades) et on POST au backend pour transcription.
+  //
+  // Note : status.chunks_count = nombre de chunks COMPLETES. Donc si
+  // chunks_count = 3, les fichiers chunk_0000, chunk_0001, chunk_0002 sont
+  // finalises sur disque.
+  useEffect(() => {
+    if (phase !== 'recording') return
+    if (!status.session_dir) return
+    if (!authToken) return
+
+    const completedChunks = status.chunks_count
+    const nextToUpload = lastUploadedChunkRef.current + 1
+    if (nextToUpload >= completedChunks) return
+
+    // Upload tous les chunks pas encore traites (rare backlog si l'upload
+    // du chunk N a ete plus lent que la duree d'un chunk).
+    const uploadChunk = async (idx: number) => {
+      const chunkPath = `${status.session_dir}/chunk_${String(idx).padStart(4, '0')}.wav`
+      // Marque uploading
+      setTranscript(prev => [
+        ...prev,
+        { index: idx, text: '', language: '', duration_s: 0, status: 'uploading' },
+      ])
+      try {
+        // 1) Lecture du fichier WAV depuis le disque (commande Rust existante)
+        const b64 = await invoke<string>('read_file_binary', { path: chunkPath })
+        // 2) Decode base64 -> Uint8Array -> Blob
+        const binary = atob(b64)
+        const bytes = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+        const blob = new Blob([bytes], { type: 'audio/wav' })
+        // 3) POST multipart au backend
+        const formData = new FormData()
+        formData.append('audio', blob, `chunk_${idx}.wav`)
+        formData.append('session_id', status.session_id || '')
+        formData.append('chunk_index', String(idx))
+        // Si l'utilisateur a precise la matiere "anglais", on aide la detection
+        if (matiere === 'anglais') formData.append('language', 'en')
+        else                       formData.append('language', 'fr')
+
+        const r = await fetch(`${apiBase}/api/lecture/transcribe-chunk`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${authToken}` },
+          body: formData,
+        })
+        const data = await r.json()
+        if (data?.ok) {
+          setTranscript(prev => prev.map(c => c.index === idx ? {
+            index: idx,
+            text: data.text || '',
+            language: data.language || '',
+            duration_s: data.duration_s || 0,
+            status: 'done',
+            segments: data.segments,
+          } : c))
+        } else {
+          setTranscript(prev => prev.map(c => c.index === idx
+            ? { ...c, status: 'error', text: `[Erreur : ${data?.error || 'inconnue'}]` }
+            : c))
+        }
+      } catch (e) {
+        setTranscript(prev => prev.map(c => c.index === idx
+          ? { ...c, status: 'error', text: `[Erreur upload : ${e}]` }
+          : c))
+      }
+    }
+
+    // Upload sequentiel pour eviter de surcharger faster-whisper si plusieurs
+    // chunks accumules. La derniere reference dispo = nextToUpload.
+    ;(async () => {
+      for (let i = nextToUpload; i < completedChunks; i++) {
+        lastUploadedChunkRef.current = i
+        await uploadChunk(i)
+      }
+    })()
+  }, [status.chunks_count, status.session_dir, status.session_id, authToken, apiBase, phase, matiere])
+
+  // Auto-scroll du transcript vers le bas a chaque nouveau chunk
+  useEffect(() => {
+    transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [transcript])
 
   // Render waveform
   useEffect(() => {
@@ -158,6 +268,8 @@ export function EcouteActive({ onClose }: Props) {
   const startRecording = useCallback(async () => {
     setError(null)
     levelHistoryRef.current = []
+    setTranscript([])
+    lastUploadedChunkRef.current = -1
     const session_id = `lec_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
     try {
       await invoke('start_recording', {
@@ -444,6 +556,84 @@ export function EcouteActive({ onClose }: Props) {
             <Stat label="CHUNKS" value={status.chunks_count.toString()} />
             <Stat label="DUREE EST." value={`${(status.chunks_count * 30 / 60).toFixed(1)} min`} />
             <Stat label="TAILLE EST." value={`${(status.chunks_count * 0.96).toFixed(1)} MB`} />
+          </div>
+
+          {/* ── Sprint 2 — Live transcript ──────────────────────────────── */}
+          <div style={{
+            marginTop: 6, marginBottom: 10,
+            background: 'rgba(0,0,0,0.4)', border: `1px solid ${SY.border}`,
+            borderRadius: 8, overflow: 'hidden',
+          }}>
+            <div style={{
+              padding: '8px 12px',
+              borderBottom: `1px solid ${SY.border}`,
+              display: 'flex', alignItems: 'center', gap: 8,
+              fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.16em',
+              textTransform: 'uppercase', color: SY.cyanSoft,
+            }}>
+              <span style={{
+                width: 6, height: 6, borderRadius: '50%',
+                background: SY.cyan, boxShadow: `0 0 6px ${SY.cyan}`,
+                animation: 'sy-pulse 1.6s ease-in-out infinite',
+              }} />
+              <span>▸ Transcript live</span>
+              <div style={{ flex: 1 }} />
+              <span style={{ color: SY.textDim }}>
+                {transcript.filter(c => c.status === 'done').length} / {transcript.length} chunks
+              </span>
+            </div>
+            <div style={{
+              maxHeight: 180, minHeight: 110, overflowY: 'auto',
+              padding: '10px 14px',
+              fontSize: 13, lineHeight: 1.55, color: SY.text,
+            }}>
+              {transcript.length === 0 && (
+                <div style={{
+                  color: SY.textDim, fontFamily: SY.mono, fontSize: 11,
+                  letterSpacing: '0.06em', textAlign: 'center', padding: '24px 0',
+                }}>
+                  ◌ Premiere transcription dans ~30s (fin du 1er chunk)…
+                </div>
+              )}
+              {transcript.map(c => (
+                <div key={c.index} style={{
+                  marginBottom: 8, paddingLeft: 14,
+                  borderLeft: `2px solid ${
+                    c.status === 'done'      ? SY.success :
+                    c.status === 'error'     ? SY.red :
+                                               SY.warn
+                  }`,
+                  opacity: c.status === 'uploading' ? 0.6 : 1,
+                }}>
+                  <div style={{
+                    fontSize: 9, fontFamily: SY.mono, color: SY.textDim,
+                    letterSpacing: '0.08em', marginBottom: 3,
+                    display: 'flex', alignItems: 'center', gap: 6,
+                  }}>
+                    <span>#{String(c.index).padStart(4, '0')}</span>
+                    <span>·</span>
+                    <span>{fmtTime(c.index * 30 * 1000)}</span>
+                    {c.status === 'uploading' && (
+                      <span style={{ color: SY.warn }}>
+                        · transcription en cours…
+                      </span>
+                    )}
+                    {c.status === 'done' && c.language && (
+                      <span style={{ color: SY.cyanSoft, opacity: 0.8 }}>
+                        · {c.language}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{
+                    color: c.status === 'error' ? SY.redLight : SY.text,
+                    fontStyle: c.status === 'uploading' ? 'italic' : 'normal',
+                  }}>
+                    {c.status === 'uploading' && !c.text ? '…' : c.text}
+                  </div>
+                </div>
+              ))}
+              <div ref={transcriptEndRef} />
+            </div>
           </div>
 
           {/* Controls */}

@@ -16,7 +16,8 @@ import asyncio
 import os
 import sys
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Depends
+from pathlib import Path
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -266,6 +267,62 @@ async def start_lecture(user_id: str = Depends(get_optional_user)):
         return {"ok": False, "error": "desktop_not_connected"}
     await ws_manager.send_to_user(user_id, {"type": "start_lecture"})
     return {"ok": True}
+
+
+# ── Sprint 2 : Transcription incrementale (faster-whisper local) ────────────
+#
+# Le desktop POST chaque chunk WAV (30s, 16kHz mono PCM 16-bit) ici. On le
+# sauvegarde dans un dossier temporaire user-scoped, on le passe au service
+# transcription (faster-whisper "small" par defaut, override via env var
+# FASTER_WHISPER_MODEL=medium pour prod prepa), et on retourne le texte +
+# la langue detectee + duree.
+
+@app.post("/api/lecture/transcribe-chunk", tags=["lecture"])
+async def transcribe_chunk(
+    audio: UploadFile = File(...),
+    session_id: str | None = Form(None),
+    chunk_index: int | None = Form(None),
+    language: str | None = Form(None),  # override langue (ex: "en" pour cours d'anglais)
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Transcrit un chunk WAV envoye par l'app desktop. Retourne le texte
+    + segments + langue detectee."""
+    if not user_id:
+        return {"ok": False, "error": "auth_required"}
+
+    # Sauvegarde temporaire user-scoped (evite collisions entre users)
+    import tempfile
+    import uuid
+    tmp_dir = Path(tempfile.gettempdir()) / "sylea-lecture" / user_id
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    safe_session = (session_id or "anon")[:64].replace("/", "_").replace("\\", "_")
+    tmp_path = tmp_dir / f"chunk_{safe_session}_{chunk_index or 0}_{uuid.uuid4().hex[:8]}.wav"
+
+    try:
+        content = await audio.read()
+        tmp_path.write_bytes(content)
+
+        from api.transcription import get_transcriber
+        result = get_transcriber().transcribe(tmp_path, language=language)
+
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "chunk_index": chunk_index,
+            "text": result["text"],
+            "language": result["language"],
+            "language_probability": result["language_probability"],
+            "duration_s": result["duration_s"],
+            "segments": result["segments"],
+        }
+    except Exception as e:
+        return {"ok": False, "error": f"transcription_failed: {e}"}
+    finally:
+        # Cleanup : on garde pas l'audio sur le serveur (privacy)
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 @app.get("/", include_in_schema=False)

@@ -1205,7 +1205,11 @@ function App() {
     }}>
       {/* Ecoute active — overlay plein-ecran si declenche (cours universite/prepa) */}
       {ecouteActiveOpen && (
-        <EcouteActive onClose={() => setEcouteActiveOpen(false)} />
+        <EcouteActive
+          onClose={() => setEcouteActiveOpen(false)}
+          authToken={token || undefined}
+          apiBase={API_BASE}
+        />
       )}
 
       {/* Sprint 2.2 — Particules de fond (canvas plein-ecran derriere tout) */}
