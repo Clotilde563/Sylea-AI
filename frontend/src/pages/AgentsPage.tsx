@@ -1225,7 +1225,7 @@ export default function AgentsPage() {
   // qui forward au desktop). Permet a l'app desktop de refleter l'etat
   // actif/inactif des agents en temps reel.
   useEffect(() => {
-    const token = localStorage.getItem('token')
+    const token = localStorage.getItem('sylea_auth_token')
     if (!token) return
     fetch(`${import.meta.env.VITE_API_URL || ''}/api/desktop/agents-activation`, {
       method: 'POST',
@@ -1998,7 +1998,7 @@ export default function AgentsPage() {
   useEffect(() => { saveActive3(active3) }, [active3])
   // Sync activation state vers desktop via WS broadcast
   useEffect(() => {
-    const token = localStorage.getItem('token')
+    const token = localStorage.getItem('sylea_auth_token')
     if (!token) return
     fetch(`${import.meta.env.VITE_API_URL || ''}/api/desktop/agents-activation`, {
       method: 'POST',
