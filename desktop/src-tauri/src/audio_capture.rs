@@ -160,8 +160,11 @@ fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
         return samples.to_vec();
     }
     let n = channels as usize;
+    // chunks_exact() pour ignorer les frames partielles au bord du buffer
+    // (cpal peut delivrer un nombre de samples non multiple du channel count
+    // selon la latence ; un sample orphelin moyenne avec /n donne un click).
     samples
-        .chunks(n)
+        .chunks_exact(n)
         .map(|frame| frame.iter().sum::<f32>() / n as f32)
         .collect()
 }
@@ -525,4 +528,145 @@ pub fn list_audio_input_devices() -> Result<Vec<AudioDevice>, String> {
         }
     }
     Ok(result)
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Tests unitaires (cargo test) — fonctions pures uniquement.
+//
+//  On ne teste PAS le recording lui-meme (cpal a besoin d'un micro reel,
+//  CI sans hardware → flaky). Les fonctions deterministes (resample,
+//  downmix, wav_spec) couvrent la logique critique du pipeline audio.
+// ════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── linear_resample_to_target ─────────────────────────────────────────────
+
+    #[test]
+    fn resample_identity_when_rates_match() {
+        // 16k → 16k : convertit f32 -> i16 PCM sans changer la longueur.
+        let input = vec![0.0_f32, 0.5, -0.5, 1.0, -1.0];
+        let out = linear_resample_to_target(&input, TARGET_SAMPLE_RATE);
+        assert_eq!(out.len(), input.len());
+        // 0.0 -> 0, 0.5 -> ~16383, -0.5 -> ~-16383, 1.0 -> 32767, -1.0 -> -32767
+        assert_eq!(out[0], 0);
+        assert!((out[1] - 16383).abs() <= 1);
+        assert!((out[2] + 16383).abs() <= 1);
+        assert_eq!(out[3], 32767);
+        assert_eq!(out[4], -32767);
+    }
+
+    #[test]
+    fn resample_downsample_48k_to_16k_third_length() {
+        // 300 samples a 48 kHz -> ~100 samples a 16 kHz (ratio 1/3).
+        let input = vec![0.5_f32; 300];
+        let out = linear_resample_to_target(&input, 48_000);
+        assert!(
+            (out.len() as i32 - 100).abs() <= 1,
+            "expected ~100 samples, got {}",
+            out.len()
+        );
+        // Toutes les valeurs etant 0.5, l'interpolation lineaire reste plate.
+        for &s in &out {
+            assert!((s - 16383).abs() <= 1, "expected ~16383, got {}", s);
+        }
+    }
+
+    #[test]
+    fn resample_upsample_8k_to_16k_double_length() {
+        // 100 samples a 8 kHz -> ~200 samples a 16 kHz (ratio 2).
+        let input = vec![0.25_f32; 100];
+        let out = linear_resample_to_target(&input, 8_000);
+        assert!(
+            (out.len() as i32 - 200).abs() <= 2,
+            "expected ~200 samples, got {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn resample_clamps_overflow_values() {
+        // Valeurs > 1.0 ou < -1.0 doivent etre clampees a +/-32767, pas wrap.
+        let input = vec![5.0_f32, -5.0, 100.0, -100.0];
+        let out = linear_resample_to_target(&input, TARGET_SAMPLE_RATE);
+        assert_eq!(out[0], 32767);
+        assert_eq!(out[1], -32767);
+        assert_eq!(out[2], 32767);
+        assert_eq!(out[3], -32767);
+    }
+
+    #[test]
+    fn resample_empty_input_returns_empty() {
+        let out = linear_resample_to_target(&[], 48_000);
+        assert!(out.is_empty());
+    }
+
+    // ── downmix_to_mono ───────────────────────────────────────────────────────
+
+    #[test]
+    fn downmix_mono_passes_through_unchanged() {
+        let input = vec![0.1_f32, 0.2, 0.3, 0.4];
+        let out = downmix_to_mono(&input, 1);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn downmix_zero_channels_passes_through() {
+        // Cas defensif : si channels == 0, on ne crash pas, on retourne tel quel.
+        let input = vec![0.5_f32; 4];
+        let out = downmix_to_mono(&input, 0);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn downmix_stereo_averages_left_right() {
+        // [L=0.4, R=0.6, L=-0.2, R=0.4] -> [0.5, 0.1]
+        let input = vec![0.4_f32, 0.6, -0.2, 0.4];
+        let out = downmix_to_mono(&input, 2);
+        assert_eq!(out.len(), 2);
+        assert!((out[0] - 0.5).abs() < 1e-6, "got {}", out[0]);
+        assert!((out[1] - 0.1).abs() < 1e-6, "got {}", out[1]);
+    }
+
+    #[test]
+    fn downmix_5_channels_averages_all() {
+        // 5 canaux, tous a 0.5 -> mono 0.5
+        let input = vec![0.5_f32; 10]; // 2 frames de 5 canaux
+        let out = downmix_to_mono(&input, 5);
+        assert_eq!(out.len(), 2);
+        assert!((out[0] - 0.5).abs() < 1e-6);
+        assert!((out[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn downmix_partial_frame_dropped() {
+        // 5 samples avec 2 canaux : la derniere demi-frame est ignoree
+        // (chunks(2) ne yield pas le sample orphelin).
+        let input = vec![0.4_f32, 0.6, 0.0, 0.0, 0.9];
+        let out = downmix_to_mono(&input, 2);
+        assert_eq!(out.len(), 2); // [0.5, 0.0], le 0.9 isole est drop
+    }
+
+    // ── wav_spec ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wav_spec_targets_whisper_format() {
+        let spec = wav_spec();
+        assert_eq!(spec.channels, 1, "must be mono");
+        assert_eq!(spec.sample_rate, 16_000, "must be 16 kHz (Whisper native)");
+        assert_eq!(spec.bits_per_sample, 16);
+        assert!(matches!(spec.sample_format, HoundFmt::Int));
+    }
+
+    // ── Constantes ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn chunk_samples_matches_30s_at_16k() {
+        // 30s × 16 000 Hz = 480 000 samples par chunk.
+        assert_eq!(CHUNK_SAMPLES, 480_000);
+        assert_eq!(CHUNK_DURATION_S, 30);
+        assert_eq!(TARGET_SAMPLE_RATE, 16_000);
+    }
 }
