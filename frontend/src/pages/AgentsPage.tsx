@@ -1169,6 +1169,10 @@ export default function AgentsPage() {
   const [messages2, setMessages2] = useState<AgentMessage[]>([])
   const [inputText2, setInputText2] = useState('')
   const [sending2, setSending2] = useState(false)
+  // Agent 2 — todolist simulee (Agent 2 n'a pas de streaming reel cote backend,
+  // on simule une progression "Analyse → Reflexion → Generation" pendant le
+  // temps de reponse de l'API pour un feedback UX equivalent a Agent 3).
+  const [streamSteps2, setStreamSteps2] = useState<Array<{ id: string; label: string; status: string; detail: string }>>([])
   const [loadingMessages2, setLoadingMessages2] = useState(false)
   const messagesEndRef2 = useRef<HTMLDivElement>(null)
   const inputRef2 = useRef<HTMLInputElement>(null)
@@ -1408,6 +1412,28 @@ export default function AgentsPage() {
     setMessages2(updated)
     setInputText2('')
     setSending2(true)
+    // Agent 2 — Todolist simulee : 3 phases s'enchainent en parallele de la
+    // requete API (qui prend 1-3s typiquement). Donne un feedback de progression
+    // equivalent a Agent 3 (qui lui a un vrai streaming).
+    const phaseIds = { analyse: `a2-anl-${Date.now()}`, think: `a2-thk-${Date.now()}`, gen: `a2-gen-${Date.now()}` }
+    setStreamSteps2([
+      { id: phaseIds.analyse, label: 'Analyse de la demande',          status: 'running', detail: '' },
+      { id: phaseIds.think,   label: 'Identification du besoin',       status: 'pending', detail: '' },
+      { id: phaseIds.gen,     label: 'Generation de la reponse',       status: 'pending', detail: '' },
+    ])
+    // Avance les phases avec des timeouts ; chaque phase s'affiche progressivement.
+    const t1 = window.setTimeout(() => {
+      setStreamSteps2(prev => prev.map(s =>
+        s.id === phaseIds.analyse ? { ...s, status: 'done' } :
+        s.id === phaseIds.think   ? { ...s, status: 'running' } : s
+      ))
+    }, 600)
+    const t2 = window.setTimeout(() => {
+      setStreamSteps2(prev => prev.map(s =>
+        s.id === phaseIds.think ? { ...s, status: 'done' } :
+        s.id === phaseIds.gen   ? { ...s, status: 'running' } : s
+      ))
+    }, 1500)
     try {
       const chatHistory = updated.map(m => ({
         role: m.role === 'agent' ? 'assistant' : 'user',
@@ -1415,6 +1441,22 @@ export default function AgentsPage() {
       }))
       const res = await api.agent2Chat(chatHistory, deviceCtx ?? undefined, msgType === 'voice' ? audioBase64 : undefined)
       const agentResponseType = msgType === 'voice' ? 'voice' : 'text'
+      // Si l'agent a renvoye des actions (email/rappel/etc), ajoute un step
+      // dedie pour chaque action — ressemble plus a Agent 3.
+      const actionLabels: Record<string, string> = {
+        EMAIL: 'Preparation email', REMINDER: 'Creation rappel', LINK: 'Ouverture lien',
+        COPY: 'Copie presse-papier', TEXT: 'Generation document',
+      }
+      const actionSteps = (res.actions || []).map((a, i) => ({
+        id: `a2-act-${Date.now()}-${i}`,
+        label: actionLabels[a.type] || a.type,
+        status: 'done',
+        detail: (a.data?.title || a.data?.to || a.data?.url || a.data?.message || '').slice(0, 50),
+      }))
+      setStreamSteps2(prev => [
+        ...prev.map(s => ({ ...s, status: 'done' })),
+        ...actionSteps,
+      ])
       setMessages2(prev => [...prev, {
         role: 'agent', content: res.message,
         timestamp: new Date().toISOString(), type: agentResponseType,
@@ -1422,11 +1464,18 @@ export default function AgentsPage() {
         actions: res.actions || undefined,
       }])
     } catch {
+      setStreamSteps2(prev => prev.map(s => s.status === 'running' ? { ...s, status: 'error' } : s))
       setMessages2(prev => [...prev, {
         role: 'agent', content: "Desole, une erreur est survenue. Reessayez dans un instant.",
         timestamp: new Date().toISOString(), type: 'text',
       }])
-    } finally { setSending2(false) }
+    } finally {
+      window.clearTimeout(t1)
+      window.clearTimeout(t2)
+      setSending2(false)
+      // Garde la todolist visible 3s puis fade out
+      window.setTimeout(() => setStreamSteps2([]), 3000)
+    }
   }, [inputText2, sending2, messages2, deviceCtx])
 
   // ── Voice recording for Agent 2 ──────────────────────────────────────────
@@ -2321,7 +2370,13 @@ export default function AgentsPage() {
       }])
     }, 180_000)
     setStreamActive(true)
-    setStreamSteps([])
+    // Initial "thinking" step pour que la todolist apparaisse immediatement,
+    // meme si l'agent n'utilise aucun outil. Sera marque 'done' au premier
+    // token recu (onTokenDelta) ou au premier outil (onToolUse).
+    const initialStepId = `init-${Date.now()}`
+    setStreamSteps([
+      { id: initialStepId, label: 'Analyse de la demande', status: 'running', detail: '' },
+    ])
     setStreamLogs([])
     setStreamTools([])
     setActionCards([])
@@ -2334,6 +2389,29 @@ export default function AgentsPage() {
       if (agent3NativeMode) {
         const nowTime = () => new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
         setStreamLogs([{ text: 'Mode natif (tool_use API) — streaming tokens actif', type: 'info', time: nowTime() }])
+        // Helper : transforme un nom d'outil API en label humain pour la todolist
+        const toolLabel = (name: string, input?: Record<string, unknown>): string => {
+          const m: Record<string, string> = {
+            web_search: 'Recherche web',
+            search_web: 'Recherche web',
+            file_read: 'Lecture de fichier',
+            file_write: 'Ecriture de fichier',
+            file_create: 'Creation de fichier',
+            file_delete: 'Suppression de fichier',
+            shell_exec: 'Execution shell',
+            execute_code: 'Execution de code',
+            send_email: 'Envoi d\'email',
+            create_reminder: 'Creation de rappel',
+            generate_pdf: 'Generation PDF',
+            x_search: 'Recherche X/Twitter',
+            screenshot: 'Capture d\'ecran',
+            spawn_agent: 'Lancement sous-agent',
+          }
+          const base = m[name] || name.replace(/_/g, ' ')
+          // Ajoute un detail court depuis l'input (ex: query, path, ...)
+          const q = (input?.query || input?.path || input?.url || input?.title) as string | undefined
+          return q ? `${base} — ${String(q).slice(0, 60)}` : base
+        }
         // Prepare cancel plumbing
         const genToken = (): string => {
           try {
@@ -2362,6 +2440,12 @@ export default function AgentsPage() {
             onTokenDelta: (text) => {
               // Token-level streaming from assistant (extended thinking OFF or text blocks)
               setStreamingText(prev => prev + text)
+              // Marque le step initial "Analyse" comme done au 1er token recu
+              setStreamSteps(prev => prev.map(s =>
+                s.id === initialStepId && s.status === 'running'
+                  ? { ...s, status: 'done', label: 'Analyse de la demande' }
+                  : s
+              ))
             },
             onThinkingDelta: (text) => {
               // Extended thinking stream — shown in collapsible panel
@@ -2384,10 +2468,30 @@ export default function AgentsPage() {
             onToolUse: (t) => {
               setStreamTools(prev => [...prev, { tool: t.name, description: JSON.stringify(t.input).slice(0, 120), status: 'running' }])
               setStreamLogs(prev => [...prev, { text: `tool_use ${t.name}`, type: 'tool', time: nowTime() }])
+              // Synthetise un step de todolist par tool_use. Le step initial
+              // "Analyse" est marque done si pas deja, et un nouveau step
+              // running est ajoute.
+              setStreamSteps(prev => {
+                const updated = prev.map(s =>
+                  s.id === initialStepId && s.status === 'running'
+                    ? { ...s, status: 'done' }
+                    : s
+                )
+                return [...updated, {
+                  id: t.id,
+                  label: toolLabel(t.name, t.input),
+                  status: 'running',
+                  detail: t.name,
+                }]
+              })
             },
             onToolResult: (r) => {
               setStreamTools(prev => prev.length ? [...prev.slice(0, -1), { ...prev[prev.length - 1], status: r.is_error ? 'error' : 'done' }] : prev)
               setStreamLogs(prev => [...prev, { text: `tool_result: ${String(r.content || '').slice(0, 140)}`, type: r.is_error ? 'error' : 'info', time: nowTime() }])
+              // Marque le step correspondant (id == tool_use_id) comme done/error
+              setStreamSteps(prev => prev.map(s =>
+                s.id === r.tool_use_id ? { ...s, status: r.is_error ? 'error' : 'done' } : s
+              ))
             },
             onAutoExtensionStart: (p) => {
               setAutoExtension({
@@ -2570,6 +2674,9 @@ export default function AgentsPage() {
       setStreamingText('')
       setCurrentCancelToken(null)
       abortControllerRef3.current = null
+      // Marque tous les steps encore "running" comme "done" pour cloturer
+      // proprement la todolist a la fin du stream.
+      setStreamSteps(prev => prev.map(s => s.status === 'running' ? { ...s, status: 'done' } : s))
       // Garder le panneau visible 5s puis masquer (pour voir les etapes terminees)
       setTimeout(() => setStreamActive(false), 5000)
     }
@@ -5900,15 +6007,111 @@ export default function AgentsPage() {
                 </div>
               )
             })}
-            {sending2 && (
-              <div style={{ display: 'flex', justifyContent: 'flex-start', animation: 'agent-msg-in 0.3s ease forwards' }}>
+            {/* ── Agent 2 — Todolist progression panel (style Agent 3) ── */}
+            {streamSteps2.length > 0 && (
+              <div style={{
+                animation: 'agent-msg-in 0.3s ease forwards',
+                borderRadius: '16px', overflow: 'hidden',
+                background: 'rgba(5,8,16,0.85)',
+                border: '1px solid rgba(239,68,68,0.2)',
+                boxShadow: '0 4px 24px rgba(239,68,68,0.1), inset 0 1px 0 rgba(239,68,68,0.1)',
+                maxWidth: '95%',
+              }}>
+                {/* Header */}
                 <div style={{
-                  padding: '0.75rem 1.25rem', borderRadius: '16px 16px 16px 4px',
-                  background: 'rgba(255,255,255,0.06)', borderLeft: '3px solid #ef4444',
-                  display: 'flex', alignItems: 'center', gap: '0.4rem',
+                  padding: '0.6rem 1rem', display: 'flex', alignItems: 'center', gap: '0.5rem',
+                  background: 'linear-gradient(90deg, rgba(239,68,68,0.18), rgba(239,68,68,0.06))',
+                  borderBottom: '1px solid rgba(239,68,68,0.15)',
                 }}>
-                  <span className="spinner spinner-sm" />
-                  <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>{t('agents.thinking')}</span>
+                  <span className="spinner spinner-sm" style={{ width: 12, height: 12 }} />
+                  <span style={{ color: '#fff', fontSize: '0.78rem', fontWeight: 700 }}>
+                    Agent 2 — {sending2 ? 'Traitement en cours' : 'Termine'}
+                  </span>
+                </div>
+
+                {/* Progress bar */}
+                <div style={{ padding: '0.5rem 1rem 0.25rem' }}>
+                  <div style={{
+                    height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden',
+                  }}>
+                    <div style={{
+                      height: '100%', borderRadius: 2,
+                      background: 'linear-gradient(90deg, #ef4444, #f87171, #ef4444)',
+                      backgroundSize: '200% 100%',
+                      animation: 'agent3-btn-flow 2s ease-in-out infinite',
+                      width: `${Math.round((streamSteps2.filter(s => s.status === 'done').length / streamSteps2.length) * 100)}%`,
+                      transition: 'width 0.5s ease',
+                    }} />
+                  </div>
+                  <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '0.2rem', textAlign: 'right' }}>
+                    {streamSteps2.filter(s => s.status === 'done').length}/{streamSteps2.length} etapes
+                  </div>
+                </div>
+
+                {/* Steps */}
+                <div style={{ padding: '0 0.75rem 0.6rem', display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                  {streamSteps2.map((step) => (
+                    <div key={step.id} style={{
+                      display: 'flex', alignItems: 'center', gap: '0.5rem',
+                      padding: '0.35rem 0.5rem', borderRadius: '8px',
+                      background:
+                        step.status === 'running' ? 'rgba(239,68,68,0.08)' :
+                        step.status === 'done'    ? 'rgba(16,185,129,0.05)' :
+                        step.status === 'error'   ? 'rgba(239,68,68,0.12)' :
+                                                    'transparent',
+                      transition: 'all 0.3s',
+                    }}>
+                      <div style={{ width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                        {step.status === 'done' && (
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                        )}
+                        {step.status === 'running' && (
+                          <div style={{
+                            width: 14, height: 14, borderRadius: '50%',
+                            border: '2px solid transparent',
+                            borderTopColor: '#ef4444', borderRightColor: '#f87171',
+                            animation: 'spin 0.8s linear infinite',
+                          }} />
+                        )}
+                        {step.status === 'pending' && (
+                          <div style={{ width: 8, height: 8, borderRadius: '50%', background: 'rgba(255,255,255,0.15)' }} />
+                        )}
+                        {step.status === 'error' && (
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="3" strokeLinecap="round">
+                            <line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/>
+                          </svg>
+                        )}
+                      </div>
+                      <span style={{
+                        fontSize: '0.78rem',
+                        fontWeight: step.status === 'running' ? 600 : 400,
+                        color:
+                          step.status === 'running' ? '#fca5a5' :
+                          step.status === 'done'    ? '#10b981' :
+                          step.status === 'error'   ? '#ef4444' :
+                                                      'var(--text-muted)',
+                        textDecoration: step.status === 'done' ? 'line-through' : 'none',
+                        textDecorationColor: 'rgba(16,185,129,0.4)',
+                        transition: 'all 0.3s',
+                      }}>
+                        {step.label}
+                      </span>
+                      {step.detail && (
+                        <span style={{
+                          fontSize: '0.7rem',
+                          color: 'var(--text-muted)',
+                          fontFamily: "'Fira Code', monospace",
+                          marginLeft: 'auto',
+                          maxWidth: '50%',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}>
+                          {step.detail}
+                        </span>
+                      )}
+                    </div>
+                  ))}
                 </div>
               </div>
             )}

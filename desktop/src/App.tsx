@@ -62,12 +62,17 @@ interface AgentInfo {
 //   Agent 2  — rouge (emails / rappels / voix)
 //   Agent 3  — bleu-or anime (agent d'elite, OpenClaw)
 //   Super Agent — violet (verrouille)
-const AGENTS: AgentInfo[] = [
-  { id: 'agent1', name: 'Syléa 1',   color: '#f59e0b', colorLight: '#fbbf24', logoVariant: 'gold',   status: 'active',   unread: 0 },
-  { id: 'agent2', name: 'Syléa 2',   color: '#ef4444', colorLight: '#f87171', logoVariant: 'red',    status: 'inactive', unread: 0 },
-  { id: 'agent3', name: 'Syléa 3',   color: '#38bdf8', colorLight: '#a5b4fc', logoVariant: 'agent3', status: 'inactive', unread: 0 },
-  { id: 'agent4', name: 'Super Agent', color: '#8b5cf6', colorLight: '#c4b5fd', logoVariant: 'violet', status: 'locked',   unread: 0 },
+//
+// IMPORTANT : status n'est PAS hardcode ici. Il est derive dynamiquement de
+// `lastActivityByAgent` : 'active' si le backend a envoye un message pour cet
+// agent dans les dernieres 30s, sinon 'inactive'. agent4 reste 'locked'.
+const AGENTS_BASE: Omit<AgentInfo, 'status' | 'unread'>[] = [
+  { id: 'agent1', name: 'Syléa 1',   color: '#f59e0b', colorLight: '#fbbf24', logoVariant: 'gold' },
+  { id: 'agent2', name: 'Syléa 2',   color: '#ef4444', colorLight: '#f87171', logoVariant: 'red' },
+  { id: 'agent3', name: 'Syléa 3',   color: '#38bdf8', colorLight: '#a5b4fc', logoVariant: 'agent3' },
+  { id: 'agent4', name: 'Super Agent', color: '#8b5cf6', colorLight: '#c4b5fd', logoVariant: 'violet' },
 ]
+const ACTIVITY_TTL_MS = 30_000  // au-dela, l'agent passe en 'inactive'
 
 // Agent 3 conserve sa signature visuelle (cyan -> indigo) pour rester reperable
 const AGENT3_CYAN   = '#38bdf8'
@@ -160,13 +165,38 @@ function App() {
 
   // Sprint 2.6 — Live activity feed : map agentId → derniere activite
   const [liveActivities, setLiveActivities] = useState<LiveActivity[]>([])
+  // Map agentId → timestamp ms de la derniere activite WS observee.
+  // Sert a derive 'active'/'inactive' pour la sidebar (au-dela de TTL = inactive)
+  // ET a auto-selectionner l'agent le plus actif au boot.
+  const [lastActivityByAgent, setLastActivityByAgent] = useState<Record<string, number>>({})
+  // Tick toutes les 5s pour faire vieillir les statuts active → inactive
+  const [, setNowTick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(t => t + 1), 5000)
+    return () => clearInterval(id)
+  }, [])
+
   const pushActivity = useCallback((activity: Omit<LiveActivity, 'since'>) => {
     setLiveActivities(prev => {
       const next = prev.filter(a => a.agentId !== activity.agentId)
       next.push({ ...activity, since: Date.now() })
       return next.slice(-5)
     })
+    // Track activity per agent → drives 'active' status in sidebar
+    setLastActivityByAgent(prev => ({ ...prev, [activity.agentId]: Date.now() }))
   }, [])
+
+  // AGENTS derive : status calcule a partir de lastActivityByAgent
+  const AGENTS: AgentInfo[] = AGENTS_BASE.map(base => {
+    const isLocked = base.id === 'agent4'
+    const last = lastActivityByAgent[base.id]
+    const isActive = !isLocked && last !== undefined && (Date.now() - last) < ACTIVITY_TTL_MS
+    return {
+      ...base,
+      status: isLocked ? 'locked' : (isActive ? 'active' : 'inactive'),
+      unread: 0,
+    }
+  })
 
   // Sprint 2.7 — Stats HUD : compteurs + historiques pour sparklines
   const [stats, setStats] = useState<StatsHUDData>({
@@ -223,7 +253,25 @@ function App() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [wsConnected, setWsConnected] = useState(false)
-  const [selectedAgent, setSelectedAgent] = useState('agent2')
+  // Agent selectionne. null = "auto" : suit l'agent le plus recemment actif.
+  // Si l'utilisateur clique sur un agent dans la sidebar, on bascule en mode
+  // manuel (pinned) pour ne plus changer automatiquement.
+  const [selectedAgent, setSelectedAgentRaw] = useState<string>('agent3')
+  const [agentPinned, setAgentPinned] = useState(false)
+  const setSelectedAgent = useCallback((id: string) => {
+    setSelectedAgentRaw(id)
+    setAgentPinned(true)
+  }, [])
+  // Auto-suit l'agent le plus actif tant qu'aucun pin manuel
+  useEffect(() => {
+    if (agentPinned) return
+    const entries = Object.entries(lastActivityByAgent)
+    if (entries.length === 0) return
+    const [latestId] = entries.sort((a, b) => b[1] - a[1])[0]
+    if (latestId && latestId !== selectedAgent) {
+      setSelectedAgentRaw(latestId)
+    }
+  }, [lastActivityByAgent, agentPinned, selectedAgent])
   const [steps, setSteps] = useState<ActionStep[]>([])
   const [plan, setPlan] = useState<Array<{ step: string; status: 'pending' | 'done' | 'running'; agent?: string }>>([])
   const [openclawConnected, setOpenclawConnected] = useState(false)
@@ -389,6 +437,15 @@ function App() {
           const data = JSON.parse(event.data)
           const sourceAgent = data.agent || 'agent2'  // Default to agent2 for backward compat
           const agentLabel = sourceAgent === 'agent3' ? '[Agent 3]' : '[Agent 2]'
+
+          // Handle "connected" welcome event from backend (api/main.py:182)
+          // C'etait la cause des #004/#006/.../"[Agent 2] Desktop connecte"
+          // qui restaient bloques en RUNNING : on l'ignore desormais (deja
+          // affiche par addStep('info', 'Connecte au serveur Sylea.AI') dans
+          // ws.onopen avec status='done').
+          if (data.type === 'connected') {
+            return
+          }
 
           // Sprint 2.6 — Push activite dans le live feed
           const agentInfo = AGENTS.find(a => a.id === sourceAgent)
