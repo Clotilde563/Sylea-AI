@@ -16,6 +16,7 @@ import asyncio
 import os
 import sys
 
+import re
 from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -321,6 +322,89 @@ async def transcribe_chunk(
         # Cleanup : on garde pas l'audio sur le serveur (privacy)
         try:
             tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+# ── Sprint 3 : Generation de fiche + export Anki ────────────────────────────
+
+@app.post("/api/lecture/generate-fiche", tags=["lecture"])
+async def generate_fiche_endpoint(
+    payload: dict,
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Genere une fiche markdown a partir d'un transcript.
+    Body : { transcript, matiere?, titre?, formation?, language? }
+    """
+    if not user_id:
+        return {"ok": False, "error": "auth_required"}
+    transcript = (payload.get("transcript") or "").strip()
+    if not transcript:
+        return {"ok": False, "error": "transcript_required"}
+    if len(transcript) > 200_000:
+        return {"ok": False, "error": "transcript_too_long"}
+
+    from api.fiche_generator import generate_fiche
+    try:
+        result = generate_fiche(
+            transcript=transcript,
+            matiere=payload.get("matiere"),
+            titre=payload.get("titre"),
+            formation=payload.get("formation"),
+            language=payload.get("language"),
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        return {"ok": False, "error": f"fiche_generation_failed: {e}"}
+
+
+@app.post("/api/lecture/export-anki", tags=["lecture"])
+async def export_anki_endpoint(
+    payload: dict,
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Exporte la fiche en deck Anki .apkg. Retourne le chemin du fichier
+    cree dans le dossier user (que le desktop pourra recuperer/copier)."""
+    if not user_id:
+        return {"ok": False, "error": "auth_required"}
+    fiche_md = (payload.get("fiche_markdown") or "").strip()
+    titre = (payload.get("titre") or "Cours").strip()
+    matiere = (payload.get("matiere") or "autre").strip()
+    if not fiche_md:
+        return {"ok": False, "error": "fiche_markdown_required"}
+
+    # Sauve le .apkg dans tempdir/sylea-anki/<user_id>/
+    import tempfile
+    tmp_dir = Path(tempfile.gettempdir()) / "sylea-anki" / user_id
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    safe_title = re.sub(r"[^\w\s-]", "_", titre)[:80].strip().replace(" ", "_") or "cours"
+    out_path = tmp_dir / f"{matiere}_{safe_title}.apkg"
+
+    from api.anki_export import build_apkg
+    try:
+        result = build_apkg(titre=titre, matiere=matiere,
+                            fiche_markdown=fiche_md, output_path=out_path)
+        if not result.get("ok"):
+            return {"ok": False, "error": result.get("error", "apkg_build_failed")}
+        # Retourne en base64 pour que le desktop puisse l'ecrire localement
+        # via Tauri write_file_binary (evite de servir des download URLs).
+        import base64
+        data = out_path.read_bytes()
+        b64 = base64.b64encode(data).decode("ascii")
+        return {
+            "ok": True,
+            "card_count": result["card_count"],
+            "deck_name": result["deck_name"],
+            "filename": out_path.name,
+            "size_bytes": len(data),
+            "data_base64": b64,
+        }
+    except Exception as e:
+        return {"ok": False, "error": f"apkg_export_failed: {e}"}
+    finally:
+        # Cleanup
+        try:
+            out_path.unlink(missing_ok=True)
         except Exception:
             pass
 

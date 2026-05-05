@@ -82,7 +82,14 @@ interface TranscriptChunk {
   segments?: Array<{ start: number; end: number; text: string }>
 }
 
-type Phase = 'preflight' | 'recording' | 'stopped'
+type Phase = 'preflight' | 'recording' | 'stopped' | 'generating' | 'fiche'
+
+interface FicheResult {
+  matiere: string
+  matiere_auto_detected: boolean
+  fiche_markdown: string
+  fallback_used: boolean
+}
 
 export function EcouteActive({
   onClose,
@@ -112,6 +119,12 @@ export function EcouteActive({
   const [transcript, setTranscript] = useState<TranscriptChunk[]>([])
   const lastUploadedChunkRef = useRef<number>(-1)
   const transcriptEndRef = useRef<HTMLDivElement>(null)
+
+  // Sprint 3 — Fiche generee (markdown + meta)
+  const [fiche, setFiche] = useState<FicheResult | null>(null)
+  const [ficheError, setFicheError] = useState<string | null>(null)
+  const [ankiBusy, setAnkiBusy] = useState(false)
+  const [ankiLastResult, setAnkiLastResult] = useState<string | null>(null)
 
   // Waveform canvas
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -300,6 +313,106 @@ export function EcouteActive({
       else                   await invoke('pause_recording')
     } catch (e) { console.error(e) }
   }, [status.is_paused])
+
+  // ── Sprint 3 : Generation de fiche depuis le transcript complet ──────────
+
+  const generateFiche = useCallback(async () => {
+    if (!authToken) {
+      setFicheError('Token manquant')
+      return
+    }
+    const fullText = transcript.filter(c => c.status === 'done').map(c => c.text).join(' ').trim()
+    if (!fullText) {
+      setFicheError('Transcript vide — rien a resumer')
+      return
+    }
+    setPhase('generating')
+    setFicheError(null)
+    try {
+      const lang = matiere === 'anglais' ? 'en' : 'fr'
+      const r = await fetch(`${apiBase}/api/lecture/generate-fiche`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+        body: JSON.stringify({
+          transcript: fullText,
+          matiere: matiere === 'autre' ? null : matiere,
+          titre: titre || null,
+          formation: formation === 'Autre' ? null : formation,
+          language: lang,
+        }),
+      })
+      const data = await r.json()
+      if (data?.ok) {
+        setFiche({
+          matiere: data.matiere,
+          matiere_auto_detected: data.matiere_auto_detected,
+          fiche_markdown: data.fiche_markdown,
+          fallback_used: data.fallback_used,
+        })
+        setPhase('fiche')
+      } else {
+        setFicheError(data?.error || 'Erreur inconnue')
+        setPhase('stopped')
+      }
+    } catch (e: any) {
+      setFicheError(typeof e === 'string' ? e : (e?.message || 'Erreur reseau'))
+      setPhase('stopped')
+    }
+  }, [authToken, apiBase, transcript, matiere, titre, formation])
+
+  // Telecharge la fiche markdown sur le disque (via Tauri write_file)
+  const downloadMarkdown = useCallback(async () => {
+    if (!fiche) return
+    try {
+      const docs = await invoke<string>('get_documents_dir')
+      const safeTitle = (titre || 'cours').replace(/[^\w\s-]/g, '_').slice(0, 60)
+      const fname = `${fiche.matiere}_${safeTitle.replace(/\s+/g, '_')}_${Date.now()}.md`
+      const target = `${docs}/Sylea/fiches/${fname}`
+      await invoke('create_directory', { path: `${docs}/Sylea/fiches` })
+      const header = `<!-- Genere par Sylea Agent — ${new Date().toLocaleString('fr-FR')} -->\n` +
+                     `<!-- Matiere : ${fiche.matiere}${fiche.matiere_auto_detected ? ' (auto-detect)' : ''} -->\n` +
+                     (formation !== 'Autre' ? `<!-- Formation : ${formation} -->\n` : '') + '\n'
+      await invoke('write_file', { path: target, content: header + fiche.fiche_markdown })
+      setAnkiLastResult(`Fiche sauvegardee : ${target}`)
+    } catch (e: any) {
+      setFicheError(typeof e === 'string' ? e : (e?.message || 'Erreur sauvegarde'))
+    }
+  }, [fiche, titre, formation])
+
+  // Genere puis ecrit le .apkg Anki sur le disque
+  const downloadAnki = useCallback(async () => {
+    if (!fiche || !authToken) return
+    setAnkiBusy(true)
+    setAnkiLastResult(null)
+    try {
+      const r = await fetch(`${apiBase}/api/lecture/export-anki`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+        body: JSON.stringify({
+          fiche_markdown: fiche.fiche_markdown,
+          titre: titre || 'Cours',
+          matiere: fiche.matiere,
+        }),
+      })
+      const data = await r.json()
+      if (!data?.ok) {
+        setFicheError(data?.error === 'no_cards_extracted'
+          ? 'Aucune carte n\'a pu etre extraite (fiche trop sommaire ?)'
+          : (data?.error || 'Erreur Anki'))
+        return
+      }
+      // Ecrit le .apkg dans Documents/Sylea/anki/
+      const docs = await invoke<string>('get_documents_dir')
+      const target = `${docs}/Sylea/anki/${data.filename}`
+      await invoke('create_directory', { path: `${docs}/Sylea/anki` })
+      await invoke('write_file_binary', { path: target, dataBase64: data.data_base64 })
+      setAnkiLastResult(`Deck Anki cree : ${data.card_count} cartes — ${target}`)
+    } catch (e: any) {
+      setFicheError(typeof e === 'string' ? e : (e?.message || 'Erreur reseau'))
+    } finally {
+      setAnkiBusy(false)
+    }
+  }, [fiche, authToken, apiBase, titre])
 
   // ── Helpers UI ───────────────────────────────────────────────────────────
 
@@ -677,7 +790,7 @@ export function EcouteActive({
 
   // ─── Render STOPPED ──────────────────────────────────────────────────────
 
-  return (
+  if (phase === 'stopped') return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 5000,
       background: 'rgba(5,8,16,0.92)', backdropFilter: 'blur(8px)',
@@ -720,28 +833,209 @@ export function EcouteActive({
           </div>
         )}
 
-        <div style={{
-          padding: '10px 12px', borderRadius: 6,
-          background: 'rgba(245,158,11,0.06)', border: '1px solid rgba(245,158,11,0.25)',
-          fontSize: 11, color: SY.warn, marginBottom: 16, lineHeight: 1.5,
-        }}>
-          ⚠ Sprint 2 (a venir) : transcription auto faster-whisper + generation de fiche par matiere.
-          Pour l'instant, l'audio est sauvegarde localement.
-        </div>
+        {/* Stats : nombre de chunks transcrits */}
+        {transcript.length > 0 && (
+          <div style={{
+            padding: '10px 12px', borderRadius: 6, background: SY.surface,
+            border: `1px solid ${SY.border}`, fontSize: 11,
+            color: SY.text, marginBottom: 16, textAlign: 'left',
+            lineHeight: 1.55,
+          }}>
+            <div style={{ color: SY.cyan, marginBottom: 4, fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.12em' }}>
+              ▸ TRANSCRIPT
+            </div>
+            {transcript.filter(c => c.status === 'done').length} / {transcript.length} chunks transcrits
+            {transcript.filter(c => c.status === 'done').length > 0 && (
+              <span style={{ color: SY.textMute, marginLeft: 8, fontFamily: SY.mono, fontSize: 10 }}>
+                (~{transcript.filter(c => c.status === 'done').reduce((acc, c) => acc + c.text.length, 0)} caracteres)
+              </span>
+            )}
+          </div>
+        )}
 
-        <button onClick={onClose} style={{
-          width: '100%', padding: '12px 16px', borderRadius: 8,
-          background: 'linear-gradient(135deg, #00c8ff, #0090e0)',
-          border: 'none', color: '#fff',
-          fontSize: 13, fontWeight: 700, letterSpacing: '0.1em',
-          textTransform: 'uppercase', cursor: 'pointer', fontFamily: SY.mono,
-        }}>
-          Fermer
-        </button>
+        {ficheError && (
+          <div style={{
+            padding: '8px 12px', borderRadius: 6, marginBottom: 12,
+            background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)',
+            fontSize: 11, color: SY.redLight,
+          }}>
+            ✗ {ficheError}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {/* Genere la fiche (gros bouton CTA) */}
+          <button
+            onClick={generateFiche}
+            disabled={transcript.filter(c => c.status === 'done').length === 0}
+            style={{
+              width: '100%', padding: '14px 16px', borderRadius: 8,
+              background: transcript.filter(c => c.status === 'done').length === 0
+                ? 'rgba(0,200,255,0.1)'
+                : 'linear-gradient(135deg, #00c8ff, #0090e0)',
+              border: 'none', color: '#fff',
+              fontSize: 13, fontWeight: 700, letterSpacing: '0.1em',
+              textTransform: 'uppercase',
+              cursor: transcript.filter(c => c.status === 'done').length === 0 ? 'not-allowed' : 'pointer',
+              opacity: transcript.filter(c => c.status === 'done').length === 0 ? 0.4 : 1,
+              fontFamily: SY.mono,
+              boxShadow: '0 4px 14px rgba(0,200,255,0.3)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <line x1="9" y1="13" x2="15" y2="13"/>
+              <line x1="9" y1="17" x2="15" y2="17"/>
+            </svg>
+            ▸ Generer la fiche
+          </button>
+
+          {/* Fermer (sauter la fiche, on quitte) */}
+          <button onClick={onClose} style={{
+            width: '100%', padding: '10px 16px', borderRadius: 8,
+            background: 'transparent', border: `1px solid ${SY.border}`,
+            color: SY.textMute, fontSize: 11, fontWeight: 600, letterSpacing: '0.1em',
+            textTransform: 'uppercase', cursor: 'pointer', fontFamily: SY.mono,
+          }}>
+            Fermer sans fiche
+          </button>
+        </div>
       </div>
     </div>
   )
+
+  // ─── Render GENERATING (loader) ──────────────────────────────────────────
+
+  if (phase === 'generating') return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 5000,
+      background: 'rgba(5,8,16,0.92)', backdropFilter: 'blur(8px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <div style={{
+        width: '90%', maxWidth: 460, padding: 32, textAlign: 'center',
+        background: SY.bg, border: `1px solid ${SY.borderHi}`, borderRadius: 12,
+      }}>
+        <div style={{
+          width: 64, height: 64, margin: '0 auto 18px', position: 'relative',
+        }}>
+          <div style={{
+            position: 'absolute', inset: 0, borderRadius: '50%',
+            border: `3px solid ${SY.border}`,
+            borderTopColor: SY.cyan,
+            borderRightColor: SY.cyanSoft,
+            animation: 'sy-spin 1s linear infinite',
+          }} />
+        </div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: SY.text, marginBottom: 6 }}>
+          Generation de la fiche…
+        </div>
+        <div style={{ fontSize: 11, color: SY.textMute, fontFamily: SY.mono, lineHeight: 1.5 }}>
+          ▸ Detection de la matiere<br/>
+          ▸ Structuration selon le template{matiere !== 'autre' ? ` (${matiere})` : ''}<br/>
+          ▸ Mise en forme markdown + LaTeX
+        </div>
+      </div>
+    </div>
+  )
+
+  // ─── Render FICHE (markdown rendered + downloads) ────────────────────────
+
+  if (phase === 'fiche' && fiche) return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 5000,
+      background: 'rgba(5,8,16,0.95)', backdropFilter: 'blur(8px)',
+      display: 'flex', flexDirection: 'column',
+      padding: 20,
+    }}>
+      {/* Header */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14,
+        padding: '12px 16px', borderRadius: 10,
+        background: SY.surface, border: `1px solid ${SY.borderHi}`,
+      }}>
+        <div style={{
+          width: 40, height: 40, borderRadius: 8,
+          background: 'linear-gradient(135deg, #00c8ff, #0090e0)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0,
+        }}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: SY.text }}>
+            Fiche generee — {titre || 'Cours'}
+          </div>
+          <div style={{ fontSize: 10, color: SY.textMute, fontFamily: SY.mono, letterSpacing: '0.06em', marginTop: 2 }}>
+            <span style={{ color: SY.cyan }}>{fiche.matiere.toUpperCase()}</span>
+            {fiche.matiere_auto_detected && <span style={{ color: SY.warn }}> · auto-detect</span>}
+            {fiche.fallback_used && <span style={{ color: SY.warn }}> · MODE DEGRADE (LLM indispo)</span>}
+            {formation !== 'Autre' && <span> · {formation}</span>}
+          </div>
+        </div>
+        <button onClick={onClose} style={{
+          padding: '8px 14px', borderRadius: 6, background: 'transparent',
+          border: `1px solid ${SY.border}`, color: SY.textMute,
+          fontSize: 11, fontFamily: SY.mono, letterSpacing: '0.08em',
+          cursor: 'pointer', textTransform: 'uppercase',
+        }}>Fermer</button>
+      </div>
+
+      {/* Toolbar : downloads */}
+      <div style={{
+        display: 'flex', gap: 8, marginBottom: 14,
+        padding: '8px 12px', borderRadius: 8,
+        background: 'rgba(0,200,255,0.04)', border: `1px solid ${SY.border}`,
+      }}>
+        <button onClick={downloadMarkdown} style={dlBtnStyle(SY.cyan)}>
+          ▾ Markdown (.md)
+        </button>
+        <button onClick={downloadAnki} disabled={ankiBusy} style={dlBtnStyle(SY.success)}>
+          {ankiBusy ? '… Anki' : '▾ Anki (.apkg)'}
+        </button>
+        <div style={{ flex: 1 }} />
+        {ankiLastResult && (
+          <span style={{
+            fontSize: 10, color: SY.success, fontFamily: SY.mono,
+            display: 'flex', alignItems: 'center', maxWidth: '60%',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            ✓ {ankiLastResult}
+          </span>
+        )}
+      </div>
+
+      {ficheError && (
+        <div style={{
+          padding: '10px 14px', borderRadius: 6, marginBottom: 10,
+          background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)',
+          fontSize: 12, color: SY.redLight,
+        }}>
+          ✗ {ficheError}
+        </div>
+      )}
+
+      {/* Markdown body */}
+      <div style={{
+        flex: 1, overflowY: 'auto',
+        padding: '24px 32px', borderRadius: 10,
+        background: 'rgba(7,12,26,0.6)', border: `1px solid ${SY.border}`,
+        color: SY.text, fontSize: 14, lineHeight: 1.7,
+      }}>
+        <MarkdownRender source={fiche.fiche_markdown} />
+      </div>
+    </div>
+  )
+
+  // Fallback : ne devrait jamais arriver
+  return null
 }
+
+
 
 // ── Sub-components ──────────────────────────────────────────────────────────
 
@@ -757,6 +1051,166 @@ function Section({ label, children }: { label: string; children: React.ReactNode
       {children}
     </div>
   )
+}
+
+function dlBtnStyle(color: string): React.CSSProperties {
+  return {
+    padding: '7px 14px', borderRadius: 6,
+    background: 'transparent', border: `1px solid ${color}55`,
+    color, fontSize: 11, fontFamily: '"JetBrains Mono",monospace',
+    fontWeight: 700, letterSpacing: '0.06em', cursor: 'pointer',
+    transition: 'all 0.15s',
+  }
+}
+
+/**
+ * Mini markdown renderer : pas de dep externe, suffisant pour le markdown
+ * structure que faster-whisper + LLM produisent. Gere :
+ *  - # / ## / ### / #### titres
+ *  - **gras** *italique*
+ *  - listes -, *, 1.
+ *  - blockquote >
+ *  - code inline `code`
+ *  - LaTeX inline $...$ (rendu en italique mono — l'integration KaTeX
+ *    sera ajoutee si besoin, pour Sprint 3 ca reste lisible)
+ */
+function MarkdownRender({ source }: { source: string }) {
+  // Process inline (gras/italique/code/latex) sur une chaine
+  const inline = (txt: string): React.ReactNode[] => {
+    const out: React.ReactNode[] = []
+    // Pattern : **bold** | `code` | $latex$ | *italic*
+    const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\$[^$]+\$|\*[^*]+\*)/g
+    let lastIdx = 0
+    let key = 0
+    let m: RegExpExecArray | null
+    while ((m = pattern.exec(txt)) !== null) {
+      if (m.index > lastIdx) out.push(txt.slice(lastIdx, m.index))
+      const tok = m[0]
+      key++
+      if (tok.startsWith('**')) {
+        out.push(<strong key={key} style={{ color: '#7ad9ff' }}>{tok.slice(2, -2)}</strong>)
+      } else if (tok.startsWith('`')) {
+        out.push(<code key={key} style={{
+          fontFamily: '"JetBrains Mono",monospace', fontSize: '0.9em',
+          padding: '1px 5px', borderRadius: 3,
+          background: 'rgba(0,200,255,0.10)', color: '#7ad9ff',
+        }}>{tok.slice(1, -1)}</code>)
+      } else if (tok.startsWith('$')) {
+        out.push(<span key={key} style={{
+          fontFamily: '"JetBrains Mono","Fira Code",serif',
+          fontStyle: 'italic', color: '#a5b4fc',
+          background: 'rgba(165,180,252,0.06)', padding: '1px 4px',
+          borderRadius: 3,
+        }}>{tok.slice(1, -1)}</span>)
+      } else if (tok.startsWith('*')) {
+        out.push(<em key={key}>{tok.slice(1, -1)}</em>)
+      }
+      lastIdx = m.index + tok.length
+    }
+    if (lastIdx < txt.length) out.push(txt.slice(lastIdx))
+    return out
+  }
+
+  const lines = source.split('\n')
+  const elements: React.ReactNode[] = []
+  let i = 0
+  let key = 0
+
+  while (i < lines.length) {
+    const ln = lines[i]
+    key++
+
+    // Block LaTeX : $$...$$
+    const blockMath = ln.trim().match(/^\$\$(.+)\$\$\s*$/)
+    if (blockMath) {
+      elements.push(
+        <div key={key} style={{
+          margin: '14px 0', padding: '10px 16px', borderRadius: 6,
+          background: 'rgba(165,180,252,0.06)',
+          border: '1px solid rgba(165,180,252,0.18)',
+          fontFamily: '"JetBrains Mono",serif', fontStyle: 'italic',
+          color: '#c4b5fd', textAlign: 'center', fontSize: 14,
+        }}>{blockMath[1]}</div>
+      )
+      i++; continue
+    }
+
+    // Heading
+    const h = ln.match(/^(#{1,6})\s+(.+)$/)
+    if (h) {
+      const level = h[1].length
+      const text = h[2]
+      const sizes = ['2.0em', '1.5em', '1.25em', '1.1em', '1em', '1em']
+      const colors = ['#00c8ff', '#7ad9ff', '#a5b4fc', '#e6f0ff', '#e6f0ff', '#e6f0ff']
+      elements.push(
+        <div key={key} style={{
+          fontSize: sizes[level - 1], color: colors[level - 1],
+          fontWeight: 700, letterSpacing: level <= 2 ? '0.02em' : '0.01em',
+          marginTop: level === 1 ? 0 : (level === 2 ? 22 : 14),
+          marginBottom: 8,
+          paddingBottom: level === 1 ? 8 : 4,
+          borderBottom: level === 1 ? '2px solid rgba(0,200,255,0.25)' : 'none',
+        }}>{inline(text)}</div>
+      )
+      i++; continue
+    }
+
+    // Blockquote
+    if (ln.startsWith('>')) {
+      const block: string[] = []
+      while (i < lines.length && lines[i].startsWith('>')) {
+        block.push(lines[i].replace(/^>\s?/, ''))
+        i++
+      }
+      elements.push(
+        <blockquote key={key} style={{
+          margin: '12px 0', padding: '8px 14px',
+          borderLeft: '3px solid #7ad9ff',
+          background: 'rgba(122,217,255,0.05)',
+          borderRadius: '0 6px 6px 0',
+          color: '#c4b5fd',
+        }}>
+          {block.map((b, idx) => <div key={idx}>{inline(b)}</div>)}
+        </blockquote>
+      )
+      continue
+    }
+
+    // List item
+    if (/^\s*[-*]\s+/.test(ln) || /^\s*\d+\.\s+/.test(ln)) {
+      const items: string[] = []
+      const ordered = /^\s*\d+\.\s+/.test(ln)
+      while (i < lines.length && (
+        /^\s*[-*]\s+/.test(lines[i]) || /^\s*\d+\.\s+/.test(lines[i])
+      )) {
+        items.push(lines[i].replace(/^\s*(?:[-*]|\d+\.)\s+/, ''))
+        i++
+      }
+      const Tag = ordered ? 'ol' : 'ul'
+      elements.push(
+        <Tag key={key} style={{ margin: '8px 0', paddingLeft: 24, lineHeight: 1.7 }}>
+          {items.map((it, idx) => <li key={idx}>{inline(it)}</li>)}
+        </Tag>
+      )
+      continue
+    }
+
+    // Empty line -> spacer
+    if (!ln.trim()) {
+      elements.push(<div key={key} style={{ height: 8 }} />)
+      i++; continue
+    }
+
+    // Paragraph
+    elements.push(
+      <p key={key} style={{ margin: '6px 0', lineHeight: 1.7 }}>
+        {inline(ln)}
+      </p>
+    )
+    i++
+  }
+
+  return <>{elements}</>
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
