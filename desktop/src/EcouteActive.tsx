@@ -82,13 +82,25 @@ interface TranscriptChunk {
   segments?: Array<{ start: number; end: number; text: string }>
 }
 
-type Phase = 'preflight' | 'recording' | 'stopped' | 'generating' | 'fiche'
+// Flow auto : preflight -> recording -> finalizing -> generating -> fiche
+//   - finalizing : drain les chunks en attente d'upload (bug fix #1)
+//   - generating : appel /api/lecture/generate-fiche
+//   - fiche      : affichage + auto-save .md/.apkg en arriere-plan
+//   - stopped    : utilise UNIQUEMENT si l'utilisateur clique "Fermer sans fiche"
+//                  pendant finalizing (bouton early-exit).
+type Phase = 'preflight' | 'recording' | 'finalizing' | 'stopped' | 'generating' | 'fiche'
 
 interface FicheResult {
   matiere: string
   matiere_auto_detected: boolean
   fiche_markdown: string
   fallback_used: boolean
+}
+
+interface SavedFiles {
+  markdown_path?: string
+  anki_path?: string
+  anki_card_count?: number
 }
 
 export function EcouteActive({
@@ -124,7 +136,12 @@ export function EcouteActive({
   const [fiche, setFiche] = useState<FicheResult | null>(null)
   const [ficheError, setFicheError] = useState<string | null>(null)
   const [ankiBusy, setAnkiBusy] = useState(false)
-  const [ankiLastResult, setAnkiLastResult] = useState<string | null>(null)
+
+  // Bug fix Sprint 3.1 — drain progress (finalizing phase) + auto-save
+  // Indique combien de chunks restent a uploader apres clic Stop, et le
+  // chemin des fichiers sauvegardes automatiquement (Markdown + Anki).
+  const [drainProgress, setDrainProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 })
+  const [savedFiles, setSavedFiles] = useState<SavedFiles>({})
 
   // Waveform canvas
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -154,77 +171,78 @@ export function EcouteActive({
   // Note : status.chunks_count = nombre de chunks COMPLETES. Donc si
   // chunks_count = 3, les fichiers chunk_0000, chunk_0001, chunk_0002 sont
   // finalises sur disque.
+  // Reusable uploader — appele depuis le polling effect ET depuis
+  // stopRecording (drain final). Accepte des overrides pour session_dir/id
+  // car apres stop, status est nettoye.
+  const uploadChunk = useCallback(async (
+    idx: number,
+    sessionDir: string,
+    sessionId: string,
+  ) => {
+    const chunkPath = `${sessionDir}/chunk_${String(idx).padStart(4, '0')}.wav`
+    setTranscript(prev => {
+      // Evite doublon si l'effect et stopRecording courent sur le meme idx
+      if (prev.some(c => c.index === idx)) return prev
+      return [...prev, { index: idx, text: '', language: '', duration_s: 0, status: 'uploading' }]
+    })
+    try {
+      const b64 = await invoke<string>('read_file_binary', { path: chunkPath })
+      const binary = atob(b64)
+      const bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+      const blob = new Blob([bytes], { type: 'audio/wav' })
+      const formData = new FormData()
+      formData.append('audio', blob, `chunk_${idx}.wav`)
+      formData.append('session_id', sessionId)
+      formData.append('chunk_index', String(idx))
+      formData.append('language', matiere === 'anglais' ? 'en' : 'fr')
+
+      const r = await fetch(`${apiBase}/api/lecture/transcribe-chunk`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${authToken}` },
+        body: formData,
+      })
+      const data = await r.json()
+      if (data?.ok) {
+        setTranscript(prev => prev.map(c => c.index === idx ? {
+          index: idx,
+          text: data.text || '',
+          language: data.language || '',
+          duration_s: data.duration_s || 0,
+          status: 'done',
+          segments: data.segments,
+        } : c))
+      } else {
+        setTranscript(prev => prev.map(c => c.index === idx
+          ? { ...c, status: 'error', text: `[Erreur : ${data?.error || 'inconnue'}]` }
+          : c))
+      }
+    } catch (e) {
+      setTranscript(prev => prev.map(c => c.index === idx
+        ? { ...c, status: 'error', text: `[Erreur upload : ${e}]` }
+        : c))
+    }
+  }, [authToken, apiBase, matiere])
+
   useEffect(() => {
     if (phase !== 'recording') return
-    if (!status.session_dir) return
+    if (!status.session_dir || !status.session_id) return
     if (!authToken) return
 
     const completedChunks = status.chunks_count
     const nextToUpload = lastUploadedChunkRef.current + 1
     if (nextToUpload >= completedChunks) return
 
-    // Upload tous les chunks pas encore traites (rare backlog si l'upload
-    // du chunk N a ete plus lent que la duree d'un chunk).
-    const uploadChunk = async (idx: number) => {
-      const chunkPath = `${status.session_dir}/chunk_${String(idx).padStart(4, '0')}.wav`
-      // Marque uploading
-      setTranscript(prev => [
-        ...prev,
-        { index: idx, text: '', language: '', duration_s: 0, status: 'uploading' },
-      ])
-      try {
-        // 1) Lecture du fichier WAV depuis le disque (commande Rust existante)
-        const b64 = await invoke<string>('read_file_binary', { path: chunkPath })
-        // 2) Decode base64 -> Uint8Array -> Blob
-        const binary = atob(b64)
-        const bytes = new Uint8Array(binary.length)
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-        const blob = new Blob([bytes], { type: 'audio/wav' })
-        // 3) POST multipart au backend
-        const formData = new FormData()
-        formData.append('audio', blob, `chunk_${idx}.wav`)
-        formData.append('session_id', status.session_id || '')
-        formData.append('chunk_index', String(idx))
-        // Si l'utilisateur a precise la matiere "anglais", on aide la detection
-        if (matiere === 'anglais') formData.append('language', 'en')
-        else                       formData.append('language', 'fr')
-
-        const r = await fetch(`${apiBase}/api/lecture/transcribe-chunk`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${authToken}` },
-          body: formData,
-        })
-        const data = await r.json()
-        if (data?.ok) {
-          setTranscript(prev => prev.map(c => c.index === idx ? {
-            index: idx,
-            text: data.text || '',
-            language: data.language || '',
-            duration_s: data.duration_s || 0,
-            status: 'done',
-            segments: data.segments,
-          } : c))
-        } else {
-          setTranscript(prev => prev.map(c => c.index === idx
-            ? { ...c, status: 'error', text: `[Erreur : ${data?.error || 'inconnue'}]` }
-            : c))
-        }
-      } catch (e) {
-        setTranscript(prev => prev.map(c => c.index === idx
-          ? { ...c, status: 'error', text: `[Erreur upload : ${e}]` }
-          : c))
-      }
-    }
-
-    // Upload sequentiel pour eviter de surcharger faster-whisper si plusieurs
-    // chunks accumules. La derniere reference dispo = nextToUpload.
+    // Upload sequentiel pour eviter de surcharger faster-whisper.
+    const sessDir = status.session_dir
+    const sessId = status.session_id
     ;(async () => {
       for (let i = nextToUpload; i < completedChunks; i++) {
         lastUploadedChunkRef.current = i
-        await uploadChunk(i)
+        await uploadChunk(i, sessDir, sessId)
       }
     })()
-  }, [status.chunks_count, status.session_dir, status.session_id, authToken, apiBase, phase, matiere])
+  }, [status.chunks_count, status.session_dir, status.session_id, authToken, phase, uploadChunk])
 
   // Auto-scroll du transcript vers le bas a chaque nouveau chunk
   useEffect(() => {
@@ -297,15 +315,58 @@ export function EcouteActive({
     }
   }, [matiere, titre, formation])
 
+  // ── Stop -> finalize -> auto-generate -> auto-save (1 clic) ─────────────
+
   const stopRecording = useCallback(async () => {
+    setPhase('finalizing')
     try {
-      const r = await invoke<typeof stopResult>('stop_recording')
+      // 1) Stop le recording natif (Rust finalise le dernier chunk partiel
+      //    et incremente chunks_count grace au fix sprint 3.1).
+      const r = await invoke<{
+        session_id: string
+        session_dir: string
+        duration_ms: number
+        chunks_count: number
+      }>('stop_recording')
       setStopResult(r)
-      setPhase('stopped')
+
+      // 2) Drain les chunks pas encore uploades (bug fix #1).
+      //    Le polling effect s'est arrete (phase !== 'recording'), donc on
+      //    fait l'upload en sequentiel ici, avec une progress bar.
+      const startFrom = lastUploadedChunkRef.current + 1
+      const totalRemaining = Math.max(0, r.chunks_count - startFrom)
+      setDrainProgress({ done: 0, total: totalRemaining })
+      for (let i = startFrom; i < r.chunks_count; i++) {
+        await uploadChunk(i, r.session_dir, r.session_id)
+        lastUploadedChunkRef.current = i
+        setDrainProgress(p => ({ done: p.done + 1, total: p.total }))
+      }
+
+      // 3) Si transcript vide (aucun chunk transcrit), saute la fiche.
+      // ⚠ NB : on lit le transcript via setTranscript callback pour avoir
+      //   la valeur la plus a jour (les uploads ci-dessus ont ete async).
+      const fullText = await new Promise<string>((resolve) => {
+        setTranscript(curr => {
+          const txt = curr.filter(c => c.status === 'done').map(c => c.text).join(' ').trim()
+          resolve(txt)
+          return curr
+        })
+      })
+
+      if (!fullText) {
+        setPhase('stopped')
+        setFicheError('Aucun chunk n\'a pu etre transcrit (backend faster-whisper indisponible ?). L\'audio reste sauvegarde sur le disque.')
+        return
+      }
+
+      // 4) Genere et auto-save la fiche.
+      await generateAndSaveFiche(fullText, r.session_id)
     } catch (e: any) {
       setError(typeof e === 'string' ? e : (e?.message || 'Erreur arret'))
+      setPhase('stopped')
     }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uploadChunk])
 
   const togglePause = useCallback(async () => {
     try {
@@ -314,22 +375,30 @@ export function EcouteActive({
     } catch (e) { console.error(e) }
   }, [status.is_paused])
 
-  // ── Sprint 3 : Generation de fiche depuis le transcript complet ──────────
+  // ── Sprint 3.1 : Generation + auto-save fiche en 1 clic ─────────────────
+  //
+  // Apres le drain (finalizing), on bascule en 'generating' (loader),
+  // on appelle /api/lecture/generate-fiche, puis on AUTO-SAUVE :
+  //   1. Markdown -> Documents/Sylea/fiches/<matiere>_<titre>_TS.md
+  //   2. Anki     -> Documents/Sylea/anki/<matiere>_<titre>_TS.apkg
+  // Les chemins sont affiches dans la phase 'fiche' pour que l'etudiant sache
+  // ou retrouver ses fichiers.
 
-  const generateFiche = useCallback(async () => {
+  const generateAndSaveFiche = useCallback(async (
+    fullText: string,
+    sessionId: string,
+  ) => {
     if (!authToken) {
       setFicheError('Token manquant')
-      return
-    }
-    const fullText = transcript.filter(c => c.status === 'done').map(c => c.text).join(' ').trim()
-    if (!fullText) {
-      setFicheError('Transcript vide — rien a resumer')
+      setPhase('stopped')
       return
     }
     setPhase('generating')
     setFicheError(null)
+    setSavedFiles({})
+
     try {
-      const lang = matiere === 'anglais' ? 'en' : 'fr'
+      // 1) Generation
       const r = await fetch(`${apiBase}/api/lecture/generate-fiche`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
@@ -338,52 +407,87 @@ export function EcouteActive({
           matiere: matiere === 'autre' ? null : matiere,
           titre: titre || null,
           formation: formation === 'Autre' ? null : formation,
-          language: lang,
+          language: matiere === 'anglais' ? 'en' : 'fr',
         }),
       })
       const data = await r.json()
-      if (data?.ok) {
-        setFiche({
-          matiere: data.matiere,
-          matiere_auto_detected: data.matiere_auto_detected,
-          fiche_markdown: data.fiche_markdown,
-          fallback_used: data.fallback_used,
-        })
-        setPhase('fiche')
-      } else {
-        setFicheError(data?.error || 'Erreur inconnue')
+      if (!data?.ok) {
+        setFicheError(data?.error || 'Erreur generation')
         setPhase('stopped')
+        return
       }
+      const ficheResult: FicheResult = {
+        matiere: data.matiere,
+        matiere_auto_detected: data.matiere_auto_detected,
+        fiche_markdown: data.fiche_markdown,
+        fallback_used: data.fallback_used,
+      }
+      setFiche(ficheResult)
+      setPhase('fiche')
+
+      // 2) Auto-save Markdown (ne bloque pas la phase fiche, on save en
+      //    arriere-plan et on update savedFiles au fur et a mesure).
+      ;(async () => {
+        const saved: SavedFiles = {}
+        try {
+          const docs = await invoke<string>('get_documents_dir')
+          const safeTitle = (titre || 'cours').replace(/[^\w\s-]/g, '_').slice(0, 60).replace(/\s+/g, '_')
+          const ts = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+          const mdName = `${ficheResult.matiere}_${safeTitle}_${ts}.md`
+          const mdPath = `${docs}/Sylea/fiches/${mdName}`
+          await invoke('create_directory', { path: `${docs}/Sylea/fiches` })
+          const header = (
+            `<!-- Genere par Sylea Agent — ${new Date().toLocaleString('fr-FR')} -->\n` +
+            `<!-- Session : ${sessionId} -->\n` +
+            `<!-- Matiere : ${ficheResult.matiere}${ficheResult.matiere_auto_detected ? ' (auto-detect)' : ''} -->\n` +
+            (formation !== 'Autre' ? `<!-- Formation : ${formation} -->\n` : '') +
+            `\n`
+          )
+          await invoke('write_file', { path: mdPath, content: header + ficheResult.fiche_markdown })
+          saved.markdown_path = mdPath
+        } catch (e) {
+          console.error('[autosave-md]', e)
+        }
+
+        // 3) Auto-save Anki (best-effort : si echec, on garde le markdown)
+        try {
+          const r2 = await fetch(`${apiBase}/api/lecture/export-anki`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+            body: JSON.stringify({
+              fiche_markdown: ficheResult.fiche_markdown,
+              titre: titre || 'Cours',
+              matiere: ficheResult.matiere,
+            }),
+          })
+          const ankiData = await r2.json()
+          if (ankiData?.ok) {
+            const docs = await invoke<string>('get_documents_dir')
+            const ankiPath = `${docs}/Sylea/anki/${ankiData.filename}`
+            await invoke('create_directory', { path: `${docs}/Sylea/anki` })
+            await invoke('write_file_binary', { path: ankiPath, dataBase64: ankiData.data_base64 })
+            saved.anki_path = ankiPath
+            saved.anki_card_count = ankiData.card_count
+          }
+        } catch (e) {
+          console.error('[autosave-anki]', e)
+        }
+
+        setSavedFiles(saved)
+      })()
     } catch (e: any) {
       setFicheError(typeof e === 'string' ? e : (e?.message || 'Erreur reseau'))
       setPhase('stopped')
     }
-  }, [authToken, apiBase, transcript, matiere, titre, formation])
+  }, [authToken, apiBase, matiere, titre, formation])
 
   // Telecharge la fiche markdown sur le disque (via Tauri write_file)
-  const downloadMarkdown = useCallback(async () => {
-    if (!fiche) return
-    try {
-      const docs = await invoke<string>('get_documents_dir')
-      const safeTitle = (titre || 'cours').replace(/[^\w\s-]/g, '_').slice(0, 60)
-      const fname = `${fiche.matiere}_${safeTitle.replace(/\s+/g, '_')}_${Date.now()}.md`
-      const target = `${docs}/Sylea/fiches/${fname}`
-      await invoke('create_directory', { path: `${docs}/Sylea/fiches` })
-      const header = `<!-- Genere par Sylea Agent — ${new Date().toLocaleString('fr-FR')} -->\n` +
-                     `<!-- Matiere : ${fiche.matiere}${fiche.matiere_auto_detected ? ' (auto-detect)' : ''} -->\n` +
-                     (formation !== 'Autre' ? `<!-- Formation : ${formation} -->\n` : '') + '\n'
-      await invoke('write_file', { path: target, content: header + fiche.fiche_markdown })
-      setAnkiLastResult(`Fiche sauvegardee : ${target}`)
-    } catch (e: any) {
-      setFicheError(typeof e === 'string' ? e : (e?.message || 'Erreur sauvegarde'))
-    }
-  }, [fiche, titre, formation])
+  // Re-export manuel (au cas ou l'auto-save a echoue, ou pour ecrire ailleurs).
+  // Reutilise la meme logique que generateAndSaveFiche pour la coherence.
 
-  // Genere puis ecrit le .apkg Anki sur le disque
-  const downloadAnki = useCallback(async () => {
+  const reExportAnki = useCallback(async () => {
     if (!fiche || !authToken) return
     setAnkiBusy(true)
-    setAnkiLastResult(null)
     try {
       const r = await fetch(`${apiBase}/api/lecture/export-anki`, {
         method: 'POST',
@@ -401,12 +505,11 @@ export function EcouteActive({
           : (data?.error || 'Erreur Anki'))
         return
       }
-      // Ecrit le .apkg dans Documents/Sylea/anki/
       const docs = await invoke<string>('get_documents_dir')
       const target = `${docs}/Sylea/anki/${data.filename}`
       await invoke('create_directory', { path: `${docs}/Sylea/anki` })
       await invoke('write_file_binary', { path: target, dataBase64: data.data_base64 })
-      setAnkiLastResult(`Deck Anki cree : ${data.card_count} cartes — ${target}`)
+      setSavedFiles(prev => ({ ...prev, anki_path: target, anki_card_count: data.card_count }))
     } catch (e: any) {
       setFicheError(typeof e === 'string' ? e : (e?.message || 'Erreur reseau'))
     } finally {
@@ -788,8 +891,63 @@ export function EcouteActive({
     )
   }
 
-  // ─── Render STOPPED ──────────────────────────────────────────────────────
+  // ─── Render FINALIZING ───────────────────────────────────────────────────
+  // Phase intermediaire entre clic Stop et l'affichage de la fiche : on
+  // drain les chunks pas encore uploades pour transcription, puis le flow
+  // enchaine automatiquement sur 'generating' (sans clic supplementaire).
+  if (phase === 'finalizing') return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 5000,
+      background: 'rgba(5,8,16,0.92)', backdropFilter: 'blur(8px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <div style={{
+        width: '90%', maxWidth: 460, padding: 30, textAlign: 'center',
+        background: SY.bg, border: `1px solid ${SY.borderHi}`, borderRadius: 12,
+      }}>
+        <div style={{
+          width: 56, height: 56, margin: '0 auto 16px', position: 'relative',
+        }}>
+          <div style={{
+            position: 'absolute', inset: 0, borderRadius: '50%',
+            border: `3px solid ${SY.border}`,
+            borderTopColor: SY.warn,
+            animation: 'sy-spin 1s linear infinite',
+          }} />
+        </div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: SY.text, marginBottom: 6 }}>
+          Finalisation transcription…
+        </div>
+        <div style={{ fontSize: 11, color: SY.textMute, fontFamily: SY.mono, marginBottom: 14 }}>
+          {drainProgress.total > 0
+            ? `${drainProgress.done} / ${drainProgress.total} chunks restants`
+            : 'Verification des chunks en attente…'}
+        </div>
+        {/* Progress bar */}
+        {drainProgress.total > 0 && (
+          <div style={{
+            height: 4, borderRadius: 2, background: SY.border,
+            overflow: 'hidden', marginBottom: 12,
+          }}>
+            <div style={{
+              height: '100%',
+              width: `${Math.min(100, (drainProgress.done / drainProgress.total) * 100)}%`,
+              background: `linear-gradient(90deg, ${SY.warn}, ${SY.cyan})`,
+              transition: 'width 0.3s ease',
+            }} />
+          </div>
+        )}
+        <div style={{ fontSize: 10, color: SY.textDim, fontFamily: SY.mono, lineHeight: 1.5 }}>
+          ▸ Les derniers chunks audio sont transcrits<br/>
+          ▸ Puis la fiche sera generee + auto-sauvegardee
+        </div>
+      </div>
+    </div>
+  )
 
+  // ─── Render STOPPED (fallback) ───────────────────────────────────────────
+  // Affiche uniquement si auto-flow a echoue (transcript vide / erreur reseau).
+  // Donne une option de retry ou fermeture.
   if (phase === 'stopped') return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 5000,
@@ -798,109 +956,59 @@ export function EcouteActive({
     }}>
       <div style={{
         width: '90%', maxWidth: 540, padding: 28,
-        background: SY.bg, border: `1px solid rgba(16,185,129,0.4)`,
+        background: SY.bg, border: `1px solid rgba(245,158,11,0.4)`,
         borderRadius: 12, textAlign: 'center',
       }}>
         <div style={{
           width: 64, height: 64, borderRadius: '50%',
-          background: 'rgba(16,185,129,0.15)',
-          border: '1px solid rgba(16,185,129,0.4)',
+          background: 'rgba(245,158,11,0.15)',
+          border: '1px solid rgba(245,158,11,0.4)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           margin: '0 auto 18px',
         }}>
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke={SY.success} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="20 6 9 17 4 12"/>
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke={SY.warn} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
           </svg>
         </div>
-        <div style={{ fontSize: 18, fontWeight: 700, color: SY.text, marginBottom: 4 }}>
-          Enregistrement termine
+        <div style={{ fontSize: 17, fontWeight: 700, color: SY.text, marginBottom: 4 }}>
+          Fiche non generee
         </div>
-        <div style={{ fontSize: 12, color: SY.textMute, marginBottom: 20 }}>
-          Duree : <strong style={{ color: SY.text }}>{fmtTime(stopResult?.duration_ms || 0)}</strong>
-          {' · '}
-          {stopResult?.chunks_count || 0} chunks WAV
+        <div style={{ fontSize: 12, color: SY.textMute, marginBottom: 16 }}>
+          Audio sauvegarde · {stopResult?.chunks_count || 0} chunks · {fmtTime(stopResult?.duration_ms || 0)}
         </div>
+
+        {ficheError && (
+          <div style={{
+            padding: '10px 12px', borderRadius: 6, marginBottom: 14,
+            background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)',
+            fontSize: 12, color: SY.redLight, lineHeight: 1.5,
+          }}>{ficheError}</div>
+        )}
 
         {stopResult?.session_dir && (
           <div style={{
             padding: '10px 12px', borderRadius: 6, background: SY.surface,
             border: `1px solid ${SY.border}`, fontSize: 10,
-            color: SY.textMute, fontFamily: SY.mono, letterSpacing: '0.04em',
-            marginBottom: 16, wordBreak: 'break-all', textAlign: 'left',
+            color: SY.textMute, fontFamily: SY.mono, marginBottom: 16,
+            wordBreak: 'break-all', textAlign: 'left',
           }}>
-            <div style={{ color: SY.cyan, marginBottom: 4 }}>▸ Audio sauvegarde :</div>
+            <div style={{ color: SY.cyan, marginBottom: 4 }}>▸ Audio brut sauvegarde :</div>
             {stopResult.session_dir}
-          </div>
-        )}
-
-        {/* Stats : nombre de chunks transcrits */}
-        {transcript.length > 0 && (
-          <div style={{
-            padding: '10px 12px', borderRadius: 6, background: SY.surface,
-            border: `1px solid ${SY.border}`, fontSize: 11,
-            color: SY.text, marginBottom: 16, textAlign: 'left',
-            lineHeight: 1.55,
-          }}>
-            <div style={{ color: SY.cyan, marginBottom: 4, fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.12em' }}>
-              ▸ TRANSCRIPT
+            <div style={{ color: SY.textDim, marginTop: 6, fontSize: 9 }}>
+              Tu pourras reessayer plus tard (Sprint 4 prevu : library de cours pour relancer la transcription).
             </div>
-            {transcript.filter(c => c.status === 'done').length} / {transcript.length} chunks transcrits
-            {transcript.filter(c => c.status === 'done').length > 0 && (
-              <span style={{ color: SY.textMute, marginLeft: 8, fontFamily: SY.mono, fontSize: 10 }}>
-                (~{transcript.filter(c => c.status === 'done').reduce((acc, c) => acc + c.text.length, 0)} caracteres)
-              </span>
-            )}
           </div>
         )}
 
-        {ficheError && (
-          <div style={{
-            padding: '8px 12px', borderRadius: 6, marginBottom: 12,
-            background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)',
-            fontSize: 11, color: SY.redLight,
-          }}>
-            ✗ {ficheError}
-          </div>
-        )}
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {/* Genere la fiche (gros bouton CTA) */}
-          <button
-            onClick={generateFiche}
-            disabled={transcript.filter(c => c.status === 'done').length === 0}
-            style={{
-              width: '100%', padding: '14px 16px', borderRadius: 8,
-              background: transcript.filter(c => c.status === 'done').length === 0
-                ? 'rgba(0,200,255,0.1)'
-                : 'linear-gradient(135deg, #00c8ff, #0090e0)',
-              border: 'none', color: '#fff',
-              fontSize: 13, fontWeight: 700, letterSpacing: '0.1em',
-              textTransform: 'uppercase',
-              cursor: transcript.filter(c => c.status === 'done').length === 0 ? 'not-allowed' : 'pointer',
-              opacity: transcript.filter(c => c.status === 'done').length === 0 ? 0.4 : 1,
-              fontFamily: SY.mono,
-              boxShadow: '0 4px 14px rgba(0,200,255,0.3)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-            }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-              <polyline points="14 2 14 8 20 8"/>
-              <line x1="9" y1="13" x2="15" y2="13"/>
-              <line x1="9" y1="17" x2="15" y2="17"/>
-            </svg>
-            ▸ Generer la fiche
-          </button>
-
-          {/* Fermer (sauter la fiche, on quitte) */}
-          <button onClick={onClose} style={{
-            width: '100%', padding: '10px 16px', borderRadius: 8,
-            background: 'transparent', border: `1px solid ${SY.border}`,
-            color: SY.textMute, fontSize: 11, fontWeight: 600, letterSpacing: '0.1em',
-            textTransform: 'uppercase', cursor: 'pointer', fontFamily: SY.mono,
-          }}>
-            Fermer sans fiche
-          </button>
-        </div>
+        <button onClick={onClose} style={{
+          width: '100%', padding: '12px 16px', borderRadius: 8,
+          background: 'linear-gradient(135deg, #00c8ff, #0090e0)',
+          border: 'none', color: '#fff', fontSize: 13, fontWeight: 700,
+          letterSpacing: '0.1em', textTransform: 'uppercase',
+          cursor: 'pointer', fontFamily: SY.mono,
+        }}>
+          Fermer
+        </button>
       </div>
     </div>
   )
@@ -985,28 +1093,50 @@ export function EcouteActive({
         }}>Fermer</button>
       </div>
 
-      {/* Toolbar : downloads */}
+      {/* Auto-save status — affiche les fichiers sauvegardes automatiquement
+          + bouton de re-export Anki si l'auto-save a echoue. */}
       <div style={{
-        display: 'flex', gap: 8, marginBottom: 14,
-        padding: '8px 12px', borderRadius: 8,
-        background: 'rgba(0,200,255,0.04)', border: `1px solid ${SY.border}`,
+        display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14,
+        padding: '12px 14px', borderRadius: 8,
+        background: 'rgba(16,185,129,0.05)', border: `1px solid rgba(16,185,129,0.25)`,
+        fontSize: 11, fontFamily: SY.mono,
       }}>
-        <button onClick={downloadMarkdown} style={dlBtnStyle(SY.cyan)}>
-          ▾ Markdown (.md)
-        </button>
-        <button onClick={downloadAnki} disabled={ankiBusy} style={dlBtnStyle(SY.success)}>
-          {ankiBusy ? '… Anki' : '▾ Anki (.apkg)'}
-        </button>
-        <div style={{ flex: 1 }} />
-        {ankiLastResult && (
-          <span style={{
-            fontSize: 10, color: SY.success, fontFamily: SY.mono,
-            display: 'flex', alignItems: 'center', maxWidth: '60%',
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}>
-            ✓ {ankiLastResult}
-          </span>
-        )}
+        <div style={{
+          color: SY.success, letterSpacing: '0.12em', textTransform: 'uppercase',
+          fontWeight: 700, fontSize: 10, marginBottom: 4,
+          display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+          Auto-sauvegarde
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: SY.text }}>
+          <span style={{ color: SY.cyan, minWidth: 70 }}>Markdown :</span>
+          {savedFiles.markdown_path
+            ? <span style={{ color: SY.textMute, fontSize: 10, wordBreak: 'break-all' }}>{savedFiles.markdown_path}</span>
+            : <span style={{ color: SY.warn }}>… en cours</span>}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: SY.text }}>
+          <span style={{ color: SY.cyan, minWidth: 70 }}>Anki :</span>
+          {savedFiles.anki_path ? (
+            <span style={{ color: SY.textMute, fontSize: 10, wordBreak: 'break-all' }}>
+              {savedFiles.anki_path}
+              {savedFiles.anki_card_count !== undefined && (
+                <span style={{ color: SY.success, marginLeft: 6 }}>
+                  ({savedFiles.anki_card_count} cartes)
+                </span>
+              )}
+            </span>
+          ) : ankiBusy ? (
+            <span style={{ color: SY.warn }}>… en cours</span>
+          ) : (
+            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ color: SY.warn, fontSize: 10 }}>echec auto-save</span>
+              <button onClick={reExportAnki} style={dlBtnStyle(SY.success)}>
+                Reessayer
+              </button>
+            </span>
+          )}
+        </div>
       </div>
 
       {ficheError && (

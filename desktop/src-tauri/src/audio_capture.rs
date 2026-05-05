@@ -381,9 +381,28 @@ pub fn start_recording(
             }
         }
 
-        // Cleanup : finalize derner chunk
+        // Cleanup : finalize le dernier chunk (souvent partiel — < 30s).
+        // BUG FIX : on incrementait chunks_count uniquement quand on roulait
+        // a un nouveau chunk (ligne 378). Le dernier chunk en cours (chunk_NNNN
+        // tel que chunk_idx == NNNN au moment du stop) etait finalise sur
+        // disque mais jamais compte dans chunks_count -> jamais transcrit
+        // -> les dernieres ~30s de cours disparaissaient silencieusement.
+        //
+        // Fix : si le writer a ecrit au moins 100ms d'audio, on le finalize
+        // ET on bump chunks_count pour qu'il soit visible cote JS upload.
+        // Le seuil 100ms (> 1600 samples a 16kHz) evite de creer un fichier
+        // vide si stop est appele juste apres un roll de chunk.
         if let Some(w) = writer.take() {
+            let final_dur = w.duration();
             let _ = w.finalize();
+            if final_dur > 1600 {
+                *chunks_clone.lock().unwrap() = chunk_idx + 1;
+            } else {
+                // Chunk vide / quasi-vide : on supprime le fichier pour ne pas
+                // laisser un WAV de 0 octets qui ferait crash whisper.
+                let path = session_dir_clone.join(format!("chunk_{:04}.wav", chunk_idx));
+                let _ = std::fs::remove_file(path);
+            }
         }
         drop(stream);
     });
