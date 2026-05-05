@@ -83,9 +83,9 @@ export function StatsHUD({
       style={{
         width,
         display: 'grid',
-        gridTemplateColumns: 'repeat(4, 1fr)',
-        gap: 6,
-        padding: 8,
+        gridTemplateColumns: 'repeat(2, 1fr)',
+        gap: 8,
+        padding: 10,
         background: surface,
         border: `1px solid ${border}`,
         borderRadius: 8,
@@ -135,23 +135,23 @@ function StatCell({ label, value, format, color, history, textMute, textDim, bor
   return (
     <div style={{
       position: 'relative',
-      padding: '6px 8px 4px',
-      borderRadius: 5,
+      padding: '10px 12px 8px',
+      borderRadius: 6,
       border: `1px solid ${border}`,
-      background: 'rgba(5, 8, 16, 0.3)',
-      display: 'flex', flexDirection: 'column', gap: 2,
+      background: 'rgba(5, 8, 16, 0.42)',
+      display: 'flex', flexDirection: 'column', gap: 5,
       overflow: 'hidden',
     }}>
       {/* Label */}
       <div style={{
         fontFamily: '"JetBrains Mono","Fira Code",monospace',
-        fontSize: 8, letterSpacing: '0.16em',
+        fontSize: 9, letterSpacing: '0.18em',
         color: textDim, textTransform: 'uppercase',
-        display: 'flex', alignItems: 'center', gap: 4,
+        display: 'flex', alignItems: 'center', gap: 5,
       }}>
         <span style={{
-          width: 4, height: 4, borderRadius: '50%',
-          background: color, boxShadow: `0 0 4px ${color}`,
+          width: 5, height: 5, borderRadius: '50%',
+          background: color, boxShadow: `0 0 5px ${color}`,
         }} />
         {label}
       </div>
@@ -159,9 +159,9 @@ function StatCell({ label, value, format, color, history, textMute, textDim, bor
       {/* Value */}
       <div style={{
         fontFamily: '"JetBrains Mono","Fira Code",monospace',
-        fontSize: 16, fontWeight: 700,
+        fontSize: 22, fontWeight: 700,
         color: text,
-        lineHeight: 1.1,
+        lineHeight: 1.05,
       }}>
         {format === 'k' ? formatted : (
           <CountUp
@@ -173,7 +173,7 @@ function StatCell({ label, value, format, color, history, textMute, textDim, bor
       </div>
 
       {/* Sparkline */}
-      <div style={{ marginTop: 1, height: 18, position: 'relative' }}>
+      <div style={{ marginTop: 3, height: 36, position: 'relative' }}>
         <Sparkline values={history} color={color} />
       </div>
     </div>
@@ -187,7 +187,7 @@ interface SparklineProps {
   height?: number
 }
 
-function Sparkline({ values, color, width = 100, height = 18 }: SparklineProps) {
+function Sparkline({ values, color, width = 120, height = 36 }: SparklineProps) {
   // Pas de data → ligne plate basse
   if (values.length < 2) {
     return (

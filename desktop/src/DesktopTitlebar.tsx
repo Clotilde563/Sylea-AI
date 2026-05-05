@@ -5,18 +5,18 @@
  * - Boutons systeme : Pill mode / Minimize / Maximize / Close
  * - Logo + nom Sylea Agent a gauche
  *
- * Hauteur fixe : 36px. Couleur : bg sombre tech avec border bottom cyan.
+ * Hauteur fixe : 44px (style Windows 11). Boutons systeme 46x44 type
+ * caption-button Windows pour un clic facile et un look natif.
  */
 import { useState, useEffect } from 'react'
-import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 interface Props {
   onTogglePill?: () => void
   isPill?: boolean
-  /** Slots optionnels affiches a gauche des boutons systeme (theme switcher, sound toggle) */
+  /** Slots optionnels affiches a gauche des boutons systeme */
   extraButtons?: React.ReactNode
-  /** Couleur d'accent — depend du theme actif */
+  /** Couleur d'accent */
   accent?: string
 }
 
@@ -42,8 +42,8 @@ export function DesktopTitlebar({
   const onMax = async () => { try { await win.toggleMaximize() } catch {} }
   const onClose = async () => { try { await win.hide() } catch {} }
 
-  // Hauteur reduite en pill mode (24px) sinon 36px
-  const h = isPill ? 24 : 36
+  // Hauteur reduite en pill mode (28px) sinon 44px (style Win11)
+  const h = isPill ? 28 : 44
 
   return (
     <div
@@ -51,9 +51,8 @@ export function DesktopTitlebar({
       style={{
         height: h,
         display: 'flex',
-        alignItems: 'center',
+        alignItems: 'stretch', // les boutons remplissent toute la hauteur
         justifyContent: 'space-between',
-        padding: isPill ? '0 0.5rem' : '0 0.85rem',
         background: 'rgba(5,8,16,0.95)',
         borderBottom: '1px solid rgba(0,200,255,0.18)',
         userSelect: 'none',
@@ -70,71 +69,81 @@ export function DesktopTitlebar({
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: '0.4rem',
+          gap: '0.45rem',
+          padding: isPill ? '0 0.6rem' : '0 1rem',
           fontFamily: '"JetBrains Mono","Fira Code",monospace',
-          fontSize: isPill ? 10 : 11,
-          fontWeight: 600,
-          letterSpacing: '0.06em',
+          fontSize: isPill ? 10 : 12,
+          fontWeight: 700,
+          letterSpacing: '0.08em',
           color: '#7ad9ff',
         }}
       >
         <span style={{
-          width: 8, height: 8, borderRadius: '50%',
+          width: 9, height: 9, borderRadius: '50%',
           background: '#00c8ff', boxShadow: '0 0 8px #00c8ff',
           animation: 'sy-pulse 2s ease-in-out infinite',
         }} />
         {!isPill && <span>SYLEA AGENT</span>}
       </div>
 
-      {/* Boutons systeme */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-        {/* Slots extras (theme, son, ...) */}
+      {/* Boutons systeme — style Windows 11 caption buttons */}
+      <div style={{ display: 'flex', alignItems: 'stretch', height: '100%' }}>
+        {/* Slots extras (eventuels widgets) */}
         {extraButtons}
         {/* Pill toggle */}
         {onTogglePill && (
-          <TitlebarButton
+          <CaptionButton
             onClick={onTogglePill}
             title={isPill ? 'Mode plein' : 'Mode pill compact'}
             color={accent}
+            isPill={isPill}
           >
             {isPill ? (
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-                <rect x="2" y="2" width="12" height="12" stroke="currentColor" strokeWidth="1.2" rx="1.5" />
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <rect x="2" y="2" width="12" height="12" stroke="currentColor" strokeWidth="1.4" rx="1.5" />
               </svg>
             ) : (
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-                <rect x="3" y="6" width="10" height="4" stroke="currentColor" strokeWidth="1.2" rx="2" />
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <rect x="3" y="6" width="10" height="4" stroke="currentColor" strokeWidth="1.4" rx="2" />
               </svg>
             )}
-          </TitlebarButton>
+          </CaptionButton>
         )}
         {!isPill && (
-          <TitlebarButton onClick={onMin} title="Reduire" color={accent}>
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-              <line x1="3" y1="13" x2="13" y2="13" stroke="currentColor" strokeWidth="1.2" />
+          <CaptionButton onClick={onMin} title="Reduire" color={accent} isPill={isPill}>
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <line x1="3" y1="13" x2="13" y2="13" stroke="currentColor" strokeWidth="1.4" />
             </svg>
-          </TitlebarButton>
+          </CaptionButton>
         )}
         {!isPill && (
-          <TitlebarButton onClick={onMax} title={maximized ? 'Restaurer' : 'Agrandir'} color={accent}>
+          <CaptionButton onClick={onMax} title={maximized ? 'Restaurer' : 'Agrandir'} color={accent} isPill={isPill}>
             {maximized ? (
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-                <rect x="3" y="5" width="8" height="8" stroke="currentColor" strokeWidth="1.2" />
-                <rect x="5" y="3" width="8" height="8" stroke="currentColor" strokeWidth="1.2" />
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <rect x="3" y="5" width="8" height="8" stroke="currentColor" strokeWidth="1.4" />
+                <rect x="5" y="3" width="8" height="8" stroke="currentColor" strokeWidth="1.4" />
               </svg>
             ) : (
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-                <rect x="3" y="3" width="10" height="10" stroke="currentColor" strokeWidth="1.2" />
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <rect x="3" y="3" width="10" height="10" stroke="currentColor" strokeWidth="1.4" />
               </svg>
             )}
-          </TitlebarButton>
+          </CaptionButton>
         )}
-        <TitlebarButton onClick={onClose} title="Cacher (revient via tray)" color="#ef4444">
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-            <line x1="4" y1="4" x2="12" y2="12" stroke="currentColor" strokeWidth="1.2" />
-            <line x1="12" y1="4" x2="4" y2="12" stroke="currentColor" strokeWidth="1.2" />
+        <CaptionButton
+          onClick={onClose}
+          title="Fermer (revient via tray)"
+          color="#fca5a5"
+          hoverBg="#e81123"
+          hoverColor="#ffffff"
+          isPill={isPill}
+          isClose
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <line x1="4" y1="4" x2="12" y2="12" stroke="currentColor" strokeWidth="1.4" />
+            <line x1="12" y1="4" x2="4" y2="12" stroke="currentColor" strokeWidth="1.4" />
           </svg>
-        </TitlebarButton>
+        </CaptionButton>
       </div>
     </div>
   )
@@ -145,28 +154,50 @@ interface BtnProps {
   title: string
   color: string
   children: React.ReactNode
+  isPill?: boolean
+  isClose?: boolean
+  hoverBg?: string
+  hoverColor?: string
 }
 
-function TitlebarButton({ onClick, title, color, children }: BtnProps) {
+/**
+ * Bouton style "caption" Windows 11 — large rectangulaire (46x44 plein-haut),
+ * hover bg cyan discret, close hover bg rouge officiel Microsoft (#e81123).
+ */
+function CaptionButton({
+  onClick, title, color, children,
+  isPill = false, isClose = false,
+  hoverBg = 'rgba(0,200,255,0.14)',
+  hoverColor,
+}: BtnProps) {
+  // Win11 caption buttons: 46x32+ — on adopte 46x44 (full height titlebar)
+  const w = isPill ? 36 : 46
+
   return (
     <button
       onClick={onClick}
       title={title}
       style={{
-        width: 22,
-        height: 22,
+        width: w,
+        height: '100%',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         background: 'transparent',
         border: 'none',
-        borderRadius: 4,
+        borderRadius: 0,
         color,
         cursor: 'pointer',
-        transition: 'background 0.15s',
+        transition: 'background 0.12s, color 0.12s',
       }}
-      onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(0,200,255,0.12)' }}
-      onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = hoverBg
+        if (hoverColor) e.currentTarget.style.color = hoverColor
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = 'transparent'
+        e.currentTarget.style.color = color
+      }}
     >
       {children}
     </button>

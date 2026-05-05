@@ -23,13 +23,20 @@ export function SplashScreen({ onComplete, duration = 1100 }: SplashScreenProps)
   const [phase, setPhase] = useState<'enter' | 'visible' | 'leave'>('enter')
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
-  // Phase manager: enter (0→100ms) → visible (→duration) → leave (300ms) → done
+  // Stocke onComplete dans un ref pour eviter que l'effect re-run quand le
+  // parent re-render avec une nouvelle callback inline. Sans ca, un re-render
+  // toutes les 1s (interval stats) cancel les timers et recommence -> boucle.
+  const onCompleteRef = useRef(onComplete)
+  useEffect(() => { onCompleteRef.current = onComplete }, [onComplete])
+
+  // Phase manager: enter (0→80ms) → visible (→duration) → leave (380ms) → done
+  // IMPORTANT : ne PAS mettre onComplete dans les deps (cf. ref ci-dessus)
   useEffect(() => {
     const t1 = setTimeout(() => setPhase('visible'), 80)
     const t2 = setTimeout(() => setPhase('leave'), duration)
-    const t3 = setTimeout(() => onComplete(), duration + 380)
+    const t3 = setTimeout(() => onCompleteRef.current(), duration + 380)
     return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3) }
-  }, [duration, onComplete])
+  }, [duration])
 
   // Particules canvas : 60 points qui rayonnent du centre vers l'exterieur
   useEffect(() => {
@@ -96,9 +103,11 @@ export function SplashScreen({ onComplete, duration = 1100 }: SplashScreenProps)
   return (
     <div
       style={{
-        position: 'fixed',
+        // absolute (pas fixed) pour rester DANS le conteneur parent —
+        // la DesktopTitlebar occupe les 36px du haut et reste cliquable.
+        position: 'absolute',
         inset: 0,
-        zIndex: 99999,
+        zIndex: 999,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',

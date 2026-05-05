@@ -7,14 +7,10 @@ import { DesktopTitlebar } from './DesktopTitlebar'
 import { useDragDrop, type DroppedFile } from './useDragDrop'
 import { SplashScreen } from './SplashScreen'
 import { BackgroundParticles } from './BackgroundParticles'
-import { useSound } from './useSound'
-import { useTheme } from './useTheme'
-import { ThemeSwitcher } from './ThemeSwitcher'
-import { SoundToggle } from './SoundToggle'
 import { LiveActivityFeed, type LiveActivity } from './LiveActivityFeed'
 import { StatsHUD, type StatsHUDData, pushHist } from './StatsHUD'
 import { CountUp } from './CountUp'
-import { FadeIn, SlideIn } from './Motion'
+import { SlideIn } from './Motion'
 
 const API_BASE = 'http://localhost:8000'
 
@@ -154,13 +150,13 @@ function App() {
   // Sprint 2.1 — Splash screen au premier mount (1.4s). Une seule fois par
   // session, pas re-affiche apres login/logout.
   const [splashDone, setSplashDone] = useState(false)
-
-  // Sprint 2.8 — Theme actif (dark | cyber | aurora). La palette s'applique
-  // aussi via CSS variables (--sy-*) dans useTheme.ts.
-  const { palette, theme: _theme } = useTheme()
-
-  // Sprint 2.3 — Sound design (clic / succes / erreur / notify).
-  const { play: playSound } = useSound()
+  const finishSplash = useCallback(() => setSplashDone(true), [])
+  // Safety net : meme si le splash bug, force la fin a 4s (1.4s normal + 2.6s safety)
+  useEffect(() => {
+    if (splashDone) return
+    const safety = setTimeout(() => setSplashDone(true), 4000)
+    return () => clearTimeout(safety)
+  }, [splashDone])
 
   // Sprint 2.6 — Live activity feed : map agentId → derniere activite
   const [liveActivities, setLiveActivities] = useState<LiveActivity[]>([])
@@ -281,7 +277,6 @@ function App() {
   // Login
   const handleLogin = async () => {
     setError('')
-    playSound('click')
     try {
       const res = await fetch(`${API_BASE}/api/auth/login`, {
         method: 'POST',
@@ -290,15 +285,12 @@ function App() {
       })
       const data = await res.json()
       if (data.access_token) {
-        playSound('success')
         setToken(data.access_token)
         localStorage.setItem('sylea_desktop_token', data.access_token)
       } else {
-        playSound('error')
         setError(data.detail || 'Identifiants incorrects')
       }
     } catch {
-      playSound('error')
       setError('Serveur inaccessible (localhost:8000)')
     }
   }
@@ -530,9 +522,6 @@ function App() {
     if (status === 'done') {
       setStats(prev => ({ ...prev, actions: prev.actions + 1 }))
     }
-    // Sprint 2.3 — Sound feedback discret sur completions et erreurs
-    if (status === 'done')  playSound('notify')
-    if (status === 'error') playSound('error')
   }
 
   const updatePlan = (idx: number, status: 'done' | 'running' | 'pending') => {
@@ -892,7 +881,6 @@ function App() {
   }
 
   const handleLogout = () => {
-    playSound('click')
     wsRef.current?.close()
     setToken(null)
     localStorage.removeItem('sylea_desktop_token')
@@ -904,8 +892,20 @@ function App() {
   // ── SPLASH SCREEN (Sprint 2.1) ──
   // Affiche logo Sylea + particules + barre "INITIALIZING SYSTEM" pendant 1.4s.
   // Une seule fois au boot de l'app, avant tout le reste (incl. onboarding).
+  // On rend la titlebar PAR-DESSUS le splash pour que les croix close/min
+  // soient toujours accessibles (sinon impossible de fermer la fenetre frameless).
   if (!splashDone) {
-    return <SplashScreen onComplete={() => setSplashDone(true)} />
+    return (
+      <div style={{
+        display: 'flex', flexDirection: 'column', height: '100vh',
+        background: '#050810', overflow: 'hidden',
+      }}>
+        <DesktopTitlebar accent={SY.cyanSoft} />
+        <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+          <SplashScreen onComplete={finishSplash} />
+        </div>
+      </div>
+    )
   }
 
   // ── ONBOARDING OPENCLAW (Phase 2b) ──
@@ -1053,7 +1053,7 @@ function App() {
         border: `1px solid ${SY.borderHi}`,
         boxShadow: `0 8px 24px rgba(0,200,255,0.18)`,
       }}>
-        <DesktopTitlebar onTogglePill={togglePill} isPill accent={palette.cyanSoft} />
+        <DesktopTitlebar onTogglePill={togglePill} isPill accent={SY.cyanSoft} />
         <div
           data-tauri-drag-region
           onDoubleClick={togglePill}
@@ -1090,18 +1090,12 @@ function App() {
       position: 'relative',
     }}>
       {/* Sprint 2.2 — Particules de fond (canvas plein-ecran derriere tout) */}
-      <BackgroundParticles count={50} color={palette.particleRgb} />
+      <BackgroundParticles count={50} color="0, 200, 255" />
 
       <DesktopTitlebar
         onTogglePill={togglePill}
         isPill={false}
-        accent={palette.cyanSoft}
-        extraButtons={
-          <>
-            <SoundToggle color={palette.cyanSoft} />
-            <ThemeSwitcher />
-          </>
-        }
+        accent={SY.cyanSoft}
       />
 
       {/* Drag overlay (Sprint 1.6) */}
@@ -1313,14 +1307,9 @@ function App() {
               <button
                 key={agent.id}
                 onClick={() => {
-                  if (agent.status === 'locked') {
-                    playSound('error')
-                    return
-                  }
-                  playSound('click')
+                  if (agent.status === 'locked') return
                   setSelectedAgent(agent.id)
                 }}
-                onMouseEnter={() => { if (agent.status !== 'locked') playSound('hover') }}
                 className={`tech-btn-hover sy-tap ${
                   isSelected && agent.status === 'active' ? 'sy-agent-active' : ''
                 }`}
@@ -1537,7 +1526,7 @@ function App() {
         {/* Sprint 2.6 — Live activity feed sous le header */}
         <LiveActivityFeed
           activities={liveActivities}
-          accent={palette.cyan}
+          accent={SY.cyan}
           style={{ padding: '4px 14px 0' }}
         />
 
@@ -1631,8 +1620,8 @@ function App() {
               </p>
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {steps.map((step) => {
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {steps.map((step, idx) => {
                 const icons: Record<string, string> = {
                   EMAIL: '✉', TEXT: '▤', LINK: '↗', COPY: '⎘', REMINDER: '◷',
                   SEARCH: '⌕', X_SEARCH: '𝕏', ANALYSIS: '◫', FILE: '⬚',
@@ -1643,44 +1632,117 @@ function App() {
                 const statusColors: Record<string, string> = {
                   done: SY.success, running: SY.warn, error: SY.error, pending: SY.textDim,
                 }
+                const statusGlyphs: Record<string, string> = {
+                  done: '✓', running: '◐', error: '✗', pending: '○',
+                }
                 const isA3 = step.agent === 'agent3'
+                const accent = isA3 ? AGENT3_CYAN : SY.cyan
+
                 return (
-                  <SlideIn key={step.id} from="left" distance={12} duration={280}>
+                  <SlideIn key={step.id} from="left" distance={12} duration={260}>
                   <div style={{
-                    display: 'flex', alignItems: 'flex-start', gap: 10,
-                    padding: '8px 12px', borderRadius: 6,
+                    display: 'flex', alignItems: 'stretch', gap: 0,
+                    borderRadius: 8,
                     background: step.status === 'error'
                       ? 'rgba(239,68,68,0.05)'
-                      : (isA3 ? 'rgba(56,189,248,0.03)' : SY.surface),
+                      : (isA3 ? 'rgba(56,189,248,0.04)' : SY.surface),
                     border: `1px solid ${
-                      step.status === 'error' ? 'rgba(239,68,68,0.2)'
-                        : isA3 ? `${AGENT3_CYAN}22`
+                      step.status === 'error' ? 'rgba(239,68,68,0.25)'
+                        : isA3 ? `${AGENT3_CYAN}30`
                         : SY.border
                     }`,
+                    overflow: 'hidden',
                     transition: 'all 0.2s',
                   }}>
-                    <span style={{
-                      fontFamily: SY.mono, fontSize: 13,
-                      color: isA3 ? AGENT3_CYAN : SY.cyan,
-                      marginTop: 1, minWidth: 14,
-                    }}>{icons[step.action] || '▸'}</span>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <p style={{
-                        fontSize: 12, color: SY.text, lineHeight: 1.45, margin: 0,
-                        wordBreak: 'break-word',
-                      }}>{step.detail}</p>
-                    </div>
+                    {/* Rail vertical gauche colore par agent (style Claude Code) */}
                     <div style={{
-                      display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
-                      fontFamily: SY.mono,
-                    }}>
-                      {isA3 && <span style={{
-                        fontSize: 8, color: AGENT3_CYAN, letterSpacing: '0.1em',
-                        padding: '1px 4px', borderRadius: 3,
-                        border: `1px solid ${AGENT3_CYAN}40`, background: 'rgba(56,189,248,0.06)',
-                      }}>A3</span>}
-                      <StatusDot color={statusColors[step.status]} pulsing={step.status === 'running'} size={6} />
-                      <span style={{ fontSize: 9, color: SY.textDim, letterSpacing: '0.08em' }}>{step.time}</span>
+                      width: 3, flexShrink: 0,
+                      background: step.status === 'error'
+                        ? SY.error
+                        : step.status === 'running'
+                          ? `linear-gradient(180deg, ${accent}, transparent, ${accent})`
+                          : (step.status === 'done' ? SY.success : SY.textDim),
+                      animation: step.status === 'running' ? 'a3-flow 2s ease-in-out infinite' : 'none',
+                      backgroundSize: step.status === 'running' ? '100% 200%' : 'auto',
+                    }} />
+
+                    <div style={{ flex: 1, padding: '10px 14px', minWidth: 0 }}>
+                      {/* Header : numero + categorie + statut + timestamp */}
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        fontFamily: SY.mono,
+                        marginBottom: 6,
+                      }}>
+                        {/* Numero */}
+                        <span style={{
+                          fontSize: 9, color: SY.textDim, letterSpacing: '0.06em',
+                          fontWeight: 600, minWidth: 22,
+                        }}>
+                          #{String(idx + 1).padStart(3, '0')}
+                        </span>
+                        {/* Icone + categorie */}
+                        <span style={{
+                          fontSize: 13, color: accent, lineHeight: 1,
+                        }}>{icons[step.action] || '▸'}</span>
+                        <span style={{
+                          fontSize: 10, fontWeight: 700,
+                          color: accent, letterSpacing: '0.14em',
+                          textTransform: 'uppercase',
+                        }}>
+                          {step.action.replace(/_/g, ' ')}
+                        </span>
+                        {/* Badge agent */}
+                        {isA3 && (
+                          <span style={{
+                            fontSize: 8, color: AGENT3_CYAN, letterSpacing: '0.1em',
+                            padding: '1px 5px', borderRadius: 3,
+                            border: `1px solid ${AGENT3_CYAN}50`,
+                            background: 'rgba(56,189,248,0.08)',
+                            fontWeight: 700,
+                          }}>AGENT 3</span>
+                        )}
+                        <div style={{ flex: 1 }} />
+                        {/* Statut + glyph */}
+                        <span style={{
+                          fontSize: 10, fontWeight: 700,
+                          color: statusColors[step.status],
+                          letterSpacing: '0.12em', textTransform: 'uppercase',
+                          display: 'inline-flex', alignItems: 'center', gap: 4,
+                        }}>
+                          <span style={{
+                            display: 'inline-block',
+                            animation: step.status === 'running' ? 'sy-spin 1s linear infinite' : 'none',
+                          }}>
+                            {statusGlyphs[step.status]}
+                          </span>
+                          {step.status}
+                        </span>
+                        {/* Timestamp */}
+                        <span style={{
+                          fontSize: 10, color: SY.textDim, letterSpacing: '0.06em',
+                          fontVariantNumeric: 'tabular-nums',
+                        }}>
+                          {step.time}
+                        </span>
+                      </div>
+
+                      {/* Body : detail (+ sub-bullet ↳ pour ressembler aux tool calls Claude Code) */}
+                      <div style={{
+                        display: 'flex', alignItems: 'flex-start', gap: 8,
+                        paddingLeft: 30,
+                      }}>
+                        <span style={{
+                          fontFamily: SY.mono, fontSize: 12,
+                          color: SY.textMute, marginTop: -1, flexShrink: 0,
+                        }}>↳</span>
+                        <p style={{
+                          fontSize: 13, color: SY.text, lineHeight: 1.5,
+                          margin: 0, wordBreak: 'break-word', flex: 1,
+                          fontWeight: step.status === 'running' ? 500 : 400,
+                        }}>
+                          {step.detail}
+                        </p>
+                      </div>
                     </div>
                   </div>
                   </SlideIn>
@@ -1692,223 +1754,244 @@ function App() {
         </div>
       </div>
 
-      {/* ── DROITE : Plan d'execution / Taches Agent 3 ── */}
+      {/* ── DROITE : TODOLIST + STATS HUD ──
+          Style "Claude Code" : checkboxes nettes, numerotation, progress
+          bar globale en haut, items compactes mais lisibles. */}
       <div style={{
-        width: 260, display: 'flex', flexDirection: 'column',
-        background: 'rgba(7, 12, 26, 0.45)',
+        width: 380,
+        display: 'flex', flexDirection: 'column',
+        background: 'rgba(7, 12, 26, 0.55)',
+        backdropFilter: 'blur(8px)',
         position: 'relative', zIndex: 2,
       }}>
-        {/* Header droite */}
-        <div style={{
-          padding: '12px 14px',
-          borderBottom: `1px solid ${SY.border}`,
-          display: 'flex', alignItems: 'center', gap: 8,
-        }}>
-          {selectedAgent === 'agent3' && agent3StreamSteps.length > 0 ? (
-            <>
-              <span style={{
-                fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.18em',
-                color: AGENT3_CYAN, textTransform: 'uppercase',
-              }}>▸ TASKS</span>
-              <span className="agent3-name-shimmer" style={{ fontSize: 12, fontWeight: 700 }}>
-                Agent 3
-              </span>
-              <div style={{ flex: 1 }} />
-              <span style={{
-                fontFamily: SY.mono, fontSize: 10,
-                color: AGENT3_CYAN, background: 'rgba(56,189,248,0.08)',
-                padding: '2px 7px', borderRadius: 4,
-                border: `1px solid ${AGENT3_CYAN}30`,
-              }}>
-                {agent3StreamSteps.filter(s => s.status === 'done').length}/{agent3StreamSteps.length}
-              </span>
-            </>
-          ) : (
-            <>
-              <span style={{
-                fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.18em',
-                color: SY.cyan, textTransform: 'uppercase',
-              }}>▸ PLAN</span>
-              <span style={{ fontSize: 12, fontWeight: 700, color: SY.text }}>
-                Execution
-              </span>
-              <div style={{ flex: 1 }} />
-              {plan.length > 0 && (
-                <span style={{
-                  fontFamily: SY.mono, fontSize: 10,
-                  color: SY.success, background: 'rgba(16,185,129,0.08)',
-                  padding: '2px 7px', borderRadius: 4,
-                  border: `1px solid ${SY.success}30`,
-                }}>
-                  {plan.filter(p => p.status === 'done').length}/{plan.length}
-                </span>
-              )}
-            </>
-          )}
-        </div>
+        {/* ── Header todolist ── */}
+        {(() => {
+          // Source unifiee : si Agent 3 streame, on prend ses steps, sinon le
+          // plan classique. Resultat = liste {id, label, status, detail}.
+          const items =
+            selectedAgent === 'agent3' && agent3StreamSteps.length > 0
+              ? agent3StreamSteps.map(s => ({
+                  id: s.id, label: s.label, status: s.status,
+                  detail: s.detail, agent: 'agent3' as const,
+                }))
+              : plan.map((p, i) => ({
+                  id: `plan-${i}`, label: p.step, status: p.status,
+                  detail: '', agent: p.agent || 'agent2',
+                }))
 
-        {/* Agent 3 streaming steps with progress bar */}
-        {selectedAgent === 'agent3' && agent3StreamSteps.length > 0 ? (
-          <div style={{ flex: 1, overflow: 'auto', padding: '10px 10px 14px' }}>
-            {/* Progress bar */}
-            <div style={{ padding: '0 2px 12px' }}>
+          const isA3Source = selectedAgent === 'agent3' && agent3StreamSteps.length > 0
+          const accent = isA3Source ? AGENT3_CYAN : SY.cyan
+          const totalDone = items.filter(i => i.status === 'done').length
+          const total = items.length
+          const pct = total > 0 ? Math.round((totalDone / total) * 100) : 0
+
+          return (
+            <>
               <div style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                fontFamily: SY.mono, fontSize: 9, letterSpacing: '0.14em',
-                color: SY.textDim, marginBottom: 6, textTransform: 'uppercase',
-              }}>
-                <span>Progress</span>
-                <span style={{ color: AGENT3_CYAN }}>
-                  {Math.round((agent3StreamSteps.filter(s => s.status === 'done').length / agent3StreamSteps.length) * 100)}%
-                </span>
-              </div>
-              <div style={{
-                height: 3, borderRadius: 2,
-                background: SY.surface,
-                border: `1px solid ${SY.border}`,
-                overflow: 'hidden',
+                padding: '14px 16px 12px',
+                borderBottom: `1px solid ${SY.border}`,
               }}>
                 <div style={{
-                  height: '100%', borderRadius: 2,
-                  background: `linear-gradient(90deg, ${AGENT3_CYAN}, ${AGENT3_INDIGO}, ${AGENT3_CYAN})`,
-                  backgroundSize: '200% 100%',
-                  animation: 'a3-border 3s ease-in-out infinite',
-                  boxShadow: `0 0 8px ${AGENT3_CYAN}80`,
-                  width: `${Math.round((agent3StreamSteps.filter(s => s.status === 'done').length / agent3StreamSteps.length) * 100)}%`,
-                  transition: 'width 0.5s ease',
-                }} />
-              </div>
-            </div>
-            {/* Steps list */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {agent3StreamSteps.map((s) => (
-                <div key={s.id} style={{
-                  padding: '8px 10px', borderRadius: 6,
-                  background:
-                    s.status === 'running' ? 'rgba(56,189,248,0.06)' :
-                    s.status === 'done'    ? 'rgba(16,185,129,0.04)' :
-                    SY.surface,
-                  border: `1px solid ${
-                    s.status === 'running' ? `${AGENT3_CYAN}40` :
-                    s.status === 'done'    ? `${SY.success}30` :
-                    SY.border
-                  }`,
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  transition: 'all 0.3s',
+                  display: 'flex', alignItems: 'center', gap: 10, marginBottom: total > 0 ? 10 : 0,
                 }}>
-                  {/* Status indicator */}
-                  <div style={{
-                    width: 16, height: 16, display: 'flex',
-                    alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-                  }}>
-                    {s.status === 'done' && (
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={SY.success} strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-                    )}
-                    {s.status === 'running' && (
-                      <div style={{
-                        width: 12, height: 12, borderRadius: '50%',
-                        border: '2px solid transparent',
-                        borderTopColor: AGENT3_CYAN, borderRightColor: AGENT3_INDIGO,
-                        animation: 'sy-spin 0.8s linear infinite',
-                      }} />
-                    )}
-                    {s.status === 'pending' && (
-                      <div style={{
-                        width: 6, height: 6, borderRadius: '50%',
-                        background: SY.textDim,
-                      }} />
-                    )}
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <p style={{
-                      fontSize: 11, margin: 0, lineHeight: 1.35,
-                      fontWeight: s.status === 'running' ? 600 : 500,
-                      color:
-                        s.status === 'running' ? AGENT3_CYAN :
-                        s.status === 'done'    ? SY.success :
-                        SY.textMute,
+                  <span style={{
+                    fontFamily: SY.mono, fontSize: 11, letterSpacing: '0.2em',
+                    color: accent, textTransform: 'uppercase',
+                  }}>▸ TODOLIST</span>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: SY.text, letterSpacing: '0.02em' }}>
+                    {isA3Source ? 'Agent 3 — Plan' : 'Plan d\'execution'}
+                  </span>
+                  <div style={{ flex: 1 }} />
+                  {total > 0 && (
+                    <span style={{
+                      fontFamily: SY.mono, fontSize: 11, fontWeight: 700,
+                      color: accent, background: `${accent}14`,
+                      padding: '3px 9px', borderRadius: 5,
+                      border: `1px solid ${accent}40`,
+                      letterSpacing: '0.06em',
                     }}>
-                      {s.label}
-                    </p>
-                    <p style={{
-                      fontSize: 9, fontFamily: SY.mono,
-                      color: SY.textDim, margin: '2px 0 0',
-                      letterSpacing: '0.04em',
-                    }}>{s.detail}</p>
-                  </div>
+                      <CountUp to={totalDone} durationMs={400} />/<CountUp to={total} durationMs={400} />
+                    </span>
+                  )}
                 </div>
-              ))}
-            </div>
-          </div>
-        ) : (
-          /* Original plan steps */
-          <div style={{ flex: 1, overflow: 'auto', padding: 10 }}>
-            {plan.length === 0 ? (
-              <div style={{
-                display: 'flex', flexDirection: 'column',
-                alignItems: 'center', justifyContent: 'center',
-                height: '100%', gap: 8, textAlign: 'center',
-              }}>
-                <div style={{
-                  fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.18em',
-                  color: SY.textDim, textTransform: 'uppercase',
-                }}>
-                  ◌ Aucun plan actif
-                </div>
-                <div style={{
-                  fontSize: 10, color: SY.textDim, maxWidth: 180, lineHeight: 1.4,
-                }}>
-                  Les etapes d'execution apparaitront ici.
-                </div>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {plan.map((p, i) => {
-                  const isA3 = p.agent === 'agent3'
-                  return (
-                    <div key={i} style={{
-                      padding: '8px 10px', borderRadius: 6,
-                      background:
-                        p.status === 'done'    ? (isA3 ? 'rgba(56,189,248,0.06)' : 'rgba(16,185,129,0.05)') :
-                        p.status === 'running' ? 'rgba(245,158,11,0.05)' :
-                        SY.surface,
-                      border: `1px solid ${
-                        p.status === 'done'    ? (isA3 ? `${AGENT3_CYAN}30` : `${SY.success}30`) :
-                        p.status === 'running' ? `${SY.warn}30` :
-                        SY.border
-                      }`,
-                      display: 'flex', alignItems: 'flex-start', gap: 8,
+                {/* Progress bar globale (visible seulement si plan actif) */}
+                {total > 0 && (
+                  <>
+                    <div style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.14em',
+                      color: SY.textDim, marginBottom: 5, textTransform: 'uppercase',
                     }}>
-                      <span style={{
-                        fontFamily: SY.mono, fontSize: 13, marginTop: -1,
-                        color:
-                          p.status === 'done'    ? (isA3 ? AGENT3_CYAN : SY.success) :
-                          p.status === 'running' ? SY.warn : SY.textDim,
-                      }}>
-                        {p.status === 'done' ? '✓' : p.status === 'running' ? '◐' : '○'}
+                      <span>Progression</span>
+                      <span style={{ color: accent, fontWeight: 700 }}>
+                        <CountUp to={pct} durationMs={500} suffix="%" />
                       </span>
-                      <div style={{ flex: 1 }}>
-                        <p style={{
-                          fontSize: 11, lineHeight: 1.3, margin: 0,
-                          color:
-                            p.status === 'done'    ? (isA3 ? AGENT3_CYAN : SY.success) :
-                            p.status === 'running' ? SY.warn : SY.textMute,
-                          fontFamily: SY.mono, letterSpacing: '0.04em',
-                        }}>
-                          ETAPE {String(i + 1).padStart(2, '0')}{isA3 ? ' · A3' : ''}
-                        </p>
-                        <p style={{
-                          fontSize: 11, color: SY.text, margin: '3px 0 0',
-                          lineHeight: 1.4,
-                        }}>{p.step}</p>
+                    </div>
+                    <div style={{
+                      height: 5, borderRadius: 3,
+                      background: 'rgba(0,0,0,0.4)',
+                      border: `1px solid ${SY.border}`,
+                      overflow: 'hidden',
+                    }}>
+                      <div style={{
+                        height: '100%', borderRadius: 3,
+                        background: isA3Source
+                          ? `linear-gradient(90deg, ${AGENT3_CYAN}, ${AGENT3_INDIGO}, ${AGENT3_CYAN})`
+                          : `linear-gradient(90deg, ${SY.cyan}, ${SY.blue}, ${SY.cyan})`,
+                        backgroundSize: '200% 100%',
+                        animation: 'a3-border 3s ease-in-out infinite',
+                        boxShadow: `0 0 8px ${accent}80`,
+                        width: `${pct}%`,
+                        transition: 'width 0.5s ease',
+                      }} />
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* ── Liste todolist ── */}
+              <div style={{
+                flex: 1, overflow: 'auto', padding: '10px 12px 14px',
+              }} className="sy-scroll">
+                {total === 0 ? (
+                  <div style={{
+                    display: 'flex', flexDirection: 'column',
+                    alignItems: 'center', justifyContent: 'center',
+                    height: '100%', gap: 12, textAlign: 'center',
+                    padding: '40px 14px',
+                  }}>
+                    <div style={{
+                      width: 56, height: 56, borderRadius: '50%',
+                      border: `1.5px dashed ${SY.border}`,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      color: SY.textDim, fontSize: 22,
+                    }}>
+                      ☐
+                    </div>
+                    <div>
+                      <div style={{
+                        fontFamily: SY.mono, fontSize: 11, letterSpacing: '0.18em',
+                        color: SY.textMute, textTransform: 'uppercase', marginBottom: 6,
+                      }}>
+                        Aucune tache active
+                      </div>
+                      <div style={{
+                        fontSize: 11, color: SY.textDim, maxWidth: 240, lineHeight: 1.5,
+                      }}>
+                        Quand un agent recevra une instruction, sa todolist apparaitra ici avec progress live.
                       </div>
                     </div>
-                  )
-                })}
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {items.map((item, idx) => {
+                      const isA3 = item.agent === 'agent3'
+                      const statusColor =
+                        item.status === 'done'    ? SY.success :
+                        item.status === 'running' ? (isA3 ? AGENT3_CYAN : SY.warn) :
+                                                    SY.textDim
+                      return (
+                        <SlideIn key={item.id} from="right" distance={10} duration={260}>
+                        <div style={{
+                          display: 'flex', alignItems: 'flex-start', gap: 10,
+                          padding: '10px 12px', borderRadius: 7,
+                          background:
+                            item.status === 'done'    ? 'rgba(16,185,129,0.05)' :
+                            item.status === 'running' ? (isA3 ? 'rgba(56,189,248,0.07)' : 'rgba(245,158,11,0.06)') :
+                                                        SY.surface,
+                          border: `1px solid ${
+                            item.status === 'done'    ? `${SY.success}30` :
+                            item.status === 'running' ? (isA3 ? `${AGENT3_CYAN}50` : `${SY.warn}40`) :
+                                                        SY.border
+                          }`,
+                          transition: 'all 0.25s',
+                          position: 'relative',
+                        }}>
+                          {/* Numero d'item */}
+                          <div style={{
+                            fontFamily: SY.mono, fontSize: 10,
+                            color: SY.textDim, letterSpacing: '0.06em',
+                            minWidth: 18, paddingTop: 1, fontWeight: 600,
+                          }}>
+                            {String(idx + 1).padStart(2, '0')}
+                          </div>
+
+                          {/* Checkbox status */}
+                          <div style={{
+                            width: 18, height: 18, borderRadius: 4,
+                            border: `1.5px solid ${statusColor}`,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            flexShrink: 0, marginTop: 1,
+                            background: item.status === 'done' ? `${SY.success}22` : 'transparent',
+                            transition: 'all 0.25s',
+                          }}>
+                            {item.status === 'done' && (
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
+                                   stroke={SY.success} strokeWidth="3.5"
+                                   strokeLinecap="round" strokeLinejoin="round">
+                                <polyline points="20 6 9 17 4 12"/>
+                              </svg>
+                            )}
+                            {item.status === 'running' && (
+                              <div style={{
+                                width: 9, height: 9, borderRadius: '50%',
+                                border: '2px solid transparent',
+                                borderTopColor: statusColor,
+                                borderRightColor: statusColor,
+                                animation: 'sy-spin 0.8s linear infinite',
+                              }} />
+                            )}
+                          </div>
+
+                          {/* Contenu : label + detail */}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <p style={{
+                              fontSize: 12, margin: 0,
+                              lineHeight: 1.4,
+                              fontWeight: item.status === 'running' ? 600 : 500,
+                              color:
+                                item.status === 'done'    ? SY.text :
+                                item.status === 'running' ? statusColor :
+                                                            SY.textMute,
+                              textDecoration: item.status === 'done' ? 'line-through' : 'none',
+                              textDecorationColor: 'rgba(16,185,129,0.4)',
+                              wordBreak: 'break-word',
+                            }}>
+                              {item.label}
+                            </p>
+                            {item.detail && (
+                              <p style={{
+                                fontSize: 10, fontFamily: SY.mono,
+                                color: SY.textDim, margin: '4px 0 0',
+                                letterSpacing: '0.02em',
+                                lineHeight: 1.4,
+                              }}>
+                                ↳ {item.detail}
+                              </p>
+                            )}
+                          </div>
+
+                          {/* Badge agent (si A3) */}
+                          {isA3 && (
+                            <span style={{
+                              fontFamily: SY.mono, fontSize: 8,
+                              color: AGENT3_CYAN, letterSpacing: '0.1em',
+                              padding: '2px 5px', borderRadius: 3,
+                              border: `1px solid ${AGENT3_CYAN}50`,
+                              background: 'rgba(56,189,248,0.08)',
+                              alignSelf: 'flex-start',
+                            }}>A3</span>
+                          )}
+                        </div>
+                        </SlideIn>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-        )}
+            </>
+          )
+        })()}
 
         {/* Sprint 2.7 — Stats real-time HUD avec sparklines */}
         <div style={{
@@ -1919,16 +2002,16 @@ function App() {
             color: SY.textDim, textTransform: 'uppercase', marginBottom: 6,
             display: 'flex', alignItems: 'center', gap: 6,
           }}>
-            <span style={{ color: palette.cyan }}>▸</span> System HUD
+            <span style={{ color: SY.cyan }}>▸</span> System HUD
           </div>
           <StatsHUD
             data={stats}
-            cyan={palette.cyan}
-            textMute={palette.textMute}
-            textDim={palette.textDim}
-            border={palette.border}
-            surface={palette.surface}
-            text={palette.text}
+            cyan={SY.cyan}
+            textMute={SY.textMute}
+            textDim={SY.textDim}
+            border={SY.border}
+            surface={SY.surface}
+            text={SY.text}
           />
         </div>
 
