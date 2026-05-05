@@ -1220,6 +1220,19 @@ export default function AgentsPage() {
   useEffect(() => {
     messagesEndRef2.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages2, chat2Open])
+
+  // Sync activation state vers desktop via WS broadcast (POST -> backend
+  // qui forward au desktop). Permet a l'app desktop de refleter l'etat
+  // actif/inactif des agents en temps reel.
+  useEffect(() => {
+    const token = localStorage.getItem('token')
+    if (!token) return
+    fetch(`${import.meta.env.VITE_API_URL || ''}/api/desktop/agents-activation`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ agent2: active2, agent3: loadActive3() }),
+    }).catch(() => { /* silent — pas critique */ })
+  }, [active2])
   useEffect(() => {
     if (chat2Open) inputRef2.current?.focus()
   }, [chat2Open])
@@ -1983,6 +1996,16 @@ export default function AgentsPage() {
   }, [])
 
   useEffect(() => { saveActive3(active3) }, [active3])
+  // Sync activation state vers desktop via WS broadcast
+  useEffect(() => {
+    const token = localStorage.getItem('token')
+    if (!token) return
+    fetch(`${import.meta.env.VITE_API_URL || ''}/api/desktop/agents-activation`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ agent2: loadActive2(), agent3: active3 }),
+    }).catch(() => { /* silent */ })
+  }, [active3])
   // Scroll vers le bas du conteneur de messages
   const scrollMessagesToBottom = useCallback((smooth = true) => {
     const container = messagesContainerRef3.current

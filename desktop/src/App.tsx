@@ -169,6 +169,11 @@ function App() {
   // Sert a derive 'active'/'inactive' pour la sidebar (au-dela de TTL = inactive)
   // ET a auto-selectionner l'agent le plus actif au boot.
   const [lastActivityByAgent, setLastActivityByAgent] = useState<Record<string, number>>({})
+  // Etat d'activation explicite des agents (toggle "Activer cet agent" du web).
+  // Source de verite : POST /api/desktop/agents-activation depuis le frontend.
+  // Receved via WS event {type:'agents_activation', active:{agent2,agent3}}
+  // OU initial fetch sur GET /api/desktop/agents-activation au boot.
+  const [activatedAgents, setActivatedAgents] = useState<Record<string, boolean>>({})
   // Tick toutes les 5s pour faire vieillir les statuts active → inactive
   const [, setNowTick] = useState(0)
   useEffect(() => {
@@ -186,14 +191,27 @@ function App() {
     setLastActivityByAgent(prev => ({ ...prev, [activity.agentId]: Date.now() }))
   }, [])
 
-  // AGENTS derive : status calcule a partir de lastActivityByAgent
+  // AGENTS derive : status calcule a partir de DEUX signaux
+  //  1. activatedAgents (source de verite : toggle "Activer cet agent" du web)
+  //  2. lastActivityByAgent (recent WS message → agent en train d'agir)
+  // Un agent est 'active' s'il est ACTIVE dans le web OU s'il a recemment agi.
+  // agent1 reste 'active' par defaut (pas de toggle pour lui dans le web).
+  // agent4 est toujours 'locked'.
   const AGENTS: AgentInfo[] = AGENTS_BASE.map(base => {
-    const isLocked = base.id === 'agent4'
+    if (base.id === 'agent4') {
+      return { ...base, status: 'locked', unread: 0 }
+    }
+    if (base.id === 'agent1') {
+      // Agent 1 = compagnon personnel, toujours actif
+      return { ...base, status: 'active', unread: 0 }
+    }
+    const explicitlyActivated = activatedAgents[base.id] === true
     const last = lastActivityByAgent[base.id]
-    const isActive = !isLocked && last !== undefined && (Date.now() - last) < ACTIVITY_TTL_MS
+    const recentlyActive = last !== undefined && (Date.now() - last) < ACTIVITY_TTL_MS
+    const isActive = explicitlyActivated || recentlyActive
     return {
       ...base,
-      status: isLocked ? 'locked' : (isActive ? 'active' : 'inactive'),
+      status: isActive ? 'active' : 'inactive',
       unread: 0,
     }
   })
@@ -384,6 +402,19 @@ function App() {
     return () => clearInterval(interval)
   }, [token])
 
+  // Fetch initial agents activation state au boot/login (snapshot)
+  useEffect(() => {
+    if (!token) return
+    fetch(`${API_BASE}/api/desktop/agents-activation`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data?.active) setActivatedAgents(data.active)
+      })
+      .catch(() => { /* silent */ })
+  }, [token])
+
   // OpenClaw Gateway health check — polls every 45s
   useEffect(() => {
     if (!token) return
@@ -444,6 +475,23 @@ function App() {
           // affiche par addStep('info', 'Connecte au serveur Sylea.AI') dans
           // ws.onopen avec status='done').
           if (data.type === 'connected') {
+            return
+          }
+
+          // Etat d'activation des agents change cote web (toggle "Activer
+          // cet agent"). Met a jour la sidebar + bascule selectedAgent vers
+          // le 1er agent active si l'utilisateur n'a pas pinned manuellement.
+          if (data.type === 'agents_activation' && data.active) {
+            const next = data.active as Record<string, boolean>
+            setActivatedAgents(next)
+            // Auto-select le 1er agent active (priorite agent3 > agent2)
+            if (!agentPinned) {
+              if (next.agent3) setSelectedAgentRaw('agent3')
+              else if (next.agent2) setSelectedAgentRaw('agent2')
+            }
+            // Step info pour traçabilité
+            const activeList = Object.entries(next).filter(([, v]) => v).map(([k]) => k.replace('agent', 'Sylea '))
+            addStep('info', `Etat agents synchronise depuis le web : ${activeList.join(', ') || 'aucun'} actif`, 'done')
             return
           }
 

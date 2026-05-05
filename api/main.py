@@ -199,6 +199,55 @@ async def desktop_status(user_id: str | None = Depends(get_optional_user)):
     return {"connected": ws_manager.is_connected(user_id) if user_id else False}
 
 
+# ── Etat d'activation des agents (web -> desktop sync) ──────────────────────
+#
+# Les agents sont activables/desactivables depuis l'onglet "Mes agents Syléa"
+# du frontend web. Cet etat est stocke en localStorage cote web. Pour que
+# l'app desktop reflete ce qui se passe sur le web, on ajoute un endpoint
+# leger qui :
+#   - recoit un POST avec {agent2: bool, agent3: bool} depuis le web,
+#   - stocke en memoire (par user_id),
+#   - broadcast l'etat a toutes les sessions desktop de cet user via WS.
+#
+# Pas de persistance en DB necessaire : c'est juste un canal de sync entre
+# 2 sessions du meme user. Au reload de l'app desktop, elle peut faire un
+# GET sur le meme endpoint pour recuperer le snapshot courant.
+_agents_activation_state: dict[str, dict[str, bool]] = {}
+
+
+@app.post("/api/desktop/agents-activation", tags=["desktop"])
+async def set_agents_activation(
+    payload: dict,
+    user_id: str = Depends(get_optional_user),
+):
+    """Le web frontend declare quels agents sont actuellement actives.
+    L'etat est broadcaste a toutes les sessions desktop du meme user via WS."""
+    if not user_id:
+        return {"ok": False, "error": "auth_required"}
+    from api.websocket import ws_manager
+    # Sanitise : ne garde que agent2/agent3 boolean
+    next_state = {
+        "agent2": bool(payload.get("agent2", False)),
+        "agent3": bool(payload.get("agent3", False)),
+    }
+    _agents_activation_state[user_id] = next_state
+    # Broadcast aux sessions desktop
+    await ws_manager.send_to_user(user_id, {
+        "type": "agents_activation",
+        "active": next_state,
+    })
+    return {"ok": True, "active": next_state}
+
+
+@app.get("/api/desktop/agents-activation", tags=["desktop"])
+async def get_agents_activation(user_id: str = Depends(get_optional_user)):
+    """Retourne l'etat d'activation des agents pour l'user courant.
+    Utilise par l'app desktop au boot pour afficher le bon etat initial."""
+    if not user_id:
+        return {"active": {"agent2": False, "agent3": False}}
+    return {"active": _agents_activation_state.get(user_id, {"agent2": False, "agent3": False})}
+
+
 @app.get("/", include_in_schema=False)
 def root():
     """Redirect info vers le frontend."""
