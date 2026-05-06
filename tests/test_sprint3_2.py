@@ -240,10 +240,12 @@ class TestGenerateAnkiCardsService:
         assert "" not in questions
         assert "x" not in questions  # answer 900 chars
 
-    def test_caps_at_25_cards(self):
+    def test_caps_at_50_cards(self):
+        """Cap eleve a 50 (sprint 3.5) pour les longs cours denses,
+        mais le prompt LLM pousse au minimum a 5 cartes qualitatives."""
         from api.fiche_generator import generate_anki_cards
         import json
-        cards = [{"q": f"q{i}", "a": f"a{i}"} for i in range(40)]
+        cards = [{"q": f"q{i}", "a": f"a{i}"} for i in range(80)]
         fake_block = MagicMock()
         fake_block.text = json.dumps({"cards": cards})
         fake_resp = MagicMock()
@@ -255,7 +257,27 @@ class TestGenerateAnkiCardsService:
             transcript="x", matiere="autre",
             _client_factory=lambda: fake_client,
         )
-        assert len(result["cards"]) == 25
+        assert len(result["cards"]) == 50
+
+    def test_accepts_low_count_when_content_sparse(self):
+        """Si le LLM ne retourne que 3-4 cartes (transcript pauvre),
+        on les accepte telles quelles — pas de remplissage artificiel."""
+        from api.fiche_generator import generate_anki_cards
+        import json
+        cards = [{"q": f"q{i}", "a": f"answer {i}"} for i in range(3)]
+        fake_block = MagicMock()
+        fake_block.text = json.dumps({"cards": cards})
+        fake_resp = MagicMock()
+        fake_resp.content = [fake_block]
+        fake_client = MagicMock()
+        fake_client.messages.create.return_value = fake_resp
+
+        result = generate_anki_cards(
+            transcript="x", matiere="autre",
+            _client_factory=lambda: fake_client,
+        )
+        # Pas de minimum impose cote backend — le LLM est seul juge.
+        assert len(result["cards"]) == 3
 
     def test_handles_invalid_json_gracefully(self):
         from api.fiche_generator import generate_anki_cards

@@ -466,29 +466,40 @@ def generate_anki_cards(
     system_prompt = f"""Tu es un assistant pedagogique qui prepare des FLASHCARDS ANKI
 pour un etudiant de prepa/universite a partir d'un transcript de cours.
 
-OBJECTIF : MAXIMISER la couverture du contenu. Vise 15-25 cartes en moyenne,
-JAMAIS moins de 8 si le transcript fait plus de 5 minutes. L'etudiant doit
-pouvoir reviser TOUT le cours rien qu'avec ses cartes.
+PRIORITE ABSOLUE : QUALITE > QUANTITE.
+Mieux vaut 5 cartes excellentes que 30 cartes mediocres.
+
+VOLUME : entre 5 et 50 cartes selon le contenu reel du transcript.
+Adapte au contenu :
+  - Transcript pauvre (digressions, repetitions, peu de notions) : 5-10
+  - Transcript dense (cours magistral structure)                 : 15-30
+  - Transcript tres dense / long > 1h sur sujet technique       : 30-50
+NE remplis JAMAIS pour atteindre un quota — si le contenu n'est pas la,
+ne fabrique pas.
 
 CHASSE AUX CARTES (par matiere {matiere}) : {matiere_hint}.
 
-Pour chaque concept du transcript, demande-toi :
-  1. Y a-t-il une definition a memoriser ?         -> 1 carte
-  2. Une formule, une loi, une date, un nom ?       -> 1 carte
-  3. Une cause/consequence, un mecanisme ?          -> 1 carte
-  4. Une distinction entre deux notions ?           -> 1 carte par notion
-  5. Un exemple cle ou un contre-exemple ?          -> 1 carte
-  6. Une etape d'un raisonnement / demonstration ?  -> 1 carte par etape importante
+Pour chaque concept REELLEMENT couvert dans le transcript :
+  1. Definition formelle a memoriser ?              -> 1 carte
+  2. Formule, loi, date, nom propre ?               -> 1 carte
+  3. Cause/consequence, mecanisme explique ?        -> 1 carte
+  4. Distinction explicite entre 2 notions ?        -> 1 carte par notion
+  5. Exemple cle / contre-exemple instructif ?      -> 1 carte
+  6. Etape d'un raisonnement / demonstration ?      -> 1 carte par etape
 
-REGLES :
-- CHAQUE CARTE INDEPENDANTE et REVISABLE seule (pas de "comme vu plus haut").
-- Question PRECISE et FERMEE (a une bonne reponse, pas ouverte).
-- Reponse CONCISE (1-3 phrases max), substantielle (pas juste un mot).
-- Conserve LaTeX en $...$ pour les formules.
-- N'INVENTE rien : si le transcript ne couvre pas, ignore.
-- Pas de carte tautologique ni de "definition de X = X".
-- Si le transcript est court (<3 min), 5-10 cartes suffisent.
-- Sinon vise 15+ cartes obligatoirement (max 25).
+CRITERES QUALITE (chaque carte doit cocher tout) :
+  [✓] Question PRECISE et FERMEE (UNE bonne reponse, pas ouverte).
+  [✓] Reponse CONCISE (1-3 phrases), substantielle (pas un seul mot).
+  [✓] INDEPENDANTE et revisable seule (pas de "comme vu plus haut").
+  [✓] Information NON-triviale et NON-tautologique
+      (pas de "Qu'est-ce qu'une definition ?" ou "X = X").
+  [✓] Information PRESENTE litteralement dans le transcript
+      (n'invente pas, ne devine pas).
+
+CONSERVATION :
+- LaTeX en $...$ pour les formules / equations.
+- Citations en italiques avec auteur entre parentheses si applicable.
+- Termes techniques exactement comme prononces dans le cours.
 
 FORMAT DE SORTIE STRICT :
 Tu reponds UNIQUEMENT avec un objet JSON valide, sans texte avant/apres :
@@ -535,7 +546,10 @@ Tu reponds UNIQUEMENT avec un objet JSON valide, sans texte avant/apres :
             a = (c.get("a") or "").strip()
             if q and a and len(q) <= 200 and len(a) <= 800:
                 clean.append({"q": q, "a": a})
-        return {"cards": clean[:25], "used_llm": True, "error": None}
+        # Cap a 50 cartes (max accepte par le prompt). Garde le minimum
+        # implicite a 5 — si le LLM en retourne moins, on accepte tel quel
+        # (cours pauvre en contenu).
+        return {"cards": clean[:50], "used_llm": True, "error": None}
     except Exception as e:
         return {"cards": [], "used_llm": False, "error": f"llm_failed: {e}"}
 
