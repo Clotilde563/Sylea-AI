@@ -510,34 +510,60 @@ export function EcouteActive({
       setFiche(ficheResult)
       setPhase('fiche')
 
-      // 2) Auto-save bout-en-bout dans <session_dir>/ (structure unifiee).
-      //    Tous les fichiers post-processing du cours vivent ensemble
-      //    a cote des audio/ : fiche.md, fiche.html, deck.apkg,
-      //    transcript.txt. Plus de dossiers eparpilles.
-      ;(async () => {
-        const saved: SavedFiles = {}
-        // Determine sessionDir : on l'a depuis stopResult, mais en fallback
-        // on reconstruit depuis Documents.
-        const docs = await invoke<string>('get_documents_dir').catch(() => '')
-        const sessionDir = stopResult?.session_dir
-                        || `${docs}/Sylea/cours/${sessionId}`
+      // 2) Auto-save bout-en-bout dans <session_dir>/ — PARALLELE.
+      //    Bug fix sprint 3.3 : avant les 4 saves etaient sequentiels dans
+      //    une IIFE. Si l'un bloquait (ex: render-html backend lent),
+      //    les suivants attendaient et savedFiles restait incomplet
+      //    (-> "en cours" indefiniment dans la UI).
+      //    Maintenant : 4 fetchWithTimeout en Promise.allSettled, chacun
+      //    update savedFiles INCREMENTAL via setState callback.
 
-        // a) transcript.txt brut (concatene des chunks 'done')
+      // helper fetch avec timeout (defaut 60s)
+      const fetchWithTimeout = async (url: string, init: RequestInit, timeoutMs = 60_000) => {
+        const ctrl = new AbortController()
+        const tid = setTimeout(() => ctrl.abort(), timeoutMs)
         try {
-          const fullTranscript = await new Promise<string>((resolve) => {
-            setTranscript(curr => {
-              resolve(curr.filter(c => c.status === 'done').map(c => c.text).join('\n\n'))
-              return curr
-            })
-          })
+          return await fetch(url, { ...init, signal: ctrl.signal })
+        } finally {
+          clearTimeout(tid)
+        }
+      }
+
+      // sessionDir vient toujours de Rust (stopResult). Pas de fallback
+      // construit, sinon on rate le naming humain.
+      const sessionDir = stopResult?.session_dir
+      if (!sessionDir) {
+        console.error('[autosave] session_dir manquant')
+        return
+      }
+
+      // Calcul transcript concatene une seule fois (utilise par anki + transcript)
+      const fullTranscript = await new Promise<string>((resolve) => {
+        setTranscript(curr => {
+          resolve(curr.filter(c => c.status === 'done').map(c => c.text).join(' '))
+          return curr
+        })
+      })
+      const fullTranscriptForFile = await new Promise<string>((resolve) => {
+        setTranscript(curr => {
+          resolve(curr.filter(c => c.status === 'done').map(c => c.text).join('\n\n'))
+          return curr
+        })
+      })
+
+      // ─── 4 saves en parallele, chacun update savedFiles independamment ───
+
+      const saveTranscript = async () => {
+        try {
           await invoke('write_file', {
             path: `${sessionDir}/transcript.txt`,
-            content: fullTranscript,
+            content: fullTranscriptForFile,
           })
-          saved.transcript_path = `${sessionDir}/transcript.txt`
+          setSavedFiles(p => ({ ...p, transcript_path: `${sessionDir}/transcript.txt` }))
         } catch (e) { console.error('[autosave-transcript]', e) }
+      }
 
-        // b) fiche.md
+      const saveMarkdown = async () => {
         try {
           const header = (
             `<!-- Genere par Sylea Agent — ${new Date().toLocaleString('fr-FR')} -->\n` +
@@ -550,12 +576,13 @@ export function EcouteActive({
             path: `${sessionDir}/fiche.md`,
             content: header + ficheResult.fiche_markdown,
           })
-          saved.markdown_path = `${sessionDir}/fiche.md`
+          setSavedFiles(p => ({ ...p, markdown_path: `${sessionDir}/fiche.md` }))
         } catch (e) { console.error('[autosave-md]', e) }
+      }
 
-        // c) fiche.html — rendu propre pour double-clic Word/navigateur
+      const saveHtml = async () => {
         try {
-          const r = await fetch(`${apiBase}/api/lecture/render-html`, {
+          const r = await fetchWithTimeout(`${apiBase}/api/lecture/render-html`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
             body: JSON.stringify({
@@ -566,47 +593,43 @@ export function EcouteActive({
               session_id: sessionId,
               matiere_auto_detected: ficheResult.matiere_auto_detected,
             }),
-          })
+          }, 30_000)
           const data = await r.json()
           if (data?.ok && data.html) {
             await invoke('write_file', {
               path: `${sessionDir}/fiche.html`,
               content: data.html,
             })
-            saved.html_path = `${sessionDir}/fiche.html`
+            setSavedFiles(p => ({ ...p, html_path: `${sessionDir}/fiche.html` }))
+          } else {
+            console.error('[autosave-html] backend returned no html', data)
           }
         } catch (e) { console.error('[autosave-html]', e) }
+      }
 
-        // d) deck.apkg — cards generees par LLM directement depuis le transcript
-        //    (bien plus pertinent que extract_cards heuristique sur la fiche).
+      const saveAnki = async () => {
         try {
-          const fullText = await new Promise<string>((resolve) => {
-            setTranscript(curr => {
-              resolve(curr.filter(c => c.status === 'done').map(c => c.text).join(' '))
-              return curr
-            })
-          })
-          // 1ere tentative : LLM cards depuis le transcript
+          // 1ere tentative : LLM cards depuis le transcript brut
           let ankiCards: Array<{ q: string; a: string }> | null = null
           try {
-            const cardsRes = await fetch(`${apiBase}/api/lecture/generate-cards`, {
+            const cardsRes = await fetchWithTimeout(`${apiBase}/api/lecture/generate-cards`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
               body: JSON.stringify({
-                transcript: fullText,
+                transcript: fullTranscript,
                 matiere: ficheResult.matiere,
                 titre: titre || 'Cours',
                 formation: formation === 'Autre' ? null : formation,
               }),
-            })
+            }, 90_000)  // generation LLM peut etre lente
             const cd = await cardsRes.json()
             if (cd?.ok && Array.isArray(cd.cards) && cd.cards.length > 0) {
               ankiCards = cd.cards
             }
           } catch (e) { console.error('[generate-cards]', e) }
 
-          // POST export-anki (avec cards LLM si dispo, sinon fallback fiche markdown)
-          const r2 = await fetch(`${apiBase}/api/lecture/export-anki`, {
+          // POST export-anki (cards LLM si dispo, sinon fallback markdown)
+          const r2 = await fetchWithTimeout(`${apiBase}/api/lecture/export-anki`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
             body: JSON.stringify(ankiCards ? {
@@ -618,18 +641,24 @@ export function EcouteActive({
               titre: titre || 'Cours',
               matiere: ficheResult.matiere,
             }),
-          })
+          }, 30_000)
           const ankiData = await r2.json()
           if (ankiData?.ok) {
             const ankiPath = `${sessionDir}/deck.apkg`
             await invoke('write_file_binary', { path: ankiPath, dataBase64: ankiData.data_base64 })
-            saved.anki_path = ankiPath
-            saved.anki_card_count = ankiData.card_count
+            setSavedFiles(p => ({ ...p, anki_path: ankiPath, anki_card_count: ankiData.card_count }))
           }
         } catch (e) { console.error('[autosave-anki]', e) }
+      }
 
-        setSavedFiles(saved)
-      })()
+      // Lance les 4 en parallele. Promise.allSettled = aucun ne bloque les
+      // autres en cas d'echec.
+      Promise.allSettled([
+        saveTranscript(),
+        saveMarkdown(),
+        saveHtml(),
+        saveAnki(),
+      ])
     } catch (e: any) {
       setFicheError(typeof e === 'string' ? e : (e?.message || 'Erreur reseau'))
       setPhase('stopped')

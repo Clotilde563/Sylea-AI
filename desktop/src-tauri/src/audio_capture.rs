@@ -127,6 +127,67 @@ fn disable_wake_lock() {}
 
 // ── Helpers WAV writer ──────────────────────────────────────────────────────
 
+// ── Naming des dossiers de session ──────────────────────────────────────────
+//
+// Sprint 3.3 : remplace les session_id opaques (`lec_1778077640375_yadn8`)
+// par un nom de dossier humainement lisible :
+//
+//   <YYYY-MM-DD>_<matiere>_<titre-slug>_<short-id>
+//   ex : 2026-05-06_droit_rupture-du-cdi_yadn8
+//
+// Le `short-id` est extrait du session_id (les 5 derniers chars apres le
+// dernier `_`) — il garantit l'unicite si l'etudiant fait 2 cours de droit
+// le meme jour avec le meme titre. Le session_id technique reste celui
+// passe par le frontend, et est stocke dans meta.json + utilise pour les
+// events WS.
+
+fn slugify(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_dash = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            for cc in c.to_lowercase() {
+                out.push(cc);
+            }
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    // Trim trailing dash
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "x".to_string()
+    } else {
+        out
+    }
+}
+
+fn make_folder_name(
+    matiere: Option<&str>,
+    titre: Option<&str>,
+    session_id: &str,
+) -> String {
+    use chrono::Local;
+    let date_str = Local::now().format("%Y-%m-%d").to_string();
+    let mat = slugify(matiere.filter(|s| !s.is_empty()).unwrap_or("autre"));
+    let tit_raw = titre.map(|s| s.trim()).filter(|s| !s.is_empty()).unwrap_or("cours");
+    let mut tit = slugify(tit_raw);
+    // Cap titre slug a 40 chars pour eviter les chemins Windows trop longs.
+    if tit.len() > 40 {
+        tit.truncate(40);
+        // Evite de couper au milieu d'un mot (pas de tiret final)
+        while tit.ends_with('-') {
+            tit.pop();
+        }
+    }
+    let short = session_id.rsplit('_').next().unwrap_or("xxxxx");
+    format!("{}_{}_{}_{}", date_str, mat, tit, short)
+}
+
 fn wav_spec() -> WavSpec {
     WavSpec {
         channels: 1,
@@ -200,9 +261,12 @@ pub fn start_recording(
         }
     }
 
-    // Cree le dossier de session : ~/Documents/Sylea/cours/<session_id>/
+    // Cree le dossier de session avec un nom humain :
+    // ~/Documents/Sylea/cours/<YYYY-MM-DD>_<matiere>_<titre-slug>_<short-id>/
+    // Le session_id technique est conserve dans meta.json + WS events.
     let docs = dirs::document_dir().ok_or("Impossible de trouver Documents")?;
-    let session_dir = docs.join("Sylea").join("cours").join(&session_id);
+    let folder_name = make_folder_name(matiere.as_deref(), titre.as_deref(), &session_id);
+    let session_dir = docs.join("Sylea").join("cours").join(&folder_name);
     fs::create_dir_all(&session_dir).map_err(|e| format!("mkdir: {}", e))?;
 
     let meta = RecordingMeta {
@@ -720,5 +784,73 @@ mod tests {
         // Sanity : 8h × ~1MB/min = ~480MB. Ordre de grandeur correct.
         let estimated_mb = (MAX_CHUNKS as u64 * (CHUNK_SAMPLES as u64 * 2)) / 1_000_000;
         assert!(estimated_mb > 800 && estimated_mb < 1100, "estimated_mb = {}", estimated_mb);
+    }
+
+    // ── slugify ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn slugify_basic() {
+        assert_eq!(slugify("Droit"), "droit");
+        assert_eq!(slugify("Rupture du CDI"), "rupture-du-cdi");
+        assert_eq!(slugify("Mecanique : cinematique"), "mecanique-cinematique");
+    }
+
+    #[test]
+    fn slugify_handles_punctuation_and_spaces() {
+        assert_eq!(slugify("  hello   world!! "), "hello-world");
+        assert_eq!(slugify("---"), "x");          // empty fallback
+        assert_eq!(slugify(""), "x");             // empty fallback
+        assert_eq!(slugify("a/b\\c"), "a-b-c");
+    }
+
+    #[test]
+    fn slugify_collapses_consecutive_dashes() {
+        assert_eq!(slugify("a    b"), "a-b");
+        assert_eq!(slugify("a__b"), "a-b");
+        assert_eq!(slugify("a---b"), "a-b");
+    }
+
+    // ── make_folder_name ──────────────────────────────────────────────────
+
+    #[test]
+    fn folder_name_default_when_no_meta() {
+        let name = make_folder_name(None, None, "lec_xxxx_yadn8");
+        // Format : YYYY-MM-DD_autre_cours_yadn8
+        assert!(name.contains("_autre_"), "{}", name);
+        assert!(name.contains("_cours_"), "{}", name);
+        assert!(name.ends_with("_yadn8"), "{}", name);
+        // Date a debut
+        assert_eq!(name.chars().nth(4), Some('-'));
+        assert_eq!(name.chars().nth(7), Some('-'));
+    }
+
+    #[test]
+    fn folder_name_uses_matiere_and_titre_slug() {
+        let name = make_folder_name(
+            Some("Droit"),
+            Some("Rupture du CDI"),
+            "lec_1778077640375_yadn8",
+        );
+        // YYYY-MM-DD_droit_rupture-du-cdi_yadn8
+        assert!(name.contains("_droit_rupture-du-cdi_"), "got: {}", name);
+        assert!(name.ends_with("_yadn8"), "got: {}", name);
+    }
+
+    #[test]
+    fn folder_name_truncates_long_titre() {
+        let long_title = "a".repeat(100);
+        let name = make_folder_name(Some("maths"), Some(&long_title), "lec_x_abc12");
+        // La partie titre doit etre cap a 40 chars
+        let parts: Vec<&str> = name.split('_').collect();
+        // parts: [date, matiere, titre, shortid]
+        assert_eq!(parts.len(), 4, "expected 4 parts: {:?}", parts);
+        assert!(parts[2].len() <= 40, "titre too long: {}", parts[2]);
+    }
+
+    #[test]
+    fn folder_name_short_id_extracted_from_session() {
+        // Le short id est ce qui est apres le dernier `_` du session_id
+        let name = make_folder_name(Some("philo"), Some("kant"), "lec_abc_def_12345");
+        assert!(name.ends_with("_12345"), "got: {}", name);
     }
 }
