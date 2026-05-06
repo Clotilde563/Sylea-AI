@@ -466,15 +466,29 @@ def generate_anki_cards(
     system_prompt = f"""Tu es un assistant pedagogique qui prepare des FLASHCARDS ANKI
 pour un etudiant de prepa/universite a partir d'un transcript de cours.
 
-REGLES STRICTES :
-- Cible 8-20 cartes (pas plus). Privilegie la qualite a la quantite.
-- Type de contenu pour cette matiere ({matiere}) : {matiere_hint}.
-- CHAQUE CARTE doit etre INDEPENDANTE et REVISABLE seule (pas de "comme vu plus haut").
+OBJECTIF : MAXIMISER la couverture du contenu. Vise 15-25 cartes en moyenne,
+JAMAIS moins de 8 si le transcript fait plus de 5 minutes. L'etudiant doit
+pouvoir reviser TOUT le cours rien qu'avec ses cartes.
+
+CHASSE AUX CARTES (par matiere {matiere}) : {matiere_hint}.
+
+Pour chaque concept du transcript, demande-toi :
+  1. Y a-t-il une definition a memoriser ?         -> 1 carte
+  2. Une formule, une loi, une date, un nom ?       -> 1 carte
+  3. Une cause/consequence, un mecanisme ?          -> 1 carte
+  4. Une distinction entre deux notions ?           -> 1 carte par notion
+  5. Un exemple cle ou un contre-exemple ?          -> 1 carte
+  6. Une etape d'un raisonnement / demonstration ?  -> 1 carte par etape importante
+
+REGLES :
+- CHAQUE CARTE INDEPENDANTE et REVISABLE seule (pas de "comme vu plus haut").
 - Question PRECISE et FERMEE (a une bonne reponse, pas ouverte).
-- Reponse CONCISE (1-3 phrases max). Pas de blabla.
-- Conserve le LaTeX en $...$ pour les formules.
-- N'INVENTE rien : si le transcript ne couvre pas, n'ecris pas la carte.
-- Ne cree PAS de carte si la question/reponse est triviale ou tautologique.
+- Reponse CONCISE (1-3 phrases max), substantielle (pas juste un mot).
+- Conserve LaTeX en $...$ pour les formules.
+- N'INVENTE rien : si le transcript ne couvre pas, ignore.
+- Pas de carte tautologique ni de "definition de X = X".
+- Si le transcript est court (<3 min), 5-10 cartes suffisent.
+- Sinon vise 15+ cartes obligatoirement (max 25).
 
 FORMAT DE SORTIE STRICT :
 Tu reponds UNIQUEMENT avec un objet JSON valide, sans texte avant/apres :

@@ -444,8 +444,9 @@ export function EcouteActive({
         return
       }
 
-      // 6) Genere et auto-save la fiche.
-      await generateAndSaveFiche(fullText, r.session_id)
+      // 6) Genere et auto-save la fiche. On passe r.session_dir
+      //    explicitement pour eviter le stale closure sur stopResult.
+      await generateAndSaveFiche(fullText, r.session_id, r.session_dir)
     } catch (e: any) {
       setError(typeof e === 'string' ? e : (e?.message || 'Erreur arret'))
       setPhase('stopped')
@@ -472,6 +473,11 @@ export function EcouteActive({
   const generateAndSaveFiche = useCallback(async (
     fullText: string,
     sessionId: string,
+    // BUG FIX Sprint 3.4 : passe session_dir explicitement.
+    // Avant on lisait stopResult?.session_dir via le state, mais la closure
+    // de cette useCallback capturait stopResult au moment de sa creation
+    // (souvent null) -> early-return -> rien sauvegarde -> "en cours" infini.
+    sessionDir: string,
   ) => {
     if (!authToken) {
       setFicheError('Token manquant')
@@ -529,9 +535,8 @@ export function EcouteActive({
         }
       }
 
-      // sessionDir vient toujours de Rust (stopResult). Pas de fallback
-      // construit, sinon on rate le naming humain.
-      const sessionDir = stopResult?.session_dir
+      // sessionDir passe explicitement en parametre (cf. signature)
+      // pour eviter le bug de stale closure sur stopResult.
       if (!sessionDir) {
         console.error('[autosave] session_dir manquant')
         return
