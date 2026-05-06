@@ -302,9 +302,15 @@ async def transcribe_chunk(
     try:
         content = await audio.read()
         tmp_path.write_bytes(content)
+        print(f"[lecture] transcribe chunk {chunk_index} (session={session_id}, "
+              f"size={len(content)} bytes, lang={language})")
 
         from api.transcription import get_transcriber
         result = get_transcriber().transcribe(tmp_path, language=language)
+
+        text_preview = result["text"][:100] + ("..." if len(result["text"]) > 100 else "")
+        print(f"[lecture]   -> ok, lang={result['language']}, "
+              f"duration={result['duration_s']:.1f}s, text=\"{text_preview}\"")
 
         return {
             "ok": True,
@@ -317,6 +323,9 @@ async def transcribe_chunk(
             "segments": result["segments"],
         }
     except Exception as e:
+        import traceback
+        print(f"[lecture]   -> ERROR for chunk {chunk_index}: {e}")
+        traceback.print_exc()
         return {"ok": False, "error": f"transcription_failed: {e}"}
     finally:
         # Cleanup : on garde pas l'audio sur le serveur (privacy)

@@ -138,6 +138,11 @@ export function EcouteActive({
   const [transcript, setTranscript] = useState<TranscriptChunk[]>([])
   const lastUploadedChunkRef = useRef<number>(-1)
   const transcriptEndRef = useRef<HTMLDivElement>(null)
+  // Queue d'upload SERIELLE — toutes les promesses sont chainees pour
+  // eviter la race condition ou plusieurs IIFEs uploadent en parallele
+  // pendant que le model Whisper se telecharge (1er run = ~5 min lent).
+  // stopRecording attend cette queue avant de generer la fiche.
+  const uploadQueueRef = useRef<Promise<void>>(Promise.resolve())
 
   // Sprint 3 — Fiche generee (markdown + meta)
   const [fiche, setFiche] = useState<FicheResult | null>(null)
@@ -274,15 +279,21 @@ export function EcouteActive({
     const nextToUpload = lastUploadedChunkRef.current + 1
     if (nextToUpload >= completedChunks) return
 
-    // Upload sequentiel pour eviter de surcharger faster-whisper.
+    // Reserve immediatement les indexes pour eviter qu'un autre tick du
+    // useEffect re-uploade les memes chunks (cf. ref mise a jour avant await).
+    lastUploadedChunkRef.current = completedChunks - 1
+
+    // Chaine les uploads sur la queue serielle. Toutes les promesses sont
+    // executees dans l'ordre, jamais en parallele -> evite la race ou
+    // plusieurs IIFEs uploadent simultanement pendant que le model
+    // Whisper se telecharge (1er run = ~5 min sur connexion lente).
     const sessDir = status.session_dir
     const sessId = status.session_id
-    ;(async () => {
+    uploadQueueRef.current = uploadQueueRef.current.then(async () => {
       for (let i = nextToUpload; i < completedChunks; i++) {
-        lastUploadedChunkRef.current = i
         await uploadChunk(i, sessDir, sessId)
       }
-    })()
+    })
   }, [status.chunks_count, status.session_dir, status.session_id, authToken, phase, uploadChunk])
 
   // Auto-scroll du transcript vers le bas a chaque nouveau chunk
@@ -343,6 +354,7 @@ export function EcouteActive({
     setTranscript([])
     lastUploadedChunkRef.current = -1
     autoStopTriggeredRef.current = false
+    uploadQueueRef.current = Promise.resolve()
     const session_id = `lec_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
     try {
       await invoke('start_recording', {
@@ -372,21 +384,28 @@ export function EcouteActive({
       }>('stop_recording')
       setStopResult(r)
 
-      // 2) Drain les chunks pas encore uploades (bug fix #1).
-      //    Le polling effect s'est arrete (phase !== 'recording'), donc on
-      //    fait l'upload en sequentiel ici, avec une progress bar.
+      // 2) Le polling effect a peut-etre encore des chunks en cours
+      //    d'upload (queue serielle). On ATTEND qu'elle finisse avant
+      //    de chainer les chunks restants — sinon on saute des chunks
+      //    et le transcript final est incomplet.
+      await uploadQueueRef.current
+
+      // 3) Drain les chunks pas encore uploades (bug fix #1).
+      //    Apres l'await ci-dessus, lastUploadedChunkRef est a jour.
       const startFrom = lastUploadedChunkRef.current + 1
       const totalRemaining = Math.max(0, r.chunks_count - startFrom)
       setDrainProgress({ done: 0, total: totalRemaining })
+      lastUploadedChunkRef.current = r.chunks_count - 1
       for (let i = startFrom; i < r.chunks_count; i++) {
         await uploadChunk(i, r.session_dir, r.session_id)
-        lastUploadedChunkRef.current = i
         setDrainProgress(p => ({ done: p.done + 1, total: p.total }))
       }
 
-      // 3) Si transcript vide (aucun chunk transcrit), saute la fiche.
-      // ⚠ NB : on lit le transcript via setTranscript callback pour avoir
-      //   la valeur la plus a jour (les uploads ci-dessus ont ete async).
+      // 4) Au cas ou un upload de la queue est encore en cours (race
+      //    rarissime entre await uploadQueue et ce code), wait again.
+      await uploadQueueRef.current
+
+      // 5) Concatene le transcript final.
       const fullText = await new Promise<string>((resolve) => {
         setTranscript(curr => {
           const txt = curr.filter(c => c.status === 'done').map(c => c.text).join(' ').trim()
@@ -397,11 +416,30 @@ export function EcouteActive({
 
       if (!fullText) {
         setPhase('stopped')
-        setFicheError('Aucun chunk n\'a pu etre transcrit (backend faster-whisper indisponible ?). L\'audio reste sauvegarde sur le disque.')
+        // Diagnostic plus precis : compte les chunks par statut pour comprendre
+        // (avant on disait juste "backend indisponible").
+        const counts = await new Promise<{ uploading: number; error: number; done: number; total: number }>((resolve) => {
+          setTranscript(curr => {
+            resolve({
+              uploading: curr.filter(c => c.status === 'uploading').length,
+              error:     curr.filter(c => c.status === 'error').length,
+              done:      curr.filter(c => c.status === 'done').length,
+              total:     curr.length,
+            })
+            return curr
+          })
+        })
+        if (counts.error > 0 && counts.done === 0) {
+          setFicheError(`Tous les chunks (${counts.error}/${counts.total}) ont echoue a la transcription. Verifie les logs backend (faster-whisper). L'audio reste sauvegarde sur le disque.`)
+        } else if (counts.uploading > 0) {
+          setFicheError(`${counts.uploading} chunks toujours en cours d'upload. Reessaie dans quelques secondes ou redemarre le backend.`)
+        } else {
+          setFicheError('Aucun chunk transcrit (transcript vide). L\'audio reste sauvegarde sur le disque.')
+        }
         return
       }
 
-      // 4) Genere et auto-save la fiche.
+      // 6) Genere et auto-save la fiche.
       await generateAndSaveFiche(fullText, r.session_id)
     } catch (e: any) {
       setError(typeof e === 'string' ? e : (e?.message || 'Erreur arret'))
