@@ -222,7 +222,16 @@ export function EcouteActive({
         headers: { 'Authorization': `Bearer ${authToken}` },
         body: formData,
       })
-      const data = await r.json()
+      // Reporting d'erreur ameliore : on capture le code HTTP et le body raw
+      // si la reponse n'est pas du JSON (ex: 404 HTML quand backend down).
+      let data: any = null
+      let rawBody = ''
+      try {
+        rawBody = await r.text()
+        data = JSON.parse(rawBody)
+      } catch {
+        // Pas du JSON — laisse data = null, on utilise rawBody
+      }
       if (data?.ok) {
         setTranscript(prev => prev.map(c => c.index === idx ? {
           index: idx,
@@ -233,13 +242,25 @@ export function EcouteActive({
           segments: data.segments,
         } : c))
       } else {
+        // Trace humaine selon ce qu'on a recu :
+        //  - HTTP 200 + JSON sans `ok` -> { ok: false, error: "auth_required" } typiquement
+        //  - HTTP 4xx/5xx + JSON       -> data.detail (FastAPI validation) ou data.error
+        //  - HTTP 4xx/5xx + HTML       -> rawBody.slice(0, 80) avec status code
+        let msg: string
+        if (data?.error)         msg = data.error
+        else if (data?.detail)   msg = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail).slice(0, 120)
+        else if (!r.ok)          msg = `HTTP ${r.status} ${r.statusText} — ${rawBody.slice(0, 80) || '(reponse vide)'}`
+        else                     msg = `Reponse inattendue: ${rawBody.slice(0, 80) || '(vide)'}`
+        console.error('[transcribe-chunk]', { status: r.status, data, rawBody })
         setTranscript(prev => prev.map(c => c.index === idx
-          ? { ...c, status: 'error', text: `[Erreur : ${data?.error || 'inconnue'}]` }
+          ? { ...c, status: 'error', text: `[Erreur : ${msg}]` }
           : c))
       }
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[transcribe-chunk] exception', e)
       setTranscript(prev => prev.map(c => c.index === idx
-        ? { ...c, status: 'error', text: `[Erreur upload : ${e}]` }
+        ? { ...c, status: 'error', text: `[Erreur reseau : ${msg}]` }
         : c))
     }
   }, [authToken, apiBase, matiere])
