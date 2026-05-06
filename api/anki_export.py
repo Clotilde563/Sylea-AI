@@ -40,6 +40,47 @@ def _stable_int_id(seed: str) -> int:
     return int.from_bytes(h[:4], "big") & 0x7FFFFFFF
 
 
+def _is_garbage_card(term: str, definition: str) -> bool:
+    """Filtre les paires Q/R semantiquement faibles ou nuisibles."""
+    t = term.strip().lower()
+    d = definition.strip()
+    d_lower = d.lower()
+    # Definition trop courte ou trop longue
+    if len(d) < 12 or len(d) > 600:
+        return True
+    if len(t) > 80 or len(t) < 3:
+        return True
+    # Definition est un autre terme en gras seul, sans contenu
+    # (ex: "**Faute du salarie** : Fait non-fautif du salarie")
+    # -> on detecte que la definition est essentiellement un AUTRE terme.
+    if re.fullmatch(r"\*\*[^*]+\*\*\.?", d):
+        return True
+    if re.fullmatch(r"[A-Za-z][^.!?]{2,80}", d) and "**" not in d:
+        # Definition = phrase courte sans verbe -> probablement un titre
+        # detache, pas une vraie definition.
+        verbs = ["est ", "sont ", "designe", "désigne", "consiste",
+                 "represente", "représente", "permet", "fait", "concerne",
+                 "correspond", "renvoie", "definit", "définit", "vise",
+                 "regroupe", "implique"]
+        if not any(v in d_lower for v in verbs):
+            return True
+    # Anti-paradoxe : terme et definition partagent l'inverse semantique
+    # (ex: "faute" / "non-fautif", "fini" / "infini").
+    # Heuristique simple : meme racine + prefixe negatif dans la def.
+    neg_prefixes = ["non-", "non ", "in", "il", "im", "ir", "an", "a"]
+    for p in neg_prefixes:
+        if p in d_lower and t.split()[0] in d_lower:
+            # Le terme apparait dans la def avec un prefixe de negation
+            if re.search(rf"\b{p}{re.escape(t.split()[0])}", d_lower):
+                return True
+    # Skip "Theoreme 1" / "Loi 3" — labels SEULS avec numero (deja en blockquote
+    # ailleurs). On accepte "Loi" tout court parce que c'est un terme valide
+    # avec une vraie definition derriere.
+    if re.match(r"^(theoreme|loi|proposition|lemme|corollaire)\s+\d+$", t):
+        return True
+    return False
+
+
 def extract_cards(fiche_markdown: str) -> list[tuple[str, str]]:
     """Renvoie une liste de (question, reponse) extraites de la fiche.
 
@@ -47,6 +88,10 @@ def extract_cards(fiche_markdown: str) -> list[tuple[str, str]]:
       1. Definitions formatees "**terme** : ..." ou "- **terme** — ..."
       2. Blockquotes contenant > **Theoreme N** ou > Loi/Citation
       3. Items dans la section "A retenir" / "To remember"
+
+    Filtre les cards "antinomiques" : si la definition est juste un
+    terme en gras seul (ex: "**Faute du salarie** : **Fait non-fautif
+    du salarie**" -> rien d'utile), on rejette.
 
     Si aucune card n'est extraite, fallback : 1 card par section H2.
     """
@@ -60,12 +105,10 @@ def extract_cards(fiche_markdown: str) -> list[tuple[str, str]]:
     )
     for m in def_pattern.finditer(fiche_markdown):
         term, definition = m.group(1).strip(), m.group(2).strip()
-        # filtre les bullets sans definition reelle (ex: "**Loi 1** Enonce")
-        if len(definition) < 6 or len(term) > 80:
+        if _is_garbage_card(term, definition):
             continue
-        # Skip les "Theoreme N" / "Loi N" sans contenu (ils sont en blockquote)
-        if re.match(r"^(theoreme|loi|proposition|lemme|corollaire)\s*\d*$",
-                    term.lower()):
+        # Skip labels "Theoreme N" / "Loi N" — leur enonce vit en blockquote
+        if re.match(r"^(theoreme|loi|proposition|lemme|corollaire)\s+\d+$", term.lower()):
             continue
         cards.append((f"Definition de **{term}**", definition))
 
@@ -123,22 +166,49 @@ def extract_cards(fiche_markdown: str) -> list[tuple[str, str]]:
     return unique
 
 
+def build_apkg_from_cards(
+    titre: str,
+    matiere: str,
+    cards: list[tuple[str, str]],
+    output_path: str | Path,
+) -> dict:
+    """Construit un .apkg Anki a partir d'une liste pre-formee de
+    (question, reponse). Utilise quand les cards sont generees par LLM
+    (route privilegiee). Le .apkg garde model_id stable + deck_id
+    deterministe pour permettre re-imports incrementaux.
+    """
+    if not cards:
+        return {"ok": False, "error": "no_cards_extracted", "card_count": 0}
+    return _build_apkg_internal(titre=titre, matiere=matiere, cards=cards,
+                                output_path=output_path)
+
+
 def build_apkg(
     titre: str,
     matiere: str,
     fiche_markdown: str,
     output_path: str | Path,
 ) -> dict:
-    """Construit un .apkg Anki contenant les cards extraites de la fiche.
+    """Construit un .apkg Anki contenant les cards extraites de la fiche
+    par heuristique regex. Fallback quand le LLM est indisponible.
 
     Returns {ok, card_count, output_path, model_id, deck_id}.
     """
-    # Import paresseux : genanki est lourd au load.
-    import genanki
-
     cards = extract_cards(fiche_markdown)
     if not cards:
         return {"ok": False, "error": "no_cards_extracted", "card_count": 0}
+    return _build_apkg_internal(titre=titre, matiere=matiere, cards=cards,
+                                output_path=output_path)
+
+
+def _build_apkg_internal(
+    titre: str,
+    matiere: str,
+    cards: list[tuple[str, str]],
+    output_path: str | Path,
+) -> dict:
+    # Import paresseux : genanki est lourd au load.
+    import genanki
 
     # Model basique Q/R
     model = genanki.Model(

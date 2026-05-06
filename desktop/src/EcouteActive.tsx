@@ -105,8 +105,10 @@ interface FicheResult {
 }
 
 interface SavedFiles {
-  markdown_path?: string
-  anki_path?: string
+  transcript_path?: string  // <session>/transcript.txt
+  markdown_path?: string    // <session>/fiche.md
+  html_path?: string        // <session>/fiche.html (rendu Word/browser-friendly)
+  anki_path?: string        // <session>/deck.apkg
   anki_card_count?: number
 }
 
@@ -204,7 +206,10 @@ export function EcouteActive({
     sessionDir: string,
     sessionId: string,
   ) => {
-    const chunkPath = `${sessionDir}/chunk_${String(idx).padStart(4, '0')}.wav`
+    // Sprint 3.2 : les chunks vivent maintenant dans <session_dir>/audio/
+    // pour separer audio brut des fichiers post-processing (fiche.md/html,
+    // deck.apkg, transcript.txt) qui sont ecrits a la racine de la session.
+    const chunkPath = `${sessionDir}/audio/chunk_${String(idx).padStart(4, '0')}.wav`
     setTranscript(prev => {
       // Evite doublon si l'effect et stopRecording courent sur le meme idx
       if (prev.some(c => c.index === idx)) return prev
@@ -505,17 +510,35 @@ export function EcouteActive({
       setFiche(ficheResult)
       setPhase('fiche')
 
-      // 2) Auto-save Markdown (ne bloque pas la phase fiche, on save en
-      //    arriere-plan et on update savedFiles au fur et a mesure).
+      // 2) Auto-save bout-en-bout dans <session_dir>/ (structure unifiee).
+      //    Tous les fichiers post-processing du cours vivent ensemble
+      //    a cote des audio/ : fiche.md, fiche.html, deck.apkg,
+      //    transcript.txt. Plus de dossiers eparpilles.
       ;(async () => {
         const saved: SavedFiles = {}
+        // Determine sessionDir : on l'a depuis stopResult, mais en fallback
+        // on reconstruit depuis Documents.
+        const docs = await invoke<string>('get_documents_dir').catch(() => '')
+        const sessionDir = stopResult?.session_dir
+                        || `${docs}/Sylea/cours/${sessionId}`
+
+        // a) transcript.txt brut (concatene des chunks 'done')
         try {
-          const docs = await invoke<string>('get_documents_dir')
-          const safeTitle = (titre || 'cours').replace(/[^\w\s-]/g, '_').slice(0, 60).replace(/\s+/g, '_')
-          const ts = new Date().toISOString().slice(0, 10).replace(/-/g, '')
-          const mdName = `${ficheResult.matiere}_${safeTitle}_${ts}.md`
-          const mdPath = `${docs}/Sylea/fiches/${mdName}`
-          await invoke('create_directory', { path: `${docs}/Sylea/fiches` })
+          const fullTranscript = await new Promise<string>((resolve) => {
+            setTranscript(curr => {
+              resolve(curr.filter(c => c.status === 'done').map(c => c.text).join('\n\n'))
+              return curr
+            })
+          })
+          await invoke('write_file', {
+            path: `${sessionDir}/transcript.txt`,
+            content: fullTranscript,
+          })
+          saved.transcript_path = `${sessionDir}/transcript.txt`
+        } catch (e) { console.error('[autosave-transcript]', e) }
+
+        // b) fiche.md
+        try {
           const header = (
             `<!-- Genere par Sylea Agent — ${new Date().toLocaleString('fr-FR')} -->\n` +
             `<!-- Session : ${sessionId} -->\n` +
@@ -523,18 +546,74 @@ export function EcouteActive({
             (formation !== 'Autre' ? `<!-- Formation : ${formation} -->\n` : '') +
             `\n`
           )
-          await invoke('write_file', { path: mdPath, content: header + ficheResult.fiche_markdown })
-          saved.markdown_path = mdPath
-        } catch (e) {
-          console.error('[autosave-md]', e)
-        }
+          await invoke('write_file', {
+            path: `${sessionDir}/fiche.md`,
+            content: header + ficheResult.fiche_markdown,
+          })
+          saved.markdown_path = `${sessionDir}/fiche.md`
+        } catch (e) { console.error('[autosave-md]', e) }
 
-        // 3) Auto-save Anki (best-effort : si echec, on garde le markdown)
+        // c) fiche.html — rendu propre pour double-clic Word/navigateur
         try {
-          const r2 = await fetch(`${apiBase}/api/lecture/export-anki`, {
+          const r = await fetch(`${apiBase}/api/lecture/render-html`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
             body: JSON.stringify({
+              fiche_markdown: ficheResult.fiche_markdown,
+              titre: titre || 'Cours',
+              matiere: ficheResult.matiere,
+              formation: formation === 'Autre' ? null : formation,
+              session_id: sessionId,
+              matiere_auto_detected: ficheResult.matiere_auto_detected,
+            }),
+          })
+          const data = await r.json()
+          if (data?.ok && data.html) {
+            await invoke('write_file', {
+              path: `${sessionDir}/fiche.html`,
+              content: data.html,
+            })
+            saved.html_path = `${sessionDir}/fiche.html`
+          }
+        } catch (e) { console.error('[autosave-html]', e) }
+
+        // d) deck.apkg — cards generees par LLM directement depuis le transcript
+        //    (bien plus pertinent que extract_cards heuristique sur la fiche).
+        try {
+          const fullText = await new Promise<string>((resolve) => {
+            setTranscript(curr => {
+              resolve(curr.filter(c => c.status === 'done').map(c => c.text).join(' '))
+              return curr
+            })
+          })
+          // 1ere tentative : LLM cards depuis le transcript
+          let ankiCards: Array<{ q: string; a: string }> | null = null
+          try {
+            const cardsRes = await fetch(`${apiBase}/api/lecture/generate-cards`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+              body: JSON.stringify({
+                transcript: fullText,
+                matiere: ficheResult.matiere,
+                titre: titre || 'Cours',
+                formation: formation === 'Autre' ? null : formation,
+              }),
+            })
+            const cd = await cardsRes.json()
+            if (cd?.ok && Array.isArray(cd.cards) && cd.cards.length > 0) {
+              ankiCards = cd.cards
+            }
+          } catch (e) { console.error('[generate-cards]', e) }
+
+          // POST export-anki (avec cards LLM si dispo, sinon fallback fiche markdown)
+          const r2 = await fetch(`${apiBase}/api/lecture/export-anki`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+            body: JSON.stringify(ankiCards ? {
+              cards: ankiCards,
+              titre: titre || 'Cours',
+              matiere: ficheResult.matiere,
+            } : {
               fiche_markdown: ficheResult.fiche_markdown,
               titre: titre || 'Cours',
               matiere: ficheResult.matiere,
@@ -542,16 +621,12 @@ export function EcouteActive({
           })
           const ankiData = await r2.json()
           if (ankiData?.ok) {
-            const docs = await invoke<string>('get_documents_dir')
-            const ankiPath = `${docs}/Sylea/anki/${ankiData.filename}`
-            await invoke('create_directory', { path: `${docs}/Sylea/anki` })
+            const ankiPath = `${sessionDir}/deck.apkg`
             await invoke('write_file_binary', { path: ankiPath, dataBase64: ankiData.data_base64 })
             saved.anki_path = ankiPath
             saved.anki_card_count = ankiData.card_count
           }
-        } catch (e) {
-          console.error('[autosave-anki]', e)
-        }
+        } catch (e) { console.error('[autosave-anki]', e) }
 
         setSavedFiles(saved)
       })()
@@ -1234,14 +1309,12 @@ export function EcouteActive({
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
           Auto-sauvegarde
         </div>
+        {/* Tous les fichiers vivent dans le meme dossier session */}
+        <SavedRow label="Transcript" path={savedFiles.transcript_path} extra="(.txt brut)" />
+        <SavedRow label="Fiche MD"   path={savedFiles.markdown_path}    extra="(markdown)" />
+        <SavedRow label="Fiche HTML" path={savedFiles.html_path}        extra="(double-clic = rendu propre)" highlight />
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: SY.text }}>
-          <span style={{ color: SY.cyan, minWidth: 70 }}>Markdown :</span>
-          {savedFiles.markdown_path
-            ? <span style={{ color: SY.textMute, fontSize: 10, wordBreak: 'break-all' }}>{savedFiles.markdown_path}</span>
-            : <span style={{ color: SY.warn }}>… en cours</span>}
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: SY.text }}>
-          <span style={{ color: SY.cyan, minWidth: 70 }}>Anki :</span>
+          <span style={{ color: SY.cyan, minWidth: 90 }}>Anki deck :</span>
           {savedFiles.anki_path ? (
             <span style={{ color: SY.textMute, fontSize: 10, wordBreak: 'break-all' }}>
               {savedFiles.anki_path}
@@ -1304,6 +1377,34 @@ function Section({ label, children }: { label: string; children: React.ReactNode
         <span style={{ color: SY.cyan }}>▸</span> {label}
       </div>
       {children}
+    </div>
+  )
+}
+
+function SavedRow({
+  label, path, extra, highlight,
+}: { label: string; path?: string; extra?: string; highlight?: boolean }) {
+  const SY = {
+    cyan: '#00c8ff', text: '#e6f0ff', textMute: 'rgba(230,240,255,0.60)',
+    warn: '#f59e0b', cyanSoft: '#7ad9ff',
+  }
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: SY.text }}>
+      <span style={{ color: highlight ? SY.cyanSoft : SY.cyan, minWidth: 90 }}>
+        {label} :
+      </span>
+      {path ? (
+        <span style={{ fontSize: 10, wordBreak: 'break-all' }}>
+          <span style={{ color: SY.textMute }}>{path}</span>
+          {extra && (
+            <span style={{ color: highlight ? SY.cyanSoft : SY.textMute, marginLeft: 6, fontStyle: 'italic' }}>
+              {extra}
+            </span>
+          )}
+        </span>
+      ) : (
+        <span style={{ color: SY.warn, fontSize: 10 }}>… en cours</span>
+      )}
     </div>
   )
 }

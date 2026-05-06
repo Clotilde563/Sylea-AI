@@ -137,7 +137,13 @@ fn wav_spec() -> WavSpec {
 }
 
 fn open_chunk_writer(session_dir: &PathBuf, chunk_idx: u32) -> Result<WavWriter<BufWriter<std::fs::File>>, String> {
-    let chunk_path = session_dir.join(format!("chunk_{:04}.wav", chunk_idx));
+    // Les chunks vont dans <session_dir>/audio/ (sous-dossier dedie),
+    // pour separer les WAV bruts des fichiers post-processing (fiche.md,
+    // fiche.html, deck.apkg, transcript.txt) qui resteront a la racine
+    // de la session.
+    let audio_dir = session_dir.join("audio");
+    let _ = std::fs::create_dir_all(&audio_dir);
+    let chunk_path = audio_dir.join(format!("chunk_{:04}.wav", chunk_idx));
     WavWriter::create(&chunk_path, wav_spec()).map_err(|e| format!("WAV create error: {}", e))
 }
 
@@ -417,7 +423,7 @@ pub fn start_recording(
             } else {
                 // Chunk vide / quasi-vide : on supprime le fichier pour ne pas
                 // laisser un WAV de 0 octets qui ferait crash whisper.
-                let path = session_dir_clone.join(format!("chunk_{:04}.wav", chunk_idx));
+                let path = session_dir_clone.join("audio").join(format!("chunk_{:04}.wav", chunk_idx));
                 let _ = std::fs::remove_file(path);
             }
         }

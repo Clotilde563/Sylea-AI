@@ -367,20 +367,88 @@ async def generate_fiche_endpoint(
         return {"ok": False, "error": f"fiche_generation_failed: {e}"}
 
 
+@app.post("/api/lecture/generate-cards", tags=["lecture"])
+async def generate_cards_endpoint(
+    payload: dict,
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Genere des cartes Anki Q/A directement depuis le transcript brut
+    via LLM. Bien plus pertinent que l'extraction heuristique de la fiche
+    markdown (qui produit parfois des paires antinomiques).
+
+    Body : {transcript, matiere, titre?, formation?}
+    Retourne : {ok, cards: [{q, a}], used_llm: bool}
+    """
+    if not user_id:
+        return {"ok": False, "error": "auth_required"}
+    transcript = (payload.get("transcript") or "").strip()
+    if not transcript:
+        return {"ok": False, "error": "transcript_required"}
+    if len(transcript) > 200_000:
+        return {"ok": False, "error": "transcript_too_long"}
+
+    from api.fiche_generator import generate_anki_cards
+    try:
+        result = generate_anki_cards(
+            transcript=transcript,
+            matiere=payload.get("matiere") or "autre",
+            titre=payload.get("titre"),
+            formation=payload.get("formation"),
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        return {"ok": False, "error": f"cards_generation_failed: {e}"}
+
+
+@app.post("/api/lecture/render-html", tags=["lecture"])
+async def render_fiche_html_endpoint(
+    payload: dict,
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Rendu HTML standalone d'une fiche markdown (CSS embarque + KaTeX
+    via CDN). Le desktop ecrit le resultat dans <session_dir>/fiche.html
+    pour un double-clic propre dans Word/navigateur."""
+    if not user_id:
+        return {"ok": False, "error": "auth_required"}
+    fiche_md = (payload.get("fiche_markdown") or "").strip()
+    if not fiche_md:
+        return {"ok": False, "error": "fiche_markdown_required"}
+    try:
+        from api.fiche_render import render_fiche_html
+        html = render_fiche_html(
+            fiche_markdown=fiche_md,
+            titre=payload.get("titre") or "Cours",
+            matiere=payload.get("matiere") or "autre",
+            formation=payload.get("formation"),
+            session_id=payload.get("session_id"),
+            matiere_auto_detected=bool(payload.get("matiere_auto_detected")),
+        )
+        return {"ok": True, "html": html}
+    except Exception as e:
+        return {"ok": False, "error": f"html_render_failed: {e}"}
+
+
 @app.post("/api/lecture/export-anki", tags=["lecture"])
 async def export_anki_endpoint(
     payload: dict,
     user_id: str | None = Depends(get_optional_user),
 ):
-    """Exporte la fiche en deck Anki .apkg. Retourne le chemin du fichier
-    cree dans le dossier user (que le desktop pourra recuperer/copier)."""
+    """Exporte un deck Anki .apkg.
+
+    Body :
+      - cards: [{q, a}]      → si fourni, utilise directement (LLM-generated)
+      - sinon fiche_markdown → fallback heuristique extract_cards()
+      - titre, matiere       → meta du deck
+    Retourne le .apkg en base64 (le desktop l'ecrit via write_file_binary)."""
     if not user_id:
         return {"ok": False, "error": "auth_required"}
-    fiche_md = (payload.get("fiche_markdown") or "").strip()
     titre = (payload.get("titre") or "Cours").strip()
     matiere = (payload.get("matiere") or "autre").strip()
-    if not fiche_md:
-        return {"ok": False, "error": "fiche_markdown_required"}
+    explicit_cards = payload.get("cards")
+    fiche_md = (payload.get("fiche_markdown") or "").strip()
+
+    if not explicit_cards and not fiche_md:
+        return {"ok": False, "error": "cards_or_fiche_required"}
 
     # Sauve le .apkg dans tempdir/sylea-anki/<user_id>/
     import tempfile
@@ -389,10 +457,23 @@ async def export_anki_endpoint(
     safe_title = re.sub(r"[^\w\s-]", "_", titre)[:80].strip().replace(" ", "_") or "cours"
     out_path = tmp_dir / f"{matiere}_{safe_title}.apkg"
 
-    from api.anki_export import build_apkg
+    from api.anki_export import build_apkg, build_apkg_from_cards
     try:
-        result = build_apkg(titre=titre, matiere=matiere,
-                            fiche_markdown=fiche_md, output_path=out_path)
+        if explicit_cards and isinstance(explicit_cards, list):
+            # Sanitise + dedup
+            tuples = [
+                (str(c.get("q") or "").strip(), str(c.get("a") or "").strip())
+                for c in explicit_cards
+                if isinstance(c, dict) and c.get("q") and c.get("a")
+            ]
+            if not tuples:
+                return {"ok": False, "error": "no_valid_cards"}
+            result = build_apkg_from_cards(
+                titre=titre, matiere=matiere, cards=tuples, output_path=out_path,
+            )
+        else:
+            result = build_apkg(titre=titre, matiere=matiere,
+                                fiche_markdown=fiche_md, output_path=out_path)
         if not result.get("ok"):
             return {"ok": False, "error": result.get("error", "apkg_build_failed")}
         # Retourne en base64 pour que le desktop puisse l'ecrire localement

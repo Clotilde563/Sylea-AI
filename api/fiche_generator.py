@@ -431,6 +431,101 @@ def _call_llm(
         return _fallback_fiche(user_message, titre), True
 
 
+def generate_anki_cards(
+    transcript: str,
+    matiere: str,
+    titre: str | None = None,
+    formation: str | None = None,
+    *,
+    _client_factory=None,  # injection pour tests
+) -> dict:
+    """Genere une liste de cartes Anki Q/R a partir du transcript brut.
+
+    Approche LLM : on demande directement a Claude de produire des paires
+    {q, a} pertinentes pour la revision (definitions, dates, formules,
+    causes/consequences, etc.) — bien plus pertinent que l'extraction
+    heuristique sur la fiche markdown qui peut produire des paires
+    antinomiques.
+
+    Returns {cards: [{q, a}], used_llm: bool, error: str | None}
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key and _client_factory is None:
+        return {"cards": [], "used_llm": False, "error": "no_api_key"}
+
+    matiere_hint = {
+        "maths":    "definitions, theoremes (enonce + condition), formules, contre-exemples",
+        "physique": "lois (formule LaTeX + unites SI), ordres de grandeur, definitions, conditions",
+        "philo":    "definitions des concepts, theses des auteurs (auteur -> these), citations attribuees, distinctions cle",
+        "ses":      "definitions, mecanismes (cause -> effet), auteurs/theories, chiffres marquants",
+        "anglais":  "vocabulary (word -> meaning), grammar rules, key quotes, idioms",
+        "histoire": "dates + evenements, acteurs (personnage -> role), causes, consequences",
+        "autre":    "definitions, faits cles, dates, noms propres, enchainements logiques",
+    }.get(matiere, "definitions, faits cles, dates, noms propres")
+
+    system_prompt = f"""Tu es un assistant pedagogique qui prepare des FLASHCARDS ANKI
+pour un etudiant de prepa/universite a partir d'un transcript de cours.
+
+REGLES STRICTES :
+- Cible 8-20 cartes (pas plus). Privilegie la qualite a la quantite.
+- Type de contenu pour cette matiere ({matiere}) : {matiere_hint}.
+- CHAQUE CARTE doit etre INDEPENDANTE et REVISABLE seule (pas de "comme vu plus haut").
+- Question PRECISE et FERMEE (a une bonne reponse, pas ouverte).
+- Reponse CONCISE (1-3 phrases max). Pas de blabla.
+- Conserve le LaTeX en $...$ pour les formules.
+- N'INVENTE rien : si le transcript ne couvre pas, n'ecris pas la carte.
+- Ne cree PAS de carte si la question/reponse est triviale ou tautologique.
+
+FORMAT DE SORTIE STRICT :
+Tu reponds UNIQUEMENT avec un objet JSON valide, sans texte avant/apres :
+{{"cards": [{{"q": "...", "a": "..."}}, ...]}}
+"""
+
+    user_message = (
+        f"Voici le transcript brut d'un cours{' de ' + matiere if matiere != 'autre' else ''}"
+        f"{' (formation: ' + formation + ')' if formation else ''}"
+        f"{', titre: ' + repr(titre) if titre else ''}.\n"
+        f"Genere les flashcards Anki au format JSON.\n\n"
+        f"--- TRANSCRIPT ---\n{transcript}\n--- FIN TRANSCRIPT ---"
+    )
+
+    try:
+        if _client_factory is not None:
+            client = _client_factory()
+        else:
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+        model = os.environ.get("FICHE_MODEL", "claude-haiku-4-5")
+        msg = client.messages.create(
+            model=model,
+            max_tokens=2500,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        parts = []
+        for block in msg.content:
+            text = getattr(block, "text", None)
+            if text:
+                parts.append(text)
+        raw = "".join(parts).strip()
+        # Strip markdown code fence si Claude le wrappe
+        raw = re.sub(r"^```(?:json)?\s*\n", "", raw)
+        raw = re.sub(r"\n```\s*$", "", raw)
+        import json
+        parsed = json.loads(raw)
+        cards = parsed.get("cards", [])
+        # Sanitise
+        clean: list[dict] = []
+        for c in cards:
+            q = (c.get("q") or "").strip()
+            a = (c.get("a") or "").strip()
+            if q and a and len(q) <= 200 and len(a) <= 800:
+                clean.append({"q": q, "a": a})
+        return {"cards": clean[:25], "used_llm": True, "error": None}
+    except Exception as e:
+        return {"cards": [], "used_llm": False, "error": f"llm_failed: {e}"}
+
+
 def _fallback_fiche(user_message: str, titre: str) -> str:
     """Fallback deterministe sans LLM : extrait juste les premiers paragraphes
     du transcript et formate avec une structure minimale. Permet de garder

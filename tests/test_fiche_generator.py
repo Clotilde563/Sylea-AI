@@ -376,8 +376,10 @@ class TestExportAnkiEndpoint:
         assert r.json()["error"] == "auth_required"
 
     def test_requires_markdown(self, auth_client):
+        # Sprint 3.2 : on accepte aussi un payload {cards: [...]}, donc
+        # l'erreur a ete renommee.
         r = auth_client.post("/api/lecture/export-anki", json={})
-        assert r.json()["error"] == "fiche_markdown_required"
+        assert r.json()["error"] == "cards_or_fiche_required"
 
     def test_returns_base64_apkg_with_cards(self, auth_client):
         import base64
