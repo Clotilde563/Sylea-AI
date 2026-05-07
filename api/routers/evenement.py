@@ -410,8 +410,15 @@ async def confirmer_evenement(
     decision_repo.sauvegarder(decision)
 
     # Mettre a jour le profil
-    profil.probabilite_actuelle = prob_apres
+    # FIX C1 : sync probabilite_actuelle sur la progression temps (cf.
+    # dilemme.py meme commentaire).
     profil.temps_gagne_jours = temps_gagne_apres
+    if profil.temps_initial_jours > 0:
+        profil.probabilite_actuelle = round(
+            (temps_gagne_apres / profil.temps_initial_jours) * 100, 2
+        )
+    else:
+        profil.probabilite_actuelle = prob_apres
     profil.marquer_modification()
     profil_repo.sauvegarder(profil)
 

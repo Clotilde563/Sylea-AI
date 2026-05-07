@@ -198,12 +198,21 @@ async def supprimer_decision(
     # 3. Supprimer la décision
     decision_repo.supprimer_par_id(decision_id, profil.id)
 
-    # 4. Reverser l'impact probabilité de la décision supprimée
-    new_prob = max(PROB_MIN, min(PROB_MAX, profil.probabilite_actuelle - impact_net))
-    profil.probabilite_actuelle = new_prob
-
-    # 5. Reverser l'impact temps de la décision supprimée
+    # 4. Reverser l'impact temps de la décision supprimée
     profil.temps_gagne_jours = max(0, profil.temps_gagne_jours - impact_temps)
+
+    # 5. Resync probabilite_actuelle sur progression (FIX C1).
+    # Avant : on faisait probabilite_actuelle -= impact_net (IA delta), ce qui
+    # divergait progressivement de progression (temps_gagne/temps_initial).
+    # Apres : on calcule directement depuis temps_gagne_jours, garantissant
+    # que les 2 valeurs restent toujours alignees.
+    if profil.temps_initial_jours > 0:
+        new_prob = round(
+            (profil.temps_gagne_jours / profil.temps_initial_jours) * 100, 2
+        )
+    else:
+        new_prob = max(PROB_MIN, min(PROB_MAX, profil.probabilite_actuelle - impact_net))
+    profil.probabilite_actuelle = new_prob
 
     profil.marquer_modification()
     profil_repo.sauvegarder(profil)

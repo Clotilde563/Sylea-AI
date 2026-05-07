@@ -366,8 +366,19 @@ async def choisir_option(
     decision_repo.sauvegarder(decision)
 
     # Mettre à jour le profil
-    profil.probabilite_actuelle = prob_apres
+    # FIX C1 (Sprint QA pre-commercialisation) : on aligne probabilite_actuelle
+    # sur la progression reelle (temps_gagne / temps_initial * 100) pour eviter
+    # 2 chiffres divergents pour la meme notion (probabilite IA atténuée vs
+    # progression temps). Le frontend affiche deja progression dans la card
+    # PROGRESSION ; cette ligne garantit que profil.probabilite_actuelle
+    # (encore lu dans certaines pages) reste coherent.
     profil.temps_gagne_jours = temps_gagne_apres
+    if profil.temps_initial_jours > 0:
+        profil.probabilite_actuelle = round(
+            (temps_gagne_apres / profil.temps_initial_jours) * 100, 2
+        )
+    else:
+        profil.probabilite_actuelle = prob_apres
     profil.marquer_modification()
     profil_repo.sauvegarder(profil)
 

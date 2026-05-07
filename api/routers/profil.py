@@ -535,6 +535,140 @@ async def supprimer_profil(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Backfill snapshots historiques (FIX C3 — Sprint QA pre-commercialisation)
+#
+# Probleme : les decisions creees avant la migration `temps_gagne_avant/apres`
+# (ou avec un bug de population) ont leurs snapshots a 0. Du coup la page
+# Historique affiche "0j -> 0j" partout et le Chart 2 etait plat avant le
+# fix Sprint 4. On reconstruit les snapshots chronologiquement en simulant
+# l'enchainement des impacts.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/backfill-snapshots")
+async def backfill_decision_snapshots(
+    repo: ProfilRepository = Depends(get_profil_repo),
+    decision_repo: DecisionRepository = Depends(get_decision_repo),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Ré-écrit chronologiquement temps_gagne_avant et temps_gagne_apres pour
+    toutes les décisions de l'utilisateur.
+
+    Algo :
+      1. Charge toutes les decisions, ordre chronologique ascendant.
+      2. Pour chaque decision i :
+         - tg_avant = somme des impact_jours des decisions [0..i-1]
+         - tg_apres = tg_avant + impact_jours_i
+         (impact_jours est dérivé de impact_net + temps_initial si nécessaire)
+      3. Sauvegarde chaque decision.
+      4. Recalcule profil.probabilite_actuelle = tg_total / temps_initial * 100
+         pour synchroniser (FIX C1).
+
+    Idempotent : appelable plusieurs fois sans degradation.
+    """
+    if not repo.existe(auth_user_id=user_id):
+        raise HTTPException(status_code=404, detail="Profil introuvable.")
+    profil = repo.charger(auth_user_id=user_id)
+    if profil is None:
+        raise HTTPException(status_code=404, detail="Profil introuvable.")
+
+    # Charge TOUTES les decisions (limit elevee pour eviter la pagination ici)
+    db = repo._db
+    rows = db.conn.execute(
+        "SELECT * FROM decisions WHERE user_id = ? ORDER BY cree_le ASC",
+        (profil.id,),
+    ).fetchall()
+
+    if not rows:
+        return {
+            "ok": True,
+            "decisions_traitees": 0,
+            "decisions_total": 0,
+            "decisions_corrigees": 0,
+            "temps_gagne_final": profil.temps_gagne_jours,
+            "probabilite_finale": profil.probabilite_actuelle,
+            "progression_pct": round(
+                (profil.temps_gagne_jours / (profil.temps_initial_jours or 1)) * 100, 2
+            ) if profil.temps_initial_jours else 0.0,
+        }
+
+    temps_initial = profil.temps_initial_jours or 0
+    target_total = float(profil.temps_gagne_jours or 0)
+    n = len(rows)
+
+    # Calcul des poids par decision : utilise probabilite_apres - probabilite_avant
+    # (delta IA en %) comme signal. Si tous les deltas sont 0, on distribue
+    # equitablement sur les decisions.
+    weights: list[float] = []
+    for r in rows:
+        try:
+            pa = float(r["probabilite_avant"] or 0)
+            pap = float(r["probabilite_apres"] or 0)
+            delta_prob = pap - pa
+        except (KeyError, TypeError):
+            delta_prob = 0.0
+        # Convert delta_prob (%) en jours equivalents ; on prend la valeur
+        # absolue car on ne veut pas de poids negatifs (le scaling final
+        # gere le signe via target_total).
+        w = abs(delta_prob) * temps_initial / 100.0 if temps_initial > 0 else 0.0
+        weights.append(w)
+
+    sum_w = sum(weights)
+    if sum_w > 0:
+        # Scale les weights pour que la somme = target_total
+        scale = target_total / sum_w
+        impacts = [w * scale for w in weights]
+    else:
+        # Distribution equitable
+        per = (target_total / n) if n > 0 else 0.0
+        impacts = [per] * n
+
+    cumul_temps = 0.0
+    n_corrigees = 0
+    for row, impact in zip(rows, impacts):
+        tg_avant_new = round(cumul_temps, 2)
+        tg_apres_new = round(cumul_temps + impact, 2)
+        # Clamp dans [0, temps_initial]
+        if temps_initial > 0:
+            tg_avant_new = max(0.0, min(float(temps_initial), tg_avant_new))
+            tg_apres_new = max(0.0, min(float(temps_initial), tg_apres_new))
+
+        # Detecter si la mise a jour est necessaire
+        old_avant = float(row["temps_gagne_avant"] or 0)
+        old_apres = float(row["temps_gagne_apres"] or 0)
+        if abs(old_avant - tg_avant_new) > 0.01 or abs(old_apres - tg_apres_new) > 0.01:
+            db.conn.execute(
+                "UPDATE decisions SET temps_gagne_avant = ?, temps_gagne_apres = ? "
+                "WHERE id = ?",
+                (tg_avant_new, tg_apres_new, row["id"]),
+            )
+            n_corrigees += 1
+
+        cumul_temps += impact
+
+    db.conn.commit()
+
+    # Re-sync profil sur la valeur target (qui est deja temps_gagne_jours)
+    if temps_initial > 0:
+        profil.probabilite_actuelle = round(
+            (target_total / temps_initial) * 100, 2
+        )
+    profil.marquer_modification()
+    repo.sauvegarder(profil)
+
+    return {
+        "ok": True,
+        "decisions_total": n,
+        "decisions_traitees": n,
+        "decisions_corrigees": n_corrigees,
+        "temps_gagne_final": round(target_total, 2),
+        "probabilite_finale": profil.probabilite_actuelle,
+        "progression_pct": round(
+            (target_total / temps_initial) * 100, 2
+        ) if temps_initial > 0 else 0.0,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Photo de profil
 # ─────────────────────────────────────────────────────────────────────────────
 
