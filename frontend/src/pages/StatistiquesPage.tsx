@@ -7,6 +7,11 @@ import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store/useStore'
 import { api } from '../api/client'
 import { buildTimeTicks, formatJours, gaugePercent, formatImpactJours } from '../utils/duration'
+import {
+  buildHistoricalPoints as buildHistoricalPointsUtil,
+  interpolateProb as interpolateProbUtil,
+  buildSOTimelines as buildSOTimelinesUtil,
+} from '../utils/statsBuild'
 import type { Decision, Profil, SousObjectif } from '../types'
 import { ConfirmDeleteModal } from '../components/ConfirmDeleteModal'
 import { useT } from '../i18n/LanguageContext'
@@ -1011,7 +1016,18 @@ function Chart2({
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /** Construit les points de la courbe réelle à partir du profil + décisions */
+// Wrapper local : delegue a la fonction pure extraite dans utils/statsBuild.ts
+// pour faciliter les tests unitaires. Le code historique reste ci-dessous
+// inutilise — supprime au prochain refactor.
 function buildHistoricalPoints(
+  profil: Profil | null,
+  decisions: Decision[],
+): { histPoints: { elapsedMs: number; prob: number }[]; totalElapsedMs: number } {
+  return buildHistoricalPointsUtil(profil as any, decisions as any)
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function _buildHistoricalPoints_LEGACY(
   profil: Profil | null,
   decisions: Decision[],
 ): { histPoints: { elapsedMs: number; prob: number }[]; totalElapsedMs: number } {
