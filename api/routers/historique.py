@@ -23,23 +23,50 @@ router = APIRouter(prefix="/api/historique", tags=["historique"])
 
 
 def _recompute_so_progressions(db, profil_id: str, exclude_decision_id: str | None = None) -> None:
-    """Recalcule toutes les SO progressions pour profil_id en reappliquant
-    chronologiquement les decisions restantes (apres exclusion de la decision
-    supprimee). Strategie simple : sum(impact_sous_objectif) par SO,
-    clamped 0..100. Approximation : ne reproduit PAS la redistribution
-    overflow exactement, mais garantit un etat coherent et idempotent.
+    """Recalcule toutes les SO progressions pour profil_id en respectant
+    l'invariant DASHBOARD critique :
+
+        sum(so.temps_estime / sum_te * temps_initial * (1 - so.prog/100))
+            == profil.temps_gagne_jours    (a un epsilon pres)
+
+    => sum(so.temps_estime * so.prog) / sum_te == temps_gagne / temps_initial × 100
+    => sum(so.temps_estime * so.prog) == temps_gagne × sum_te / temps_initial × 100
+
+    Strategy :
+      1. Cumul = sum(impact_sous_objectif) par SO (signal relatif des decisions)
+      2. Si cumul total == 0 : distribution equitable (chaque SO a la meme prog =
+         progression globale du profil).
+      3. Sinon : scale les progressions par "scale" tel que l'invariant Dashboard
+         tienne, en preservant la repartition relative des cumuls.
+      4. Clamp [0, 100].
+
+    Le banner "Desynchronisation detectee" du Dashboard ne devrait plus
+    apparaitre apres cet appel.
     """
-    # Charge toutes les SO
+    # Charger profil pour temps_initial et temps_gagne (sources de verite)
+    profil_row = db.conn.execute(
+        "SELECT temps_initial_jours, temps_gagne_jours FROM profil_utilisateur WHERE id = ?",
+        (profil_id,),
+    ).fetchone()
+    if not profil_row:
+        return
+    temps_initial = profil_row["temps_initial_jours"] or 0
+    temps_gagne = profil_row["temps_gagne_jours"] or 0
+
+    # Charger les SO avec leurs temps_estime
     so_rows = db.conn.execute(
-        "SELECT id FROM sous_objectifs WHERE user_id = ?",
+        "SELECT id, temps_estime FROM sous_objectifs WHERE user_id = ?",
         (profil_id,),
     ).fetchall()
     if not so_rows:
         return
-    so_ids = [r["id"] for r in so_rows]
+    so_te = {r["id"]: max(30, r["temps_estime"] or 180) for r in so_rows}
+    sum_te = sum(so_te.values())
+    if sum_te == 0 or temps_initial == 0:
+        return
 
     # Cumul des impacts par SO depuis les decisions restantes
-    cumul = {sid: 0.0 for sid in so_ids}
+    cumul = {sid: 0.0 for sid in so_te}
     query = (
         "SELECT sous_objectif_id, impact_sous_objectif FROM decisions "
         "WHERE user_id = ? AND sous_objectif_id IS NOT NULL "
@@ -56,12 +83,29 @@ def _recompute_so_progressions(db, profil_id: str, exclude_decision_id: str | No
         if sid in cumul:
             cumul[sid] += impact
 
-    # Re-set chaque SO a sum(impacts) clamped 0..100
-    for sid, total in cumul.items():
-        new_prog = max(0.0, min(100.0, total))
+    # Target pondere : sum(te × prog) doit egaler ce nombre pour respecter
+    # l'invariant Dashboard.
+    target_weighted = temps_gagne * sum_te / temps_initial * 100  # en % * jours
+
+    # Sum pondere actuel des cumul (te × cumul)
+    weighted_cumul = sum(so_te[sid] * cumul[sid] for sid in so_te)
+
+    if weighted_cumul > 0:
+        # Scale proportionnel
+        scale = target_weighted / weighted_cumul
+        progressions = {sid: max(0.0, min(100.0, cumul[sid] * scale)) for sid in so_te}
+        # Note : si certaines progressions sont clampees a 100, l'invariant ne
+        # tient plus exactement. On accepte cette degradation graceuse plutot
+        # que de redistribuer.
+    else:
+        # Distribution equitable : chaque SO a la meme progression = profil%
+        equal_prog = temps_gagne / temps_initial * 100
+        progressions = {sid: max(0.0, min(100.0, equal_prog)) for sid in so_te}
+
+    for sid, prog in progressions.items():
         db.conn.execute(
             "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
-            (new_prog, sid),
+            (prog, sid),
         )
     db.conn.commit()
 
