@@ -1063,6 +1063,41 @@ function buildHistoricalPoints(
     }
   }
 
+  // ── Sprint 4 : reconstruction historique quand les snapshots sont stale ──
+  //
+  // Bug observe : si toutes les decisions ont temps_gagne_avant/apres = 0
+  // dans la DB (donnees pre-feature ou non-renseignees), la courbe reste
+  // plate a 0% jusqu'au point final qui saute brutalement a la progression
+  // actuelle. Visuellement la courbe ne semble pas "avancer" avec le temps.
+  //
+  // Fix calque sur la logique de ChartSousObjectifs (lignes 444-465) :
+  //   - Si snapshots non-stale (matchent la progression actuelle)  → as-is
+  //   - Si snapshots > 0 mais mismatch -> scale proportionnel
+  //   - Si tous les snapshots = 0 mais progression actuelle > 0 -> on
+  //     distribue lineairement la progression sur les timestamps decisions.
+  // Cela rend Chart 2 coherent avec Chart 1 (sous-objectifs) qui interpole
+  // deja quand un SO n'a pas de snapshots dedies.
+  const lastSnapshotProb = points.length > 1 ? points[points.length - 1].prob : 0
+  const snapshotsStale = Math.abs(lastSnapshotProb - progressionActuelle) > 0.5
+  if (snapshotsStale) {
+    if (lastSnapshotProb > 0) {
+      // Scale tous les snapshots pour matcher la progression actuelle.
+      const scale = progressionActuelle / lastSnapshotProb
+      for (let i = 1; i < points.length; i++) {
+        points[i].prob = Math.max(0, Math.min(100, points[i].prob * scale))
+      }
+    } else if (progressionActuelle > 0 && points.length > 1) {
+      // Tous les snapshots = 0 mais progression actuelle > 0 -> distribue
+      // lineairement par index de decision (0→0%, dernier→progressionActuelle).
+      // La 1ere decision contribue legerement, la derniere arrive a la progression
+      // courante. Plus realiste qu'une ligne plate suivie d'un saut.
+      const n = points.length - 1  // exclut le point initial (0, 0)
+      for (let i = 1; i <= n; i++) {
+        points[i].prob = (i / n) * progressionActuelle
+      }
+    }
+  }
+
   // Point final : progression actuelle aujourd'hui
   points.push({ elapsedMs: totalMs, prob: progressionActuelle })
 
