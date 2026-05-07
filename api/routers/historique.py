@@ -22,6 +22,50 @@ from api.dependencies import get_profil_repo, get_decision_repo, get_optional_us
 router = APIRouter(prefix="/api/historique", tags=["historique"])
 
 
+def _recompute_so_progressions(db, profil_id: str, exclude_decision_id: str | None = None) -> None:
+    """Recalcule toutes les SO progressions pour profil_id en reappliquant
+    chronologiquement les decisions restantes (apres exclusion de la decision
+    supprimee). Strategie simple : sum(impact_sous_objectif) par SO,
+    clamped 0..100. Approximation : ne reproduit PAS la redistribution
+    overflow exactement, mais garantit un etat coherent et idempotent.
+    """
+    # Charge toutes les SO
+    so_rows = db.conn.execute(
+        "SELECT id FROM sous_objectifs WHERE user_id = ?",
+        (profil_id,),
+    ).fetchall()
+    if not so_rows:
+        return
+    so_ids = [r["id"] for r in so_rows]
+
+    # Cumul des impacts par SO depuis les decisions restantes
+    cumul = {sid: 0.0 for sid in so_ids}
+    query = (
+        "SELECT sous_objectif_id, impact_sous_objectif FROM decisions "
+        "WHERE user_id = ? AND sous_objectif_id IS NOT NULL "
+    )
+    params: list = [profil_id]
+    if exclude_decision_id:
+        query += "AND id != ? "
+        params.append(exclude_decision_id)
+    query += "ORDER BY cree_le ASC"
+    rows = db.conn.execute(query, tuple(params)).fetchall()
+    for r in rows:
+        sid = r["sous_objectif_id"]
+        impact = r["impact_sous_objectif"] or 0.0
+        if sid in cumul:
+            cumul[sid] += impact
+
+    # Re-set chaque SO a sum(impacts) clamped 0..100
+    for sid, total in cumul.items():
+        new_prog = max(0.0, min(100.0, total))
+        db.conn.execute(
+            "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
+            (new_prog, sid),
+        )
+    db.conn.commit()
+
+
 def _option_to_out(opt) -> OptionDilemmeOut:
     return OptionDilemmeOut(
         id=opt.id,
@@ -177,23 +221,40 @@ async def supprimer_decision(
     if decision.temps_gagne_apres is not None and decision.temps_gagne_avant is not None:
         impact_temps = decision.temps_gagne_apres - decision.temps_gagne_avant
 
-    # 2b. Reverser la progression du sous-objectif si la décision en impactait un
+    # 2b. Reverser la progression du sous-objectif.
+    #
+    # PROBLEME identifie en QA : la simple soustraction `progression -=
+    # impact_sous_objectif` ne gere PAS le cas de l'overflow redistribution
+    # (cf. evenement.py ligne 451-487). Si l'impact original de la decision
+    # avait fait overflow le SO target a 100 et redistribue sur les autres
+    # SO, la suppression ne reverse que le SO target — laissant les autres
+    # SO avec leur progression boostee.
+    #
+    # FIX (Sprint QA pre-commercialisation) : si la decision avait potentiel
+    # d'overflow (impact_so > seuil), on recompute TOUTES les SO progressions
+    # en reappliquant chronologiquement les decisions restantes a partir de
+    # leurs impact_sous_objectif stockes. Sinon on garde la simple soustraction.
+    db = profil_repo._db
     if decision.sous_objectif_id and decision.impact_sous_objectif:
         try:
-            db = profil_repo._db
             so_row = db.conn.execute(
                 "SELECT id, progression FROM sous_objectifs WHERE id = ?",
                 (decision.sous_objectif_id,),
             ).fetchone()
             if so_row:
-                new_prog = max(0, so_row["progression"] - decision.impact_sous_objectif)
-                db.conn.execute(
-                    "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
-                    (new_prog, decision.sous_objectif_id),
-                )
-                db.conn.commit()
+                # Heuristique : si impact_sous_objectif > 50%, l'overflow redistribution
+                # a probablement ete declenchee. On recompute TOUS les SO.
+                if abs(decision.impact_sous_objectif) > 50:
+                    _recompute_so_progressions(db, profil.id, exclude_decision_id=decision_id)
+                else:
+                    new_prog = max(0, so_row["progression"] - decision.impact_sous_objectif)
+                    db.conn.execute(
+                        "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
+                        (new_prog, decision.sous_objectif_id),
+                    )
+                    db.conn.commit()
         except Exception:
-            pass  # Best-effort: ne pas bloquer la suppression
+            pass  # Best-effort : ne pas bloquer la suppression
 
     # 3. Supprimer la décision
     decision_repo.supprimer_par_id(decision_id, profil.id)
@@ -218,3 +279,36 @@ async def supprimer_decision(
     profil_repo.sauvegarder(profil)
 
     return {"detail": "Décision supprimée.", "probabilite_actuelle": new_prob, "temps_gagne_jours": profil.temps_gagne_jours}
+
+
+@router.post("/recompute-so-progressions")
+async def recompute_so_progressions_endpoint(
+    profil_repo: ProfilRepository = Depends(get_profil_repo),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Force le recalcul de toutes les progressions sous-objectifs pour
+    l'utilisateur courant. Utile apres un DELETE qui aurait pu laisser
+    des SO dans un etat incoherent (overflow redistribution non reverse).
+    Strategy : sum(impact_sous_objectif) par SO depuis toutes les decisions
+    restantes, clamped 0..100.
+    """
+    if not profil_repo.existe(auth_user_id=user_id):
+        raise HTTPException(status_code=404, detail="Profil introuvable.")
+    profil = profil_repo.charger(auth_user_id=user_id)
+    if profil is None:
+        raise HTTPException(status_code=404, detail="Profil introuvable.")
+
+    db = profil_repo._db
+    _recompute_so_progressions(db, profil.id, exclude_decision_id=None)
+
+    so_rows = db.conn.execute(
+        "SELECT id, titre, progression FROM sous_objectifs WHERE user_id = ? ORDER BY ordre",
+        (profil.id,),
+    ).fetchall()
+    return {
+        "ok": True,
+        "sous_objectifs": [
+            {"id": r["id"], "titre": r["titre"], "progression": r["progression"]}
+            for r in so_rows
+        ],
+    }
