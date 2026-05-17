@@ -1,6 +1,8 @@
 """JWT token and password hashing utilities."""
 
 import os
+import secrets
+import sys
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -8,7 +10,37 @@ from jose import JWTError, jwt
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "sylea-dev-secret-change-in-production")
+def _get_jwt_secret() -> str:
+    """Retourne le secret JWT.
+
+    - PROD (DATABASE_URL=postgresql://...) : SECRET REQUIS via JWT_SECRET_KEY.
+      Crash au demarrage si absent (evite les tokens predictibles).
+    - DEV (SQLite local) : autogenere un secret aleatoire au demarrage si
+      JWT_SECRET_KEY absent (sera regenere a chaque restart, OK en dev).
+    """
+    secret = os.environ.get("JWT_SECRET_KEY", "").strip()
+    if secret:
+        return secret
+
+    # Pas de secret defini : check si on est en prod
+    is_prod_pg = os.environ.get("DATABASE_URL", "").startswith(
+        ("postgresql://", "postgresql+", "postgres://"),
+    )
+    if is_prod_pg:
+        # CRITIQUE en prod : refuser de demarrer
+        print(
+            "[FATAL] JWT_SECRET_KEY non defini en mode PostgreSQL prod. "
+            "Generer avec : python -c \"import secrets; "
+            "print(secrets.token_urlsafe(64))\"",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Dev SQLite : auto-genere un secret aleatoire
+    return secrets.token_urlsafe(48)
+
+
+SECRET_KEY = _get_jwt_secret()
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 jours
 

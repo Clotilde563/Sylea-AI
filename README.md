@@ -50,7 +50,7 @@ Soumettez un dilemme → l'IA analyse les pros/cons avec des études scientifiqu
 | Frontend | React 19 + TypeScript + Vite |
 | Backend | Python 3.13 + FastAPI |
 | IA | Claude API (Anthropic) + OpenAI TTS |
-| Base de données | SQLite |
+| Base de données | SQLite (dev) / PostgreSQL (prod) |
 | Auth | JWT + bcrypt + OAuth |
 | Déploiement | Vercel (frontend) + Railway (backend) |
 | Desktop | Tauri 2 + Rust (en développement) |
@@ -106,6 +106,52 @@ python -m pytest tests/ -v
 # Frontend (55+ tests)
 cd frontend && npm test
 ```
+
+---
+
+## 🚀 Déploiement production (PostgreSQL multi-user)
+
+### 1. Provisionner PostgreSQL
+
+Exemple avec Railway/Supabase/Neon — exposer la connection string :
+```
+postgresql://user:password@host:5432/sylea
+```
+
+### 2. Variables d'environnement critiques
+
+```bash
+# Voir .env.example pour la liste complete
+DATABASE_URL=postgresql://user:pass@host:5432/sylea
+JWT_SECRET_KEY=<generer avec: python -c "import secrets; print(secrets.token_urlsafe(64))">
+SYLEA_CREDENTIALS_MASTER_KEY=<generer avec: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
+ANTHROPIC_API_KEY=sk-ant-...
+# OAuth (si besoin)
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_REDIRECT_URI=https://votre-app.com/auth/callback
+# Stripe (paiements)
+STRIPE_SECRET_KEY=sk_live_...
+```
+
+### 3. Demarrage
+
+```bash
+uvicorn api.main:app --host 0.0.0.0 --port $PORT
+```
+
+L'application detecte automatiquement `DATABASE_URL=postgresql://...` et :
+- Lance `alembic upgrade head` au demarrage (cree le schema PG)
+- Utilise `RawDBProxy` (SQLAlchemy) au lieu de `sqlite3.Connection`
+- Tous les endpoints async basculent sur PG via `session_factory`
+- Repositories sync (CLI) deleguent vers async PG via `_run_async`
+
+### 4. Securite
+
+- **JWT_SECRET_KEY** est OBLIGATOIRE en prod : l'app crash au demarrage si absent (evite les tokens predictibles).
+- **SYLEA_CREDENTIALS_MASTER_KEY** : chiffrement Fernet des tokens OAuth tiers.
+- Multi-user isolation : filtres `auth_user_id` partout, audite manuellement.
+- Voir `docs/MIGRATION_POSTGRESQL.md` pour les details techniques.
 
 ---
 
