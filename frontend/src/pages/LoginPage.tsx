@@ -491,10 +491,10 @@ export default function LoginPage() {
           gap: '0.75rem',
           animation: 'fadeSlideDown 0.8s ease-out',
         }}>
-          <SyleaLogo size={72} animated />
+          <SyleaLogo size={56} animated />
           <h1 style={styles.logoText}>
-            <span style={{ color: '#e2e8f0', fontWeight: 800, letterSpacing: '0.15em' }}>SYLEA</span>
-            <span style={{ color: '#60a5fa' }}>.AI</span>
+            <span style={{ color: 'var(--text-primary)', fontWeight: 700, letterSpacing: '-0.02em' }}>Syléa</span>
+            <span className="headline-gradient" style={{ marginLeft: 1, fontWeight: 800 }}>.ai</span>
           </h1>
           <p style={styles.tagline}>
             {view === 'welcome'
@@ -771,31 +771,29 @@ const styles: Record<string, React.CSSProperties> = {
     gap: '2rem',
   },
   logoText: {
-    fontSize: '2.2rem',
-    fontWeight: 800,
-    letterSpacing: '0.12em',
+    fontSize: '1.875rem',
+    fontWeight: 700,
+    letterSpacing: '-0.02em',
     margin: 0,
-    textShadow: '0 0 30px rgba(96,165,250,0.2)',
   },
   tagline: {
-    color: 'rgba(148,163,184,0.7)',
-    fontSize: '0.95rem',
-    letterSpacing: '0.04em',
+    color: 'var(--text-muted)',
+    fontSize: '0.875rem',
+    letterSpacing: '-0.011em',
     fontWeight: 400,
   },
   card: {
     width: '100%',
-    background: 'rgba(10,18,35,0.82)',
-    backdropFilter: 'blur(24px)',
-    WebkitBackdropFilter: 'blur(24px)',
-    border: '1px solid rgba(99,102,241,0.15)',
-    borderRadius: '20px',
+    background: 'rgba(14, 16, 20, 0.78)',
+    backdropFilter: 'blur(20px) saturate(160%)',
+    WebkitBackdropFilter: 'blur(20px) saturate(160%)',
+    border: '1px solid rgba(255, 255, 255, 0.08)',
+    borderRadius: '16px',
     padding: '2rem',
     display: 'flex',
     flexDirection: 'column',
     gap: '1rem',
-    boxShadow: '0 0 50px rgba(0,0,0,0.4), 0 0 100px rgba(59,130,246,0.06), inset 0 1px 0 rgba(255,255,255,0.03)',
-    animation: 'borderGlow 4s ease-in-out infinite',
+    boxShadow: '0 24px 48px rgba(0, 0, 0, 0.55), 0 8px 16px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.04)',
   },
 
   // OAuth buttons
@@ -888,7 +886,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: 'inherit',
   },
   tabActive: {
-    background: 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)',
+    background: 'linear-gradient(135deg, #22d3ee 0%, #3b82f6 50%, #8b5cf6 100%)',
     color: 'white',
     boxShadow: '0 0 15px rgba(37,99,235,0.3)',
   },
@@ -918,7 +916,7 @@ const styles: Record<string, React.CSSProperties> = {
   submitBtn: {
     width: '100%',
     padding: '0.875rem',
-    background: 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)',
+    background: 'linear-gradient(135deg, #22d3ee 0%, #3b82f6 50%, #8b5cf6 100%)',
     color: 'white',
     border: 'none',
     borderRadius: '12px',

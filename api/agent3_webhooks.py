@@ -140,97 +140,6 @@ def _validate_url(url: str) -> tuple[bool, str]:
 # CRUD subscriptions
 # ─────────────────────────────────────────────────────────────────────────────
 
-def create_subscription(
-    db: Any, user_id: str, target_url: str, events: list[str],
-) -> dict[str, Any]:
-    if not user_id:
-        return {"ok": False, "error": "user_id requis"}
-    ok, err = _validate_url(target_url)
-    if not ok:
-        return {"ok": False, "error": err}
-
-    events = [e for e in events if e in VALID_EVENTS]
-    if not events:
-        return {"ok": False, "error": "au moins 1 event valide requis"}
-
-    ensure_webhook_tables(db)
-    sub_id = str(uuid.uuid4())
-    secret = secrets.token_urlsafe(32)
-    try:
-        db.conn.execute(
-            "INSERT INTO webhook_subscriptions "
-            "(id, user_id, target_url, events_json, secret, created_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (sub_id, user_id, target_url, json.dumps(events), secret, _now()),
-        )
-        db.conn.commit()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-    return {
-        "ok": True,
-        "subscription_id": sub_id,
-        "secret": secret,
-        "events": events,
-        "target_url": target_url,
-    }
-
-
-def list_subscriptions(db: Any, user_id: str) -> list[dict[str, Any]]:
-    ensure_webhook_tables(db)
-    try:
-        rows = db.conn.execute(
-            "SELECT id, target_url, events_json, enabled, last_success_at, "
-            "last_error, failures_count, created_at "
-            "FROM webhook_subscriptions WHERE user_id = ? ORDER BY created_at DESC",
-            (user_id,),
-        ).fetchall()
-    except Exception:
-        return []
-    out = []
-    for r in rows:
-        events = []
-        if r[2]:
-            try:
-                events = json.loads(r[2])
-            except Exception:
-                pass
-        out.append({
-            "id": r[0],
-            "target_url": r[1],
-            "events": events,
-            "enabled": bool(r[3]),
-            "last_success_at": r[4],
-            "last_error": r[5],
-            "failures_count": r[6] or 0,
-            "created_at": r[7],
-        })
-    return out
-
-
-def delete_subscription(db: Any, sub_id: str, user_id: str) -> dict[str, Any]:
-    ensure_webhook_tables(db)
-    try:
-        row = db.conn.execute(
-            "SELECT user_id FROM webhook_subscriptions WHERE id = ?", (sub_id,),
-        ).fetchone()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-    if not row or row[0] != user_id:
-        return {"ok": False, "error": "forbidden or not found"}
-    try:
-        db.conn.execute(
-            "DELETE FROM webhook_subscriptions WHERE id = ?", (sub_id,),
-        )
-        db.conn.execute(
-            "DELETE FROM webhook_deliveries WHERE subscription_id = ?", (sub_id,),
-        )
-        db.conn.commit()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-    return {"ok": True}
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Event firing
 # ─────────────────────────────────────────────────────────────────────────────
@@ -243,11 +152,17 @@ async def _deliver_once(
     sub_id: str, target_url: str, secret: str,
     event: str, payload: dict, db: Any,
 ) -> tuple[bool, int, str]:
-    """Delivre le webhook. Retourne (success, status_code, error)."""
+    """Delivre le webhook. Retourne (success, status_code, error).
+
+    Migration PG (2026-05-13) : INSERT + UPDATE webhook_deliveries via
+    SQLAlchemy text() async — compat SQLite + PostgreSQL.
+    """
     try:
         import httpx
     except ImportError:
         return False, 0, "httpx missing"
+    from sqlalchemy import text as _sql_text
+    from api.database import get_session_factory as _gsf
 
     body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     signature = _sign_payload(secret, body_bytes)
@@ -261,14 +176,25 @@ async def _deliver_once(
 
     delivery_id = str(uuid.uuid4())
     attempted_at = _now()
+    factory = _gsf()
     try:
-        db.conn.execute(
-            "INSERT INTO webhook_deliveries "
-            "(id, subscription_id, event, payload_json, attempted_at) "
-            "VALUES (?,?,?,?,?)",
-            (delivery_id, sub_id, event, body_bytes.decode("utf-8"), attempted_at),
-        )
-        db.conn.commit()
+        async with factory() as session:
+            try:
+                await session.execute(
+                    _sql_text(
+                        "INSERT INTO webhook_deliveries "
+                        "(id, subscription_id, event, payload_json, attempted_at) "
+                        "VALUES (:id, :sub, :event, :payload, :att)"
+                    ),
+                    {
+                        "id": delivery_id, "sub": sub_id, "event": event,
+                        "payload": body_bytes.decode("utf-8"),
+                        "att": attempted_at,
+                    },
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
     except Exception:
         pass
 
@@ -279,23 +205,39 @@ async def _deliver_once(
             response_body = (resp.text or "")[:1000]
             success = 200 <= status_code < 300
             try:
-                db.conn.execute(
-                    "UPDATE webhook_deliveries SET status_code = ?, "
-                    "response_body = ?, delivered_at = ? WHERE id = ?",
-                    (status_code, response_body, _now(), delivery_id),
-                )
-                db.conn.commit()
+                async with factory() as session:
+                    try:
+                        await session.execute(
+                            _sql_text(
+                                "UPDATE webhook_deliveries SET status_code = :sc, "
+                                "response_body = :body, delivered_at = :delivered "
+                                "WHERE id = :id"
+                            ),
+                            {
+                                "sc": status_code, "body": response_body,
+                                "delivered": _now(), "id": delivery_id,
+                            },
+                        )
+                        await session.commit()
+                    except Exception:
+                        await session.rollback()
             except Exception:
                 pass
             return success, status_code, "" if success else f"HTTP {status_code}"
     except Exception as e:
         err = f"{type(e).__name__}: {str(e)[:200]}"
         try:
-            db.conn.execute(
-                "UPDATE webhook_deliveries SET error = ? WHERE id = ?",
-                (err, delivery_id),
-            )
-            db.conn.commit()
+            async with factory() as session:
+                try:
+                    await session.execute(
+                        _sql_text(
+                            "UPDATE webhook_deliveries SET error = :err WHERE id = :id"
+                        ),
+                        {"err": err, "id": delivery_id},
+                    )
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
         except Exception:
             pass
         return False, 0, err
@@ -348,39 +290,48 @@ async def fire_event(
 ) -> dict[str, Any]:
     """Firing best-effort : recupere les subs matching + deliver en parallel.
 
-    Non-bloquant pour l'appelant (fire-and-forget en terme de latence chat).
-    Si user_id None : broadcast a TOUS les subs * (rare — utilise pour admin).
+    Migration PG (2026-05-13) : SELECT via SQLAlchemy text() async.
+    Non-bloquant pour l'appelant. Si user_id None : broadcast a TOUS les subs *.
     """
     ensure_webhook_tables(db)
     if event not in VALID_EVENTS and event != "*":
         return {"ok": False, "error": f"unknown event {event}"}
 
-    # Recupere les subs actifs concernes
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
     try:
-        if user_id:
-            rows = db.conn.execute(
-                "SELECT id, target_url, secret, events_json "
-                "FROM webhook_subscriptions WHERE user_id = ? AND enabled = 1",
-                (user_id,),
-            ).fetchall()
-        else:
-            rows = db.conn.execute(
-                "SELECT id, target_url, secret, events_json "
-                "FROM webhook_subscriptions WHERE enabled = 1",
-            ).fetchall()
+        async with factory() as session:
+            if user_id:
+                result = await session.execute(
+                    text(
+                        "SELECT id, target_url, secret, events_json "
+                        "FROM webhook_subscriptions "
+                        "WHERE user_id = :uid AND enabled = 1"
+                    ),
+                    {"uid": user_id},
+                )
+            else:
+                result = await session.execute(
+                    text(
+                        "SELECT id, target_url, secret, events_json "
+                        "FROM webhook_subscriptions WHERE enabled = 1"
+                    )
+                )
+            rows = result.mappings().all()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
     relevant: list[tuple[str, str, str]] = []
     for r in rows:
         events = []
-        if r[3]:
+        if r["events_json"]:
             try:
-                events = json.loads(r[3]) or []
+                events = json.loads(r["events_json"]) or []
             except Exception:
                 continue
         if event in events or "*" in events:
-            relevant.append((r[0], r[1], r[2]))
+            relevant.append((r["id"], r["target_url"], r["secret"]))
 
     if not relevant:
         return {"ok": True, "delivered": 0, "total_subs": 0}
@@ -395,32 +346,160 @@ async def fire_event(
     return {"ok": True, "delivered": delivered, "total_subs": len(relevant)}
 
 
-def list_recent_deliveries(
-    db: Any, user_id: str, *, limit: int = 50,
-) -> list[dict[str, Any]]:
-    """Derniers webhook deliveries pour debug."""
-    ensure_webhook_tables(db)
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def create_subscription_async(
+    user_id: str, target_url: str, events: list[str],
+) -> dict[str, Any]:
+    """Version async — PG-compatible."""
+    if not user_id:
+        return {"ok": False, "error": "user_id requis"}
+    ok, err = _validate_url(target_url)
+    if not ok:
+        return {"ok": False, "error": err}
+    events = [e for e in events if e in VALID_EVENTS]
+    if not events:
+        return {"ok": False, "error": "au moins 1 event valide requis"}
+
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    sub_id = str(uuid.uuid4())
+    secret = secrets.token_urlsafe(32)
+    factory = get_session_factory()
     try:
-        rows = db.conn.execute(
-            "SELECT d.id, d.subscription_id, d.event, d.status_code, "
-            "d.attempted_at, d.delivered_at, d.error "
-            "FROM webhook_deliveries d "
-            "INNER JOIN webhook_subscriptions s ON d.subscription_id = s.id "
-            "WHERE s.user_id = ? "
-            "ORDER BY d.attempted_at DESC LIMIT ?",
-            (user_id, max(1, min(int(limit), 200))),
-        ).fetchall()
+        async with factory() as session:
+            try:
+                await session.execute(
+                    text(
+                        "INSERT INTO webhook_subscriptions "
+                        "(id, user_id, target_url, events_json, secret, created_at) "
+                        "VALUES (:id, :uid, :url, :events, :secret, :now)"
+                    ),
+                    {
+                        "id": sub_id, "uid": user_id, "url": target_url,
+                        "events": json.dumps(events), "secret": secret,
+                        "now": _now(),
+                    },
+                )
+                await session.commit()
+            except Exception as e:
+                await session.rollback()
+                return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {
+        "ok": True, "subscription_id": sub_id, "secret": secret,
+        "events": events, "target_url": target_url,
+    }
+
+
+async def list_subscriptions_async(user_id: str) -> list[dict[str, Any]]:
+    """Version async — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT id, target_url, events_json, enabled, last_success_at, "
+                    "last_error, failures_count, created_at "
+                    "FROM webhook_subscriptions WHERE user_id = :uid "
+                    "ORDER BY created_at DESC"
+                ),
+                {"uid": user_id},
+            )
+            rows = result.mappings().all()
+    except Exception:
+        return []
+    out = []
+    for r in rows:
+        events = []
+        if r["events_json"]:
+            try:
+                events = json.loads(r["events_json"])
+            except Exception:
+                pass
+        out.append({
+            "id": r["id"], "target_url": r["target_url"],
+            "events": events, "enabled": bool(r["enabled"]),
+            "last_success_at": r["last_success_at"],
+            "last_error": r["last_error"],
+            "failures_count": r["failures_count"] or 0,
+            "created_at": r["created_at"],
+        })
+    return out
+
+
+async def delete_subscription_async(sub_id: str, user_id: str) -> dict[str, Any]:
+    """Version async — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                text("SELECT user_id FROM webhook_subscriptions WHERE id = :id"),
+                {"id": sub_id},
+            )
+            row = result.first()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    if not row or row[0] != user_id:
+        return {"ok": False, "error": "forbidden or not found"}
+    try:
+        async with factory() as session:
+            try:
+                await session.execute(
+                    text("DELETE FROM webhook_subscriptions WHERE id = :id"),
+                    {"id": sub_id},
+                )
+                await session.execute(
+                    text(
+                        "DELETE FROM webhook_deliveries WHERE subscription_id = :sid"
+                    ),
+                    {"sid": sub_id},
+                )
+                await session.commit()
+            except Exception as e:
+                await session.rollback()
+                return {"ok": False, "error": str(e)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True}
+
+
+async def list_recent_deliveries_async(
+    user_id: str, *, limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Version async — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT d.id, d.subscription_id, d.event, d.status_code, "
+                    "d.attempted_at, d.delivered_at, d.error "
+                    "FROM webhook_deliveries d "
+                    "INNER JOIN webhook_subscriptions s ON d.subscription_id = s.id "
+                    "WHERE s.user_id = :uid "
+                    "ORDER BY d.attempted_at DESC LIMIT :lim"
+                ),
+                {"uid": user_id, "lim": max(1, min(int(limit), 200))},
+            )
+            rows = result.mappings().all()
     except Exception:
         return []
     return [
         {
-            "id": r[0],
-            "subscription_id": r[1],
-            "event": r[2],
-            "status_code": r[3],
-            "attempted_at": r[4],
-            "delivered_at": r[5],
-            "error": r[6],
+            "id": r["id"], "subscription_id": r["subscription_id"],
+            "event": r["event"], "status_code": r["status_code"],
+            "attempted_at": r["attempted_at"],
+            "delivered_at": r["delivered_at"], "error": r["error"],
         }
         for r in rows
     ]
@@ -429,9 +508,9 @@ def list_recent_deliveries(
 __all__ = [
     "VALID_EVENTS",
     "ensure_webhook_tables",
-    "create_subscription",
-    "list_subscriptions",
-    "delete_subscription",
+    "create_subscription_async",
+    "list_subscriptions_async",
+    "delete_subscription_async",
     "fire_event",
-    "list_recent_deliveries",
+    "list_recent_deliveries_async",
 ]

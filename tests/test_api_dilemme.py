@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from sylea.core.storage.database import DatabaseManager
 from api.main import app
 from api.dependencies import get_db, get_agent
+from tests.conftest import make_shared_db, dispose_shared_db
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -37,32 +38,12 @@ _PROFIL_PAYLOAD = {
 }
 
 
-def _make_test_db() -> DatabaseManager:
-    """Create a DatabaseManager with an in-memory SQLite DB allowing cross-thread access."""
-    db = DatabaseManager(db_path=Path(":memory:"))
-    # Override connect to use check_same_thread=False (needed for TestClient async threading)
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    db._conn = conn
-    db._initialiser_schema()
-    # Migration not in _initialiser_schema but expected by ProfilUtilisateur.to_dict
-    try:
-        conn.execute(
-            "ALTER TABLE profil_utilisateur ADD COLUMN objectif_probabilite_calculee REAL DEFAULT 0.0"
-        )
-    except Exception:
-        pass
-    return db
-
-
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
-def client():
-    """Create a TestClient backed by an in-memory SQLite DB and no agent."""
-    db = _make_test_db()
+def client(tmp_path, monkeypatch):
+    """Create a TestClient backed by a shared SQLite DB (sync + async) and no agent."""
+    db = make_shared_db(tmp_path, monkeypatch)
 
     async def _override_get_db():
         yield db
@@ -76,8 +57,8 @@ def client():
     with TestClient(app) as c:
         yield c
 
-    db.disconnect()
     app.dependency_overrides.clear()
+    dispose_shared_db(db)
 
 
 @pytest.fixture()

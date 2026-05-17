@@ -93,17 +93,20 @@ def _now() -> str:
 VALID_SCOPES = {"chat:read", "chat:write", "memory:read", "memory:write", "admin"}
 
 
-def create_api_key(
-    db: Any, user_id: str, name: str,
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def create_api_key_async(
+    user_id: str, name: str,
     *, scopes: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Cree une nouvelle API key. Retourne le plaintext_token (a afficher UNE FOIS).
-
-    Retour : {ok, key_id, token, prefix, scopes}.
-    """
+    """Version async — PG-compatible."""
     if not user_id or not name.strip():
         return {"ok": False, "error": "user_id + name requis"}
-    ensure_api_keys_table(db)
+
+    from sqlalchemy import text
+    from api.database import get_session_factory
 
     raw = secrets.token_urlsafe(_TOKEN_SECRET_LEN)[: _TOKEN_SECRET_LEN]
     token = f"{_TOKEN_PREFIX}{raw}"
@@ -115,42 +118,60 @@ def create_api_key(
         scopes = ["chat:read"]
 
     key_id = str(uuid.uuid4())
+    factory = get_session_factory()
     try:
-        db.conn.execute(
-            "INSERT INTO api_keys "
-            "(id, user_id, name, key_hash, key_prefix, scopes_json, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (key_id, user_id, name.strip()[:100], key_hash, prefix,
-             json.dumps(scopes), _now()),
-        )
-        db.conn.commit()
+        async with factory() as session:
+            try:
+                await session.execute(
+                    text(
+                        "INSERT INTO api_keys "
+                        "(id, user_id, name, key_hash, key_prefix, scopes_json, created_at) "
+                        "VALUES (:id, :uid, :name, :hash, :prefix, :scopes, :now)"
+                    ),
+                    {
+                        "id": key_id, "uid": user_id,
+                        "name": name.strip()[:100], "hash": key_hash,
+                        "prefix": prefix, "scopes": json.dumps(scopes),
+                        "now": _now(),
+                    },
+                )
+                await session.commit()
+            except Exception as e:
+                await session.rollback()
+                logger.warning(f"create_api_key_async failed: {e}")
+                return {"ok": False, "error": str(e)}
     except Exception as e:
-        logger.warning(f"create_api_key failed: {e}")
         return {"ok": False, "error": str(e)}
 
     return {
         "ok": True,
         "key_id": key_id,
-        "token": token,  # SHOWN ONCE
+        "token": token,
         "prefix": prefix,
         "scopes": scopes,
         "warning": "Copie ce token maintenant. Il ne sera plus jamais affiche.",
     }
 
 
-def validate_api_key(db: Any, token: str) -> dict[str, Any] | None:
-    """Verifie un token entrant. Retourne {user_id, scopes, key_id} ou None."""
+async def validate_api_key_async(token: str) -> dict[str, Any] | None:
+    """Version async — PG-compatible."""
     if not token or not token.startswith(_TOKEN_PREFIX):
         return None
-    ensure_api_keys_table(db)
+    from sqlalchemy import text
+    from api.database import get_session_factory
 
     key_hash = _hash_token(token)
+    factory = get_session_factory()
     try:
-        row = db.conn.execute(
-            "SELECT id, user_id, scopes_json, revoked_at "
-            "FROM api_keys WHERE key_hash = ?",
-            (key_hash,),
-        ).fetchone()
+        async with factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT id, user_id, scopes_json, revoked_at "
+                    "FROM api_keys WHERE key_hash = :hash"
+                ),
+                {"hash": key_hash},
+            )
+            row = result.first()
     except Exception:
         return None
     if not row:
@@ -158,13 +179,17 @@ def validate_api_key(db: Any, token: str) -> dict[str, Any] | None:
     if row[3]:  # revoked
         return None
 
-    # Update last_used_at (async, best-effort)
+    # Update last_used_at best-effort
     try:
-        db.conn.execute(
-            "UPDATE api_keys SET last_used_at = ? WHERE id = ?",
-            (_now(), row[0]),
-        )
-        db.conn.commit()
+        async with factory() as session:
+            try:
+                await session.execute(
+                    text("UPDATE api_keys SET last_used_at = :now WHERE id = :id"),
+                    {"now": _now(), "id": row[0]},
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
     except Exception:
         pass
 
@@ -178,56 +203,71 @@ def validate_api_key(db: Any, token: str) -> dict[str, Any] | None:
     return {"key_id": row[0], "user_id": row[1], "scopes": scopes}
 
 
-def list_api_keys(db: Any, user_id: str) -> list[dict[str, Any]]:
-    """Liste des API keys du user (sans le token plaintext — juste prefix)."""
-    ensure_api_keys_table(db)
+async def list_api_keys_async(user_id: str) -> list[dict[str, Any]]:
+    """Version async — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
     try:
-        rows = db.conn.execute(
-            "SELECT id, name, key_prefix, scopes_json, last_used_at, created_at, revoked_at "
-            "FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
-            (user_id,),
-        ).fetchall()
+        async with factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT id, name, key_prefix, scopes_json, last_used_at, "
+                    "created_at, revoked_at FROM api_keys "
+                    "WHERE user_id = :uid ORDER BY created_at DESC"
+                ),
+                {"uid": user_id},
+            )
+            rows = result.mappings().all()
     except Exception:
         return []
     out: list[dict[str, Any]] = []
     for r in rows:
         scopes = []
-        if r[3]:
+        if r["scopes_json"]:
             try:
-                scopes = json.loads(r[3])
+                scopes = json.loads(r["scopes_json"])
             except Exception:
                 pass
         out.append({
-            "id": r[0],
-            "name": r[1],
-            "prefix": r[2],
-            "scopes": scopes,
-            "last_used_at": r[4],
-            "created_at": r[5],
-            "revoked": bool(r[6]),
-            "revoked_at": r[6],
+            "id": r["id"], "name": r["name"], "prefix": r["key_prefix"],
+            "scopes": scopes, "last_used_at": r["last_used_at"],
+            "created_at": r["created_at"], "revoked": bool(r["revoked_at"]),
+            "revoked_at": r["revoked_at"],
         })
     return out
 
 
-def revoke_api_key(db: Any, key_id: str, user_id: str) -> dict[str, Any]:
-    """Revoque une key. User doit etre owner."""
-    ensure_api_keys_table(db)
+async def revoke_api_key_async(key_id: str, user_id: str) -> dict[str, Any]:
+    """Version async — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
     try:
-        row = db.conn.execute(
-            "SELECT user_id FROM api_keys WHERE id = ?", (key_id,),
-        ).fetchone()
+        async with factory() as session:
+            result = await session.execute(
+                text("SELECT user_id FROM api_keys WHERE id = :id"),
+                {"id": key_id},
+            )
+            row = result.first()
     except Exception as e:
         return {"ok": False, "error": str(e)}
     if not row:
         return {"ok": False, "error": "not found"}
     if row[0] != user_id:
         return {"ok": False, "error": "forbidden"}
+
     try:
-        db.conn.execute(
-            "UPDATE api_keys SET revoked_at = ? WHERE id = ?", (_now(), key_id),
-        )
-        db.conn.commit()
+        async with factory() as session:
+            try:
+                await session.execute(
+                    text("UPDATE api_keys SET revoked_at = :now WHERE id = :id"),
+                    {"now": _now(), "id": key_id},
+                )
+                await session.commit()
+            except Exception as e:
+                await session.rollback()
+                return {"ok": False, "error": str(e)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
     return {"ok": True}
@@ -236,8 +276,8 @@ def revoke_api_key(db: Any, key_id: str, user_id: str) -> dict[str, Any]:
 __all__ = [
     "VALID_SCOPES",
     "ensure_api_keys_table",
-    "create_api_key",
-    "validate_api_key",
-    "list_api_keys",
-    "revoke_api_key",
+    "create_api_key_async",
+    "validate_api_key_async",
+    "list_api_keys_async",
+    "revoke_api_key_async",
 ]

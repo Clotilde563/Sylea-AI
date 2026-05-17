@@ -254,15 +254,6 @@ _AUDIT_INDEX_DDL = (
 )
 
 
-def _ensure_audit_table(db: Any) -> None:
-    try:
-        db.conn.execute(_AUDIT_DDL)
-        db.conn.execute(_AUDIT_INDEX_DDL)
-        db.conn.commit()
-    except Exception as e:  # pragma: no cover
-        logger.debug(f"audit table init failed: {e}")
-
-
 def _extract_summary(action_input: dict[str, Any]) -> str:
     """Produit un resume textuel sans donnees sensibles pour l'audit log."""
     if not isinstance(action_input, dict):
@@ -277,41 +268,6 @@ def _extract_summary(action_input: dict[str, Any]) -> str:
             val = str(action_input[k])[:120]
             bits.append(f"{k}={val}")
     return " | ".join(bits)[:500]
-
-
-def audit_log_action(
-    db: Any,
-    user_id: str | None,
-    action_type: str,
-    action_input: dict[str, Any],
-    *,
-    success: bool,
-    error_message: str = "",
-) -> None:
-    """Trace une action destructive dans la table d'audit. Best-effort."""
-    if not is_destructive(action_type):
-        return
-    try:
-        _ensure_audit_table(db)
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
-        db.conn.execute(
-            "INSERT INTO agent3_audit_log "
-            "(id, auth_user_id, action_type, action_summary, success, error_message, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                str(uuid.uuid4()),
-                user_id or "",
-                action_type,
-                _extract_summary(action_input),
-                1 if success else 0,
-                (error_message or "")[:500],
-                now,
-            ),
-        )
-        db.conn.commit()
-    except Exception as e:  # pragma: no cover
-        logger.warning(f"audit log write failed ({action_type}): {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -612,9 +568,79 @@ __all__ = [
     "check_rate_limit",
     "DEFAULT_LIMITS",
     "is_destructive",
-    "audit_log_action",
     "ensure_within_base",
     "friendly_http_error",
     "friendly_exception_message",
     "friendly_openclaw_tool_error",
+    # Async versions (migration PG, 2026-05-13)
+    "_ensure_audit_table_async",
+    "audit_log_action_async",
 ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _ensure_audit_table_async() -> None:
+    """Version async de _ensure_audit_table — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(text(_AUDIT_DDL))
+            await session.execute(text(_AUDIT_INDEX_DDL))
+            await session.commit()
+        except Exception as e:  # pragma: no cover
+            await session.rollback()
+            logger.debug(f"audit table init async failed: {e}")
+
+
+async def audit_log_action_async(
+    user_id: str | None,
+    action_type: str,
+    action_input: dict[str, Any],
+    *,
+    success: bool,
+    error_message: str = "",
+) -> None:
+    """Version async de audit_log_action — PG-compatible.
+
+    Plus de parametre `db` : utilise get_session_factory() directement.
+    """
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    from datetime import datetime, timezone
+
+    if not is_destructive(action_type):
+        return
+    try:
+        await _ensure_audit_table_async()
+        now = datetime.now(timezone.utc).isoformat()
+        factory = get_session_factory()
+        async with factory() as session:
+            try:
+                await session.execute(
+                    text(
+                        "INSERT INTO agent3_audit_log "
+                        "(id, auth_user_id, action_type, action_summary, "
+                        "success, error_message, created_at) "
+                        "VALUES (:id, :uid, :at, :summary, :ok, :err, :now)"
+                    ),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "uid": user_id or "",
+                        "at": action_type,
+                        "summary": _extract_summary(action_input),
+                        "ok": 1 if success else 0,
+                        "err": (error_message or "")[:500],
+                        "now": now,
+                    },
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"audit log async write failed ({action_type}): {e}")

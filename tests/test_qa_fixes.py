@@ -30,6 +30,7 @@ from sylea.core.models.user import ProfilUtilisateur, Objectif
 from sylea.core.models.decision import Decision, OptionDilemme
 from sylea.core.storage.database import DatabaseManager
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
+from tests.conftest import make_shared_db, dispose_shared_db
 
 
 TEST_USER_ID = "test-user-qa"
@@ -38,23 +39,13 @@ TEST_USER_ID = "test-user-qa"
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
-def in_memory_db():
-    """DB SQLite en memoire avec le schema Sylea.
-    Utilise check_same_thread=False car FastAPI TestClient alloue des
-    handlers dans un thread different."""
-    import sqlite3
-    db = DatabaseManager(":memory:")
-    # Connect manuellement avec check_same_thread=False
-    db._conn = sqlite3.connect(":memory:", check_same_thread=False)
-    db._conn.row_factory = sqlite3.Row
-    db._conn.execute("PRAGMA journal_mode=WAL;")
-    db._conn.execute("PRAGMA foreign_keys=ON;")
-    db._initialiser_schema()
+def in_memory_db(tmp_path, monkeypatch):
+    """DB SQLite partagee (sync + async) via fichier temp.
+    Migration shared-DB : remplace l'ancien pattern `:memory:` qui empechait
+    l'async session_factory de voir la meme DB que le DatabaseManager sync."""
+    db = make_shared_db(tmp_path, monkeypatch)
     yield db
-    try:
-        db._conn.close()
-    except Exception:
-        pass
+    dispose_shared_db(db)
 
 
 @pytest.fixture()

@@ -27,7 +27,7 @@ from sylea.core.engine.probability import MoteurProbabilite
 
 from api.schemas import ProfilIn, ProfilOut, ObjectifOut, ProbabiliteOut, ProbabiliteIn, JourneeIn, BienEtreScoresOut, QuestionsObjectifIn
 from api.dependencies import get_profil_repo, get_decision_repo, get_moteur, get_agent, get_optional_user, get_db
-from api.context_helper import format_device_context, build_full_user_context
+from api.context_helper import format_device_context, build_full_user_context_async
 from sylea.core.storage.database import DatabaseManager
 
 router = APIRouter(prefix="/api/profil", tags=["profil"])
@@ -187,12 +187,22 @@ async def upsert_profil(
         profil.temps_gagne_jours = 0.0
         from datetime import datetime as _dt
         profil.objectif_modifie_le = _dt.now()
-        # Supprimer aussi les sous-objectifs et tâches (reset complet)
+        # Supprimer aussi les sous-objectifs et tâches (reset complet).
+        # Migration PG (2026-05-13) : DELETE via SQLAlchemy text() async.
         try:
-            db = repo._db
-            db.conn.execute("DELETE FROM sous_objectifs WHERE user_id = ?", (existing.id,))
-            db.conn.execute("DELETE FROM taches_quotidiennes WHERE user_id = ?", (existing.id,))
-            db.conn.commit()
+            from sqlalchemy import text as _sa_text
+            from api.database import get_session_factory as _gsf
+            _factory = _gsf()
+            async with _factory() as _session:
+                await _session.execute(
+                    _sa_text("DELETE FROM sous_objectifs WHERE user_id = :uid"),
+                    {"uid": existing.id},
+                )
+                await _session.execute(
+                    _sa_text("DELETE FROM taches_quotidiennes WHERE user_id = :uid"),
+                    {"uid": existing.id},
+                )
+                await _session.commit()
         except Exception:
             pass
 
@@ -201,46 +211,47 @@ async def upsert_profil(
     return _to_profil_out(profil)
 
 
-def _insert_recalc_marker(db: DatabaseManager, profil_id: str, prob_actuelle: float) -> None:
-    """Insere une decision-marker pour combler le gap entre la derniere decision
-    historique (qui peut etre vieille) et la prob_actuelle apres recalc.
+async def _insert_recalc_marker_async(profil_id: str, prob_actuelle: float) -> None:
+    """Async sibling : insere un decision-marker dans l'historique.
 
-    Logique : verifier la derniere decision pour ce profil. Si son
-    probabilite_apres differe de prob_actuelle, inserer un marker.
-
-    Permet a Stats Chart2 de converger vers prob_actuelle (alignment
-    Dashboard <-> Stats).
+    Migration PG (2026-05-13) : SELECT/INSERT via SQLAlchemy text() async — compat
+    SQLite + PG.
     """
     try:
-        last = db.conn.execute(
-            "SELECT probabilite_apres FROM decisions WHERE user_id = ? "
-            "ORDER BY cree_le DESC LIMIT 1",
-            (profil_id,),
-        ).fetchone()
-        last_apres = float(last[0]) if last and last[0] is not None else 0.0
-        if abs(prob_actuelle - last_apres) < 0.01:
-            return  # Pas de gap, skip
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
         import uuid
         from datetime import datetime as _dt, timezone as _tz
-        db.conn.execute(
-            "INSERT INTO decisions (id, user_id, question, options_json, "
-            "probabilite_avant, option_choisie_id, probabilite_apres, "
-            "action_agent_json, cree_le, impact_temporel_jours) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                str(uuid.uuid4()),
-                profil_id,
-                "[Recalcul probabilite]",
-                "[]",
-                last_apres,
-                None,
-                prob_actuelle,
-                None,
-                _dt.now(_tz.utc).isoformat(),
-                None,
-            ),
-        )
-        db.conn.commit()
+        _factory = _gsf()
+        async with _factory() as _session:
+            _r = await _session.execute(
+                _sa_text(
+                    "SELECT probabilite_apres FROM decisions "
+                    "WHERE user_id = :uid ORDER BY cree_le DESC LIMIT 1"
+                ),
+                {"uid": profil_id},
+            )
+            _row = _r.first()
+            last_apres = float(_row[0]) if _row and _row[0] is not None else 0.0
+            if abs(prob_actuelle - last_apres) < 0.01:
+                return  # Pas de gap, skip
+            await _session.execute(
+                _sa_text(
+                    "INSERT INTO decisions (id, user_id, question, options_json, "
+                    "probabilite_avant, option_choisie_id, probabilite_apres, "
+                    "action_agent_json, cree_le, impact_temporel_jours) "
+                    "VALUES (:id, :uid, :q, '[]', :pa, NULL, :pp, NULL, :cre, NULL)"
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "uid": profil_id,
+                    "q": "[Recalcul probabilite]",
+                    "pa": last_apres,
+                    "pp": prob_actuelle,
+                    "cre": _dt.now(_tz.utc).isoformat(),
+                },
+            )
+            await _session.commit()
     except Exception:
         pass
 
@@ -272,7 +283,7 @@ async def recalculer_probabilite(
 
     # Calcul local (synchrone mais rapide)
     prob_locale = moteur.calculer_probabilite_initiale(profil)
-    full_ctx = build_full_user_context(db, user_id, profil)
+    full_ctx = await build_full_user_context_async(db, user_id, profil)
 
     if agent is not None:
         try:
@@ -301,8 +312,9 @@ async def recalculer_probabilite(
                 profil.temps_gagne_jours = 0.0
             profil.marquer_modification()
             repo.sauvegarder(profil, auth_user_id=user_id)
-            # Marker historique pour Stats Chart2 (sinon courbe reste sur ancienne valeur)
-            _insert_recalc_marker(db, profil.id, analyse.probabilite)
+            # Marker historique pour Stats Chart2 (sinon courbe reste sur ancienne valeur).
+            # Migration PG (2026-05-13) : utilise l'async sibling.
+            await _insert_recalc_marker_async(profil.id, analyse.probabilite)
             return ProbabiliteOut(
                 probabilite=analyse.probabilite,
                 temps_initial_jours=temps_initial,
@@ -333,8 +345,9 @@ async def recalculer_probabilite(
         profil.temps_gagne_jours = 0.0
     profil.marquer_modification()
     repo.sauvegarder(profil, auth_user_id=user_id)
-    # Marker historique pour cohérence (fallback local)
-    _insert_recalc_marker(db, profil.id, prob_locale)
+    # Marker historique pour cohérence (fallback local).
+    # Migration PG (2026-05-13) : utilise l'async sibling.
+    await _insert_recalc_marker_async(profil.id, prob_locale)
     return ProbabiliteOut(
         probabilite=prob_locale,
         temps_initial_jours=temps_initial_local,
@@ -411,7 +424,7 @@ async def generer_questions(
     user_id: str | None = Depends(get_optional_user),
 ):
     """G\u00e9n\u00e8re 12 questions personnalis\u00e9es bas\u00e9es sur l'objectif de l'utilisateur."""
-    full_ctx = build_full_user_context(db, user_id)
+    full_ctx = await build_full_user_context_async(db, user_id)
     try:
         return await _generer_questions_claude(
             data.description,
@@ -509,7 +522,7 @@ async def analyser_journee(
     user_id: str | None = Depends(get_optional_user),
 ):
     """Analyse la description d'une journée et retourne des scores bien-être (1-10)."""
-    full_ctx = build_full_user_context(db, user_id)
+    full_ctx = await build_full_user_context_async(db, user_id)
     try:
         scores = await _analyser_journee_claude(
             data.description,
@@ -571,12 +584,19 @@ async def backfill_decision_snapshots(
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
-    # Charge TOUTES les decisions (limit elevee pour eviter la pagination ici)
-    db = repo._db
-    rows = db.conn.execute(
-        "SELECT * FROM decisions WHERE user_id = ? ORDER BY cree_le ASC",
-        (profil.id,),
-    ).fetchall()
+    # Charge TOUTES les decisions via SQLAlchemy text() async (PG-compatible).
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    _factory = _gsf()
+    async with _factory() as _session:
+        _result = await _session.execute(
+            _sa_text(
+                "SELECT * FROM decisions WHERE user_id = :pid "
+                "ORDER BY cree_le ASC"
+            ),
+            {"pid": profil.id},
+        )
+        rows = [dict(r) for r in _result.mappings().all()]
 
     if not rows:
         return {
@@ -624,28 +644,41 @@ async def backfill_decision_snapshots(
 
     cumul_temps = 0.0
     n_corrigees = 0
-    for row, impact in zip(rows, impacts):
-        tg_avant_new = round(cumul_temps, 2)
-        tg_apres_new = round(cumul_temps + impact, 2)
-        # Clamp dans [0, temps_initial]
-        if temps_initial > 0:
-            tg_avant_new = max(0.0, min(float(temps_initial), tg_avant_new))
-            tg_apres_new = max(0.0, min(float(temps_initial), tg_apres_new))
+    # UPDATE batch — async via SQLAlchemy text() (compat SQLite + PG).
+    async with _factory() as _session:
+        try:
+            for row, impact in zip(rows, impacts):
+                tg_avant_new = round(cumul_temps, 2)
+                tg_apres_new = round(cumul_temps + impact, 2)
+                # Clamp dans [0, temps_initial]
+                if temps_initial > 0:
+                    tg_avant_new = max(0.0, min(float(temps_initial), tg_avant_new))
+                    tg_apres_new = max(0.0, min(float(temps_initial), tg_apres_new))
 
-        # Detecter si la mise a jour est necessaire
-        old_avant = float(row["temps_gagne_avant"] or 0)
-        old_apres = float(row["temps_gagne_apres"] or 0)
-        if abs(old_avant - tg_avant_new) > 0.01 or abs(old_apres - tg_apres_new) > 0.01:
-            db.conn.execute(
-                "UPDATE decisions SET temps_gagne_avant = ?, temps_gagne_apres = ? "
-                "WHERE id = ?",
-                (tg_avant_new, tg_apres_new, row["id"]),
-            )
-            n_corrigees += 1
+                old_avant = float(row["temps_gagne_avant"] or 0)
+                old_apres = float(row["temps_gagne_apres"] or 0)
+                if (
+                    abs(old_avant - tg_avant_new) > 0.01
+                    or abs(old_apres - tg_apres_new) > 0.01
+                ):
+                    await _session.execute(
+                        _sa_text(
+                            "UPDATE decisions SET temps_gagne_avant = :tg_av, "
+                            "temps_gagne_apres = :tg_ap WHERE id = :did"
+                        ),
+                        {
+                            "tg_av": tg_avant_new,
+                            "tg_ap": tg_apres_new,
+                            "did": row["id"],
+                        },
+                    )
+                    n_corrigees += 1
 
-        cumul_temps += impact
-
-    db.conn.commit()
+                cumul_temps += impact
+            await _session.commit()
+        except Exception:
+            await _session.rollback()
+            raise
 
     # Re-sync profil sur la valeur target (qui est deja temps_gagne_jours)
     if temps_initial > 0:
@@ -723,31 +756,42 @@ async def upload_photo(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur ecriture fichier : {e}")
 
-    # Get profil id + delete old photo if exists
+    # Get profil id + delete old photo if exists.
+    # Migration PG (2026-05-13) : SELECT/UPDATE via SQLAlchemy text() async — compat SQLite + PG.
     try:
-        row = db.conn.execute(
-            "SELECT id, photo_url FROM profil_utilisateur WHERE auth_user_id = ?",
-            (user_id,),
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Profil introuvable")
-        profil_id, old_photo = row[0], row[1]
-        # Delete old file if exists
-        if old_photo:
-            try:
-                old_name = old_photo.rsplit("/", 1)[-1]
-                old_path = _PHOTOS_DIR / old_name
-                if old_path.exists() and old_path.is_file():
-                    old_path.unlink()
-            except Exception:
-                pass
-        # Store new URL relative
-        photo_url = f"/api/profil/photo/{new_name}"
-        db.conn.execute(
-            "UPDATE profil_utilisateur SET photo_url = ? WHERE id = ?",
-            (photo_url, profil_id),
-        )
-        db.conn.commit()
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        _factory = _gsf()
+        async with _factory() as _session:
+            _r = await _session.execute(
+                _sa_text(
+                    "SELECT id, photo_url FROM profil_utilisateur "
+                    "WHERE auth_user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            row = _r.first()
+            if not row:
+                raise HTTPException(status_code=404, detail="Profil introuvable")
+            profil_id, old_photo = row[0], row[1]
+            # Delete old file if exists
+            if old_photo:
+                try:
+                    old_name = old_photo.rsplit("/", 1)[-1]
+                    old_path = _PHOTOS_DIR / old_name
+                    if old_path.exists() and old_path.is_file():
+                        old_path.unlink()
+                except Exception:
+                    pass
+            # Store new URL relative
+            photo_url = f"/api/profil/photo/{new_name}"
+            await _session.execute(
+                _sa_text(
+                    "UPDATE profil_utilisateur SET photo_url = :url WHERE id = :id"
+                ),
+                {"url": photo_url, "id": profil_id},
+            )
+            await _session.commit()
     except HTTPException:
         raise
     except Exception as e:
@@ -773,27 +817,40 @@ async def delete_photo(
     db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
-    """Supprime la photo de profil de l'utilisateur courant."""
+    """Supprime la photo de profil de l'utilisateur courant.
+
+    Migration PG (2026-05-13) : SELECT/UPDATE via SQLAlchemy text() async — compat SQLite + PG.
+    """
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentification requise")
     try:
-        row = db.conn.execute(
-            "SELECT photo_url FROM profil_utilisateur WHERE auth_user_id = ?",
-            (user_id,),
-        ).fetchone()
-        if row and row[0]:
-            try:
-                old_name = row[0].rsplit("/", 1)[-1]
-                old_path = _PHOTOS_DIR / old_name
-                if old_path.exists() and old_path.is_file():
-                    old_path.unlink()
-            except Exception:
-                pass
-        db.conn.execute(
-            "UPDATE profil_utilisateur SET photo_url = NULL WHERE auth_user_id = ?",
-            (user_id,),
-        )
-        db.conn.commit()
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        _factory = _gsf()
+        async with _factory() as _session:
+            _r = await _session.execute(
+                _sa_text(
+                    "SELECT photo_url FROM profil_utilisateur WHERE auth_user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            row = _r.first()
+            if row and row[0]:
+                try:
+                    old_name = row[0].rsplit("/", 1)[-1]
+                    old_path = _PHOTOS_DIR / old_name
+                    if old_path.exists() and old_path.is_file():
+                        old_path.unlink()
+                except Exception:
+                    pass
+            await _session.execute(
+                _sa_text(
+                    "UPDATE profil_utilisateur SET photo_url = NULL "
+                    "WHERE auth_user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            await _session.commit()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"deleted": True}

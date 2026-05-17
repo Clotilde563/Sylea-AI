@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 from api.main import app
 from api.dependencies import get_db, get_agent, get_optional_user
 from sylea.core.storage.database import DatabaseManager
+from tests.conftest import make_shared_db, dispose_shared_db
 
 
 TEST_USER_ID = "test-user-tools"
@@ -38,24 +39,19 @@ TEST_USER_ID = "test-user-tools"
 
 
 @pytest.fixture()
-def db():
-    """DB en memoire avec schema complet + users pret."""
-    manager = DatabaseManager(db_path=Path(":memory:"))
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    manager._conn = conn
-    manager._initialiser_schema()
-
-    conn.execute(
+def db(tmp_path, monkeypatch):
+    """DB SQLite partagee (sync + async) via fichier temp.
+    Migration shared-DB : remplace `:memory:` pour que les writes async via
+    SQLAlchemy session_factory pointent sur la meme DB que la conn sync."""
+    manager = make_shared_db(tmp_path, monkeypatch)
+    manager._conn.execute(
         "INSERT INTO users (id, email, hashed_password, provider, created_at) "
         "VALUES (?, ?, ?, ?, datetime('now'))",
         (TEST_USER_ID, "tools@test.com", "fake_hash", "local"),
     )
-    conn.commit()
+    manager._conn.commit()
     yield manager
-    manager.disconnect()
+    dispose_shared_db(manager)
 
 
 @pytest.fixture()

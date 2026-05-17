@@ -16,6 +16,7 @@ import type {
   CompleterTacheResult,
   PersonnaliteIA,
   DeviceContext,
+  AgentProposal,
 } from '../types'
 
 export const API_BASE = import.meta.env.VITE_API_URL || ''
@@ -298,8 +299,8 @@ export const api = {
 
   // ── Agent companion (Agent Sylea 1) ──────────────────────────────────
 
-  agentChat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; audioData?: string }> =>
-    request<{ message: string; choices?: string[]; audioData?: string }>('/agent/chat', {
+  agentChat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; audioData?: string; proposal?: AgentProposal | null }> =>
+    request<{ message: string; choices?: string[]; audioData?: string; proposal?: AgentProposal | null }>('/agent/chat', {
       method: 'POST',
       body: JSON.stringify({ messages, contexte_appareil, audio_data: audioData }),
     }),
@@ -312,6 +313,16 @@ export const api = {
 
   agentProactive: (): Promise<{ message: string | null }> =>
     request('/agent/proactive', { method: 'POST' }),
+
+  // ── Agent proposals (boutons Confirmer/Refuser dans la chat) ────────────
+  listAgentProposals: (): Promise<AgentProposal[]> =>
+    request('/agent/proposals'),
+
+  confirmAgentProposal: (id: string): Promise<{ detail: string; decision_id: string; sous_objectif_impacte: string | null; temps_gagne_jours: number; probabilite_actuelle: number }> =>
+    request(`/agent/proposals/${id}/confirm`, { method: 'POST' }),
+
+  rejectAgentProposal: (id: string): Promise<{ detail: string }> =>
+    request(`/agent/proposals/${id}/reject`, { method: 'POST' }),
 
   agentCheckContext: (type: string, question: string, options?: string[], deviceContext?: DeviceContext): Promise<{ needs_context: boolean; agent_question: string | null; choices: string[] | null }> =>
     request('/agent/check-context', {
@@ -393,8 +404,8 @@ export const api = {
 
   // ── Agent assistant (Agent Sylea 2) ──────────────────────────────────
 
-  agent2Chat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string }> =>
-    request<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string }>('/agent2/chat', {
+  agent2Chat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string; proposal?: AgentProposal | null }> =>
+    request<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string; proposal?: AgentProposal | null }>('/agent2/chat', {
       method: 'POST',
       body: JSON.stringify({ messages, contexte_appareil, audio_data: audioData }),
     }),

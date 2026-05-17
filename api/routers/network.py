@@ -20,7 +20,9 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
+from api.database import get_session_factory
 from api.dependencies import get_db, get_optional_user
 from sylea.core.storage.database import DatabaseManager
 
@@ -258,25 +260,6 @@ def _ensure_network_tables(db: DatabaseManager) -> None:
 
 # ── Helper ────────────────────────────────────────────────────────────────────
 
-def _sync_profile_from_sylea(db: DatabaseManager, user_id: str) -> None:
-    """Sync objective_category and probability_current from profil_utilisateur."""
-    try:
-        row = db.conn.execute(
-            "SELECT objectif_categorie, probabilite_actuelle, objectif_description "
-            "FROM profil_utilisateur WHERE auth_user_id = ?",
-            (user_id,),
-        ).fetchone()
-        if row:
-            db.conn.execute(
-                "UPDATE community_profiles SET objective_category = ?, probability_current = ? "
-                "WHERE auth_user_id = ?",
-                (row[0] or "", row[1] or 0.0, user_id),
-            )
-            db.conn.commit()
-    except Exception:
-        pass
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # COMMUNITY PROFILE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -291,21 +274,27 @@ async def get_own_profile(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    row = db.conn.execute(
-        "SELECT auth_user_id, display_name, bio, objective_summary, objective_category, "
-        "probability_current, visibility, mentor_available, created_at, updated_at "
-        "FROM community_profiles WHERE auth_user_id = ?",
-        (user_id,),
-    ).fetchone()
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT auth_user_id, display_name, bio, objective_summary, objective_category, "
+                "probability_current, visibility, mentor_available, created_at, updated_at "
+                "FROM community_profiles WHERE auth_user_id = :uid"
+            ),
+            {"uid": user_id},
+        )
+        row = result.mappings().first()
 
     if not row:
         raise HTTPException(404, "Profil communautaire non cree")
 
     return CommunityProfileOut(
-        auth_user_id=row[0], display_name=row[1], bio=row[2],
-        objective_summary=row[3], objective_category=row[4],
-        probability_current=row[5], visibility=row[6],
-        mentor_available=row[7], created_at=row[8], updated_at=row[9],
+        auth_user_id=row["auth_user_id"], display_name=row["display_name"], bio=row["bio"],
+        objective_summary=row["objective_summary"], objective_category=row["objective_category"],
+        probability_current=row["probability_current"], visibility=row["visibility"],
+        mentor_available=row["mentor_available"], created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -321,30 +310,60 @@ async def upsert_profile(
         raise HTTPException(401, "Authentification requise")
 
     now = datetime.now(timezone.utc).isoformat()
-    existing = db.conn.execute(
-        "SELECT 1 FROM community_profiles WHERE auth_user_id = ?", (user_id,)
-    ).fetchone()
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            existing_result = await session.execute(
+                text("SELECT 1 FROM community_profiles WHERE auth_user_id = :uid"),
+                {"uid": user_id},
+            )
+            existing = existing_result.first()
 
-    if existing:
-        db.conn.execute(
-            "UPDATE community_profiles SET display_name = ?, bio = ?, objective_summary = ?, "
-            "visibility = ?, mentor_available = ?, updated_at = ? WHERE auth_user_id = ?",
-            (data.display_name, data.bio, data.objective_summary,
-             data.visibility, data.mentor_available, now, user_id),
-        )
-    else:
-        db.conn.execute(
-            "INSERT INTO community_profiles "
-            "(auth_user_id, display_name, bio, objective_summary, visibility, "
-            "mentor_available, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (user_id, data.display_name, data.bio, data.objective_summary,
-             data.visibility, data.mentor_available, now, now),
-        )
-    db.conn.commit()
+            if existing:
+                await session.execute(
+                    text(
+                        "UPDATE community_profiles SET display_name = :display_name, "
+                        "bio = :bio, objective_summary = :objective_summary, "
+                        "visibility = :visibility, mentor_available = :mentor_available, "
+                        "updated_at = :updated_at WHERE auth_user_id = :uid"
+                    ),
+                    {
+                        "display_name": data.display_name,
+                        "bio": data.bio,
+                        "objective_summary": data.objective_summary,
+                        "visibility": data.visibility,
+                        "mentor_available": data.mentor_available,
+                        "updated_at": now,
+                        "uid": user_id,
+                    },
+                )
+            else:
+                await session.execute(
+                    text(
+                        "INSERT INTO community_profiles "
+                        "(auth_user_id, display_name, bio, objective_summary, visibility, "
+                        "mentor_available, created_at, updated_at) "
+                        "VALUES (:uid, :display_name, :bio, :objective_summary, :visibility, "
+                        ":mentor_available, :created_at, :updated_at)"
+                    ),
+                    {
+                        "uid": user_id,
+                        "display_name": data.display_name,
+                        "bio": data.bio,
+                        "objective_summary": data.objective_summary,
+                        "visibility": data.visibility,
+                        "mentor_available": data.mentor_available,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
     # Sync from main profile
-    _sync_profile_from_sylea(db, user_id)
+    await _sync_profile_from_sylea_async(user_id)
 
     return await get_own_profile(db=db, user_id=user_id)
 
@@ -358,21 +377,27 @@ async def get_public_profile(
     """Get someone's public profile."""
     _ensure_network_tables(db)
 
-    row = db.conn.execute(
-        "SELECT auth_user_id, display_name, bio, objective_summary, objective_category, "
-        "probability_current, visibility, mentor_available, created_at, updated_at "
-        "FROM community_profiles WHERE auth_user_id = ? AND visibility = 'public'",
-        (target_user_id,),
-    ).fetchone()
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT auth_user_id, display_name, bio, objective_summary, objective_category, "
+                "probability_current, visibility, mentor_available, created_at, updated_at "
+                "FROM community_profiles WHERE auth_user_id = :uid AND visibility = 'public'"
+            ),
+            {"uid": target_user_id},
+        )
+        row = result.mappings().first()
 
     if not row:
         raise HTTPException(404, "Profil introuvable ou prive")
 
     return CommunityProfileOut(
-        auth_user_id=row[0], display_name=row[1], bio=row[2],
-        objective_summary=row[3], objective_category=row[4],
-        probability_current=row[5], visibility=row[6],
-        mentor_available=row[7], created_at=row[8], updated_at=row[9],
+        auth_user_id=row["auth_user_id"], display_name=row["display_name"], bio=row["bio"],
+        objective_summary=row["objective_summary"], objective_category=row["objective_category"],
+        probability_current=row["probability_current"], visibility=row["visibility"],
+        mentor_available=row["mentor_available"], created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -391,48 +416,68 @@ async def discover_users(
         raise HTTPException(401, "Authentification requise")
 
     # Sync own profile first
-    _sync_profile_from_sylea(db, user_id)
+    await _sync_profile_from_sylea_async(user_id)
 
-    # Get own category and probability
-    own = db.conn.execute(
-        "SELECT objective_category, probability_current FROM community_profiles WHERE auth_user_id = ?",
-        (user_id,),
-    ).fetchone()
+    factory = get_session_factory()
+    async with factory() as session:
+        # Get own category and probability
+        own_result = await session.execute(
+            text(
+                "SELECT objective_category, probability_current FROM community_profiles "
+                "WHERE auth_user_id = :uid"
+            ),
+            {"uid": user_id},
+        )
+        own = own_result.mappings().first()
 
-    own_cat = own[0] if own else ""
-    own_prob = own[1] if own else 0.0
+        own_cat = own["objective_category"] if own else ""
+        own_prob = own["probability_current"] if own else 0.0
 
-    # Get connected user IDs to exclude
-    connected_ids = set()
-    connected_ids.add(user_id)
-    rows = db.conn.execute(
-        "SELECT requester_id, receiver_id FROM connections "
-        "WHERE (requester_id = ? OR receiver_id = ?) AND status IN ('pending', 'accepted')",
-        (user_id, user_id),
-    ).fetchall()
-    for r in rows:
-        connected_ids.add(r[0])
-        connected_ids.add(r[1])
+        # Get connected user IDs to exclude
+        connected_ids = set()
+        connected_ids.add(user_id)
+        conn_result = await session.execute(
+            text(
+                "SELECT requester_id, receiver_id FROM connections "
+                "WHERE (requester_id = :uid OR receiver_id = :uid) "
+                "AND status IN ('pending', 'accepted')"
+            ),
+            {"uid": user_id},
+        )
+        for r in conn_result.mappings().all():
+            connected_ids.add(r["requester_id"])
+            connected_ids.add(r["receiver_id"])
 
-    # Fetch public profiles, excluding connected
-    placeholders = ",".join("?" for _ in connected_ids)
-    all_profiles = db.conn.execute(
-        f"SELECT auth_user_id, display_name, bio, objective_summary, objective_category, "
-        f"probability_current, visibility, mentor_available, created_at, updated_at "
-        f"FROM community_profiles WHERE visibility = 'public' "
-        f"AND auth_user_id NOT IN ({placeholders}) "
-        f"ORDER BY CASE WHEN objective_category = ? THEN 0 ELSE 1 END, "
-        f"ABS(probability_current - ?) ASC "
-        f"LIMIT 20",
-        (*connected_ids, own_cat, own_prob),
-    ).fetchall()
+        # Fetch public profiles, excluding connected — named-param placeholders
+        params: dict = {"own_cat": own_cat, "own_prob": own_prob}
+        ph_keys = []
+        for i, cid in enumerate(connected_ids):
+            key = f"cid{i}"
+            ph_keys.append(f":{key}")
+            params[key] = cid
+        placeholders = ",".join(ph_keys)
+
+        all_result = await session.execute(
+            text(
+                f"SELECT auth_user_id, display_name, bio, objective_summary, objective_category, "
+                f"probability_current, visibility, mentor_available, created_at, updated_at "
+                f"FROM community_profiles WHERE visibility = 'public' "
+                f"AND auth_user_id NOT IN ({placeholders}) "
+                f"ORDER BY CASE WHEN objective_category = :own_cat THEN 0 ELSE 1 END, "
+                f"ABS(probability_current - :own_prob) ASC "
+                f"LIMIT 20"
+            ),
+            params,
+        )
+        all_profiles = all_result.mappings().all()
 
     return [
         CommunityProfileOut(
-            auth_user_id=r[0], display_name=r[1], bio=r[2],
-            objective_summary=r[3], objective_category=r[4],
-            probability_current=r[5], visibility=r[6],
-            mentor_available=r[7], created_at=r[8], updated_at=r[9],
+            auth_user_id=r["auth_user_id"], display_name=r["display_name"], bio=r["bio"],
+            objective_summary=r["objective_summary"], objective_category=r["objective_category"],
+            probability_current=r["probability_current"], visibility=r["visibility"],
+            mentor_available=r["mentor_available"], created_at=r["created_at"],
+            updated_at=r["updated_at"],
         )
         for r in all_profiles
     ]
@@ -451,23 +496,38 @@ async def send_connection_request(
     if user_id == target_user_id:
         raise HTTPException(400, "Impossible de se connecter a soi-meme")
 
-    # Check if already connected or pending
-    existing = db.conn.execute(
-        "SELECT status FROM connections WHERE "
-        "(requester_id = ? AND receiver_id = ?) OR (requester_id = ? AND receiver_id = ?)",
-        (user_id, target_user_id, target_user_id, user_id),
-    ).fetchone()
-    if existing:
-        raise HTTPException(400, f"Connexion deja existante (statut: {existing[0]})")
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            # Check if already connected or pending
+            existing_result = await session.execute(
+                text(
+                    "SELECT status FROM connections WHERE "
+                    "(requester_id = :uid AND receiver_id = :tid) "
+                    "OR (requester_id = :tid AND receiver_id = :uid)"
+                ),
+                {"uid": user_id, "tid": target_user_id},
+            )
+            existing = existing_result.mappings().first()
+            if existing:
+                raise HTTPException(400, f"Connexion deja existante (statut: {existing['status']})")
 
-    conn_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "INSERT INTO connections (id, requester_id, receiver_id, status, created_at) "
-        "VALUES (?, ?, ?, 'pending', ?)",
-        (conn_id, user_id, target_user_id, now),
-    )
-    db.conn.commit()
+            conn_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc).isoformat()
+            await session.execute(
+                text(
+                    "INSERT INTO connections (id, requester_id, receiver_id, status, created_at) "
+                    "VALUES (:id, :uid, :tid, 'pending', :now)"
+                ),
+                {"id": conn_id, "uid": user_id, "tid": target_user_id, "now": now},
+            )
+            await session.commit()
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
 
     return {"id": conn_id, "status": "pending"}
 
@@ -482,21 +542,27 @@ async def list_connections(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    rows = db.conn.execute(
-        "SELECT c.id, c.requester_id, c.receiver_id, c.status, c.created_at, c.updated_at, "
-        "COALESCE(cp.display_name, '') "
-        "FROM connections c "
-        "LEFT JOIN community_profiles cp ON "
-        "  CASE WHEN c.requester_id = ? THEN c.receiver_id ELSE c.requester_id END = cp.auth_user_id "
-        "WHERE (c.requester_id = ? OR c.receiver_id = ?) AND c.status = 'accepted'",
-        (user_id, user_id, user_id),
-    ).fetchall()
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT c.id, c.requester_id, c.receiver_id, c.status, c.created_at, c.updated_at, "
+                "COALESCE(cp.display_name, '') AS display_name "
+                "FROM connections c "
+                "LEFT JOIN community_profiles cp ON "
+                "  CASE WHEN c.requester_id = :uid THEN c.receiver_id ELSE c.requester_id END "
+                "  = cp.auth_user_id "
+                "WHERE (c.requester_id = :uid OR c.receiver_id = :uid) AND c.status = 'accepted'"
+            ),
+            {"uid": user_id},
+        )
+        rows = result.mappings().all()
 
     return [
         ConnectionOut(
-            id=r[0], requester_id=r[1], receiver_id=r[2],
-            status=r[3], created_at=r[4], updated_at=r[5],
-            display_name=r[6],
+            id=r["id"], requester_id=r["requester_id"], receiver_id=r["receiver_id"],
+            status=r["status"], created_at=r["created_at"], updated_at=r["updated_at"],
+            display_name=r["display_name"],
         )
         for r in rows
     ]
@@ -512,20 +578,25 @@ async def list_pending_connections(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    rows = db.conn.execute(
-        "SELECT c.id, c.requester_id, c.receiver_id, c.status, c.created_at, c.updated_at, "
-        "COALESCE(cp.display_name, '') "
-        "FROM connections c "
-        "LEFT JOIN community_profiles cp ON c.requester_id = cp.auth_user_id "
-        "WHERE c.receiver_id = ? AND c.status = 'pending'",
-        (user_id,),
-    ).fetchall()
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT c.id, c.requester_id, c.receiver_id, c.status, c.created_at, c.updated_at, "
+                "COALESCE(cp.display_name, '') AS display_name "
+                "FROM connections c "
+                "LEFT JOIN community_profiles cp ON c.requester_id = cp.auth_user_id "
+                "WHERE c.receiver_id = :uid AND c.status = 'pending'"
+            ),
+            {"uid": user_id},
+        )
+        rows = result.mappings().all()
 
     return [
         ConnectionOut(
-            id=r[0], requester_id=r[1], receiver_id=r[2],
-            status=r[3], created_at=r[4], updated_at=r[5],
-            display_name=r[6],
+            id=r["id"], requester_id=r["requester_id"], receiver_id=r["receiver_id"],
+            status=r["status"], created_at=r["created_at"], updated_at=r["updated_at"],
+            display_name=r["display_name"],
         )
         for r in rows
     ]
@@ -542,22 +613,35 @@ async def accept_connection(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    row = db.conn.execute(
-        "SELECT receiver_id, status FROM connections WHERE id = ?", (conn_id,)
-    ).fetchone()
-    if not row:
-        raise HTTPException(404, "Connexion introuvable")
-    if row[0] != user_id:
-        raise HTTPException(403, "Seul le destinataire peut accepter")
-    if row[1] != "pending":
-        raise HTTPException(400, "Cette connexion n'est plus en attente")
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text("SELECT receiver_id, status FROM connections WHERE id = :cid"),
+                {"cid": conn_id},
+            )
+            row = result.mappings().first()
+            if not row:
+                raise HTTPException(404, "Connexion introuvable")
+            if row["receiver_id"] != user_id:
+                raise HTTPException(403, "Seul le destinataire peut accepter")
+            if row["status"] != "pending":
+                raise HTTPException(400, "Cette connexion n'est plus en attente")
 
-    now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "UPDATE connections SET status = 'accepted', updated_at = ? WHERE id = ?",
-        (now, conn_id),
-    )
-    db.conn.commit()
+            now = datetime.now(timezone.utc).isoformat()
+            await session.execute(
+                text(
+                    "UPDATE connections SET status = 'accepted', updated_at = :now WHERE id = :cid"
+                ),
+                {"now": now, "cid": conn_id},
+            )
+            await session.commit()
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
     return {"status": "accepted"}
 
 
@@ -572,20 +656,33 @@ async def reject_connection(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    row = db.conn.execute(
-        "SELECT receiver_id, status FROM connections WHERE id = ?", (conn_id,)
-    ).fetchone()
-    if not row:
-        raise HTTPException(404, "Connexion introuvable")
-    if row[0] != user_id:
-        raise HTTPException(403, "Seul le destinataire peut refuser")
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text("SELECT receiver_id, status FROM connections WHERE id = :cid"),
+                {"cid": conn_id},
+            )
+            row = result.mappings().first()
+            if not row:
+                raise HTTPException(404, "Connexion introuvable")
+            if row["receiver_id"] != user_id:
+                raise HTTPException(403, "Seul le destinataire peut refuser")
 
-    now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "UPDATE connections SET status = 'rejected', updated_at = ? WHERE id = ?",
-        (now, conn_id),
-    )
-    db.conn.commit()
+            now = datetime.now(timezone.utc).isoformat()
+            await session.execute(
+                text(
+                    "UPDATE connections SET status = 'rejected', updated_at = :now WHERE id = :cid"
+                ),
+                {"now": now, "cid": conn_id},
+            )
+            await session.commit()
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
     return {"status": "rejected"}
 
 
@@ -601,21 +698,28 @@ async def list_mentors(
     """List available mentors (mentor_available=1, probability >= 70)."""
     _ensure_network_tables(db)
 
-    rows = db.conn.execute(
-        "SELECT auth_user_id, display_name, bio, objective_summary, objective_category, "
-        "probability_current, visibility, mentor_available, created_at, updated_at "
-        "FROM community_profiles "
-        "WHERE mentor_available = 1 AND probability_current >= 70 AND visibility = 'public'"
-        + (" AND auth_user_id != ?" if user_id else ""),
-        (user_id,) if user_id else (),
-    ).fetchall()
+    factory = get_session_factory()
+    async with factory() as session:
+        sql = (
+            "SELECT auth_user_id, display_name, bio, objective_summary, objective_category, "
+            "probability_current, visibility, mentor_available, created_at, updated_at "
+            "FROM community_profiles "
+            "WHERE mentor_available = 1 AND probability_current >= 70 AND visibility = 'public'"
+        )
+        params: dict = {}
+        if user_id:
+            sql += " AND auth_user_id != :uid"
+            params["uid"] = user_id
+        result = await session.execute(text(sql), params)
+        rows = result.mappings().all()
 
     return [
         CommunityProfileOut(
-            auth_user_id=r[0], display_name=r[1], bio=r[2],
-            objective_summary=r[3], objective_category=r[4],
-            probability_current=r[5], visibility=r[6],
-            mentor_available=r[7], created_at=r[8], updated_at=r[9],
+            auth_user_id=r["auth_user_id"], display_name=r["display_name"], bio=r["bio"],
+            objective_summary=r["objective_summary"], objective_category=r["objective_category"],
+            probability_current=r["probability_current"], visibility=r["visibility"],
+            mentor_available=r["mentor_available"], created_at=r["created_at"],
+            updated_at=r["updated_at"],
         )
         for r in rows
     ]
@@ -634,40 +738,71 @@ async def request_mentoring(
     if user_id == data.mentor_id:
         raise HTTPException(400, "Impossible de se mentorer soi-meme")
 
-    # Check mentor exists and is available
-    mentor = db.conn.execute(
-        "SELECT mentor_available, display_name FROM community_profiles WHERE auth_user_id = ?",
-        (data.mentor_id,),
-    ).fetchone()
-    if not mentor or mentor[0] != 1:
-        raise HTTPException(404, "Mentor non disponible")
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            # Check mentor exists and is available
+            mentor_result = await session.execute(
+                text(
+                    "SELECT mentor_available, display_name FROM community_profiles "
+                    "WHERE auth_user_id = :mid"
+                ),
+                {"mid": data.mentor_id},
+            )
+            mentor = mentor_result.mappings().first()
+            if not mentor or mentor["mentor_available"] != 1:
+                raise HTTPException(404, "Mentor non disponible")
 
-    # Check for existing relationship
-    existing = db.conn.execute(
-        "SELECT status FROM mentoring_relationships "
-        "WHERE mentor_id = ? AND mentee_id = ? AND status IN ('pending', 'active')",
-        (data.mentor_id, user_id),
-    ).fetchone()
-    if existing:
-        raise HTTPException(400, f"Relation de mentorat deja existante (statut: {existing[0]})")
+            # Check for existing relationship
+            existing_result = await session.execute(
+                text(
+                    "SELECT status FROM mentoring_relationships "
+                    "WHERE mentor_id = :mid AND mentee_id = :uid "
+                    "AND status IN ('pending', 'active')"
+                ),
+                {"mid": data.mentor_id, "uid": user_id},
+            )
+            existing = existing_result.mappings().first()
+            if existing:
+                raise HTTPException(
+                    400, f"Relation de mentorat deja existante (statut: {existing['status']})"
+                )
 
-    rel_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "INSERT INTO mentoring_relationships (id, mentor_id, mentee_id, status, message, created_at) "
-        "VALUES (?, ?, ?, 'pending', ?, ?)",
-        (rel_id, data.mentor_id, user_id, data.message, now),
-    )
-    db.conn.commit()
+            rel_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc).isoformat()
+            await session.execute(
+                text(
+                    "INSERT INTO mentoring_relationships "
+                    "(id, mentor_id, mentee_id, status, message, created_at) "
+                    "VALUES (:id, :mid, :uid, 'pending', :msg, :now)"
+                ),
+                {
+                    "id": rel_id,
+                    "mid": data.mentor_id,
+                    "uid": user_id,
+                    "msg": data.message,
+                    "now": now,
+                },
+            )
+            await session.commit()
 
-    # Get mentee name
-    mentee = db.conn.execute(
-        "SELECT display_name FROM community_profiles WHERE auth_user_id = ?", (user_id,)
-    ).fetchone()
+            # Get mentee name
+            mentee_result = await session.execute(
+                text("SELECT display_name FROM community_profiles WHERE auth_user_id = :uid"),
+                {"uid": user_id},
+            )
+            mentee = mentee_result.mappings().first()
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
 
     return MentoringOut(
         id=rel_id, mentor_id=data.mentor_id, mentee_id=user_id,
-        mentor_name=mentor[1] or "", mentee_name=(mentee[0] if mentee else "") or "",
+        mentor_name=mentor["display_name"] or "",
+        mentee_name=(mentee["display_name"] if mentee else "") or "",
         status="pending", message=data.message, created_at=now,
     )
 
@@ -682,23 +817,30 @@ async def list_mentoring(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    rows = db.conn.execute(
-        "SELECT mr.id, mr.mentor_id, mr.mentee_id, mr.status, mr.message, "
-        "mr.created_at, mr.updated_at, "
-        "COALESCE(cm.display_name, ''), COALESCE(ce.display_name, '') "
-        "FROM mentoring_relationships mr "
-        "LEFT JOIN community_profiles cm ON mr.mentor_id = cm.auth_user_id "
-        "LEFT JOIN community_profiles ce ON mr.mentee_id = ce.auth_user_id "
-        "WHERE mr.mentor_id = ? OR mr.mentee_id = ? "
-        "ORDER BY mr.created_at DESC",
-        (user_id, user_id),
-    ).fetchall()
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT mr.id, mr.mentor_id, mr.mentee_id, mr.status, mr.message, "
+                "mr.created_at, mr.updated_at, "
+                "COALESCE(cm.display_name, '') AS mentor_name, "
+                "COALESCE(ce.display_name, '') AS mentee_name "
+                "FROM mentoring_relationships mr "
+                "LEFT JOIN community_profiles cm ON mr.mentor_id = cm.auth_user_id "
+                "LEFT JOIN community_profiles ce ON mr.mentee_id = ce.auth_user_id "
+                "WHERE mr.mentor_id = :uid OR mr.mentee_id = :uid "
+                "ORDER BY mr.created_at DESC"
+            ),
+            {"uid": user_id},
+        )
+        rows = result.mappings().all()
 
     return [
         MentoringOut(
-            id=r[0], mentor_id=r[1], mentee_id=r[2], status=r[3],
-            message=r[4] or "", created_at=r[5], updated_at=r[6],
-            mentor_name=r[7], mentee_name=r[8],
+            id=r["id"], mentor_id=r["mentor_id"], mentee_id=r["mentee_id"],
+            status=r["status"], message=r["message"] or "",
+            created_at=r["created_at"], updated_at=r["updated_at"],
+            mentor_name=r["mentor_name"], mentee_name=r["mentee_name"],
         )
         for r in rows
     ]
@@ -715,22 +857,36 @@ async def accept_mentoring(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    row = db.conn.execute(
-        "SELECT mentor_id, status FROM mentoring_relationships WHERE id = ?", (rel_id,)
-    ).fetchone()
-    if not row:
-        raise HTTPException(404, "Relation introuvable")
-    if row[0] != user_id:
-        raise HTTPException(403, "Seul le mentor peut accepter")
-    if row[1] != "pending":
-        raise HTTPException(400, "Cette relation n'est plus en attente")
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text("SELECT mentor_id, status FROM mentoring_relationships WHERE id = :rid"),
+                {"rid": rel_id},
+            )
+            row = result.mappings().first()
+            if not row:
+                raise HTTPException(404, "Relation introuvable")
+            if row["mentor_id"] != user_id:
+                raise HTTPException(403, "Seul le mentor peut accepter")
+            if row["status"] != "pending":
+                raise HTTPException(400, "Cette relation n'est plus en attente")
 
-    now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "UPDATE mentoring_relationships SET status = 'active', updated_at = ? WHERE id = ?",
-        (now, rel_id),
-    )
-    db.conn.commit()
+            now = datetime.now(timezone.utc).isoformat()
+            await session.execute(
+                text(
+                    "UPDATE mentoring_relationships SET status = 'active', "
+                    "updated_at = :now WHERE id = :rid"
+                ),
+                {"now": now, "rid": rel_id},
+            )
+            await session.commit()
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
     return {"status": "active"}
 
 
@@ -745,20 +901,34 @@ async def end_mentoring(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    row = db.conn.execute(
-        "SELECT mentor_id, mentee_id FROM mentoring_relationships WHERE id = ?", (rel_id,)
-    ).fetchone()
-    if not row:
-        raise HTTPException(404, "Relation introuvable")
-    if user_id not in (row[0], row[1]):
-        raise HTTPException(403, "Non autorise")
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text("SELECT mentor_id, mentee_id FROM mentoring_relationships WHERE id = :rid"),
+                {"rid": rel_id},
+            )
+            row = result.mappings().first()
+            if not row:
+                raise HTTPException(404, "Relation introuvable")
+            if user_id not in (row["mentor_id"], row["mentee_id"]):
+                raise HTTPException(403, "Non autorise")
 
-    now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "UPDATE mentoring_relationships SET status = 'ended', updated_at = ? WHERE id = ?",
-        (now, rel_id),
-    )
-    db.conn.commit()
+            now = datetime.now(timezone.utc).isoformat()
+            await session.execute(
+                text(
+                    "UPDATE mentoring_relationships SET status = 'ended', "
+                    "updated_at = :now WHERE id = :rid"
+                ),
+                {"now": now, "rid": rel_id},
+            )
+            await session.commit()
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
     return {"status": "ended"}
 
 
@@ -775,26 +945,32 @@ async def list_challenges(
     _ensure_network_tables(db)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    rows = db.conn.execute(
-        "SELECT c.id, c.title, c.description, c.category, c.start_date, c.end_date, "
-        "c.rules_json, c.created_at, "
-        "(SELECT COUNT(*) FROM challenge_participants cp WHERE cp.challenge_id = c.id) "
-        "FROM challenges c WHERE c.end_date >= ? ORDER BY c.start_date",
-        (today,),
-    ).fetchall()
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT c.id, c.title, c.description, c.category, c.start_date, c.end_date, "
+                "c.rules_json, c.created_at, "
+                "(SELECT COUNT(*) FROM challenge_participants cp WHERE cp.challenge_id = c.id) "
+                "  AS participant_count "
+                "FROM challenges c WHERE c.end_date >= :today ORDER BY c.start_date"
+            ),
+            {"today": today},
+        )
+        rows = result.mappings().all()
 
     results = []
     for r in rows:
         rules = None
         try:
-            if r[6]:
-                rules = json.loads(r[6])
+            if r["rules_json"]:
+                rules = json.loads(r["rules_json"])
         except Exception:
             pass
         results.append(ChallengeOut(
-            id=r[0], title=r[1], description=r[2], category=r[3],
-            start_date=r[4], end_date=r[5], rules=rules,
-            created_at=r[7], participant_count=r[8],
+            id=r["id"], title=r["title"], description=r["description"], category=r["category"],
+            start_date=r["start_date"], end_date=r["end_date"], rules=rules,
+            created_at=r["created_at"], participant_count=r["participant_count"],
         ))
     return results
 
@@ -808,26 +984,33 @@ async def challenges_history(
     _ensure_network_tables(db)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    rows = db.conn.execute(
-        "SELECT c.id, c.title, c.description, c.category, c.start_date, c.end_date, "
-        "c.rules_json, c.created_at, "
-        "(SELECT COUNT(*) FROM challenge_participants cp WHERE cp.challenge_id = c.id) "
-        "FROM challenges c WHERE c.end_date < ? ORDER BY c.end_date DESC LIMIT 20",
-        (today,),
-    ).fetchall()
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT c.id, c.title, c.description, c.category, c.start_date, c.end_date, "
+                "c.rules_json, c.created_at, "
+                "(SELECT COUNT(*) FROM challenge_participants cp WHERE cp.challenge_id = c.id) "
+                "  AS participant_count "
+                "FROM challenges c WHERE c.end_date < :today "
+                "ORDER BY c.end_date DESC LIMIT 20"
+            ),
+            {"today": today},
+        )
+        rows = result.mappings().all()
 
     results = []
     for r in rows:
         rules = None
         try:
-            if r[6]:
-                rules = json.loads(r[6])
+            if r["rules_json"]:
+                rules = json.loads(r["rules_json"])
         except Exception:
             pass
         results.append(ChallengeOut(
-            id=r[0], title=r[1], description=r[2], category=r[3],
-            start_date=r[4], end_date=r[5], rules=rules,
-            created_at=r[7], participant_count=r[8],
+            id=r["id"], title=r["title"], description=r["description"], category=r["category"],
+            start_date=r["start_date"], end_date=r["end_date"], rules=rules,
+            created_at=r["created_at"], participant_count=r["participant_count"],
         ))
     return results
 
@@ -841,51 +1024,60 @@ async def get_challenge_detail(
     """Get challenge detail with leaderboard."""
     _ensure_network_tables(db)
 
-    row = db.conn.execute(
-        "SELECT id, title, description, category, start_date, end_date, rules_json, created_at "
-        "FROM challenges WHERE id = ?",
-        (challenge_id,),
-    ).fetchone()
-    if not row:
-        raise HTTPException(404, "Challenge introuvable")
+    factory = get_session_factory()
+    async with factory() as session:
+        ch_result = await session.execute(
+            text(
+                "SELECT id, title, description, category, start_date, end_date, "
+                "rules_json, created_at FROM challenges WHERE id = :cid"
+            ),
+            {"cid": challenge_id},
+        )
+        row = ch_result.mappings().first()
+        if not row:
+            raise HTTPException(404, "Challenge introuvable")
 
-    rules = None
-    try:
-        if row[6]:
-            rules = json.loads(row[6])
-    except Exception:
-        pass
+        rules = None
+        try:
+            if row["rules_json"]:
+                rules = json.loads(row["rules_json"])
+        except Exception:
+            pass
 
-    # Leaderboard
-    participants = db.conn.execute(
-        "SELECT cp.auth_user_id, cp.progress, cp.joined_at, "
-        "COALESCE(c.display_name, 'Anonyme') "
-        "FROM challenge_participants cp "
-        "LEFT JOIN community_profiles c ON cp.auth_user_id = c.auth_user_id "
-        "WHERE cp.challenge_id = ? ORDER BY cp.progress DESC",
-        (challenge_id,),
-    ).fetchall()
+        # Leaderboard
+        part_result = await session.execute(
+            text(
+                "SELECT cp.auth_user_id, cp.progress, cp.joined_at, "
+                "COALESCE(c.display_name, 'Anonyme') AS display_name "
+                "FROM challenge_participants cp "
+                "LEFT JOIN community_profiles c ON cp.auth_user_id = c.auth_user_id "
+                "WHERE cp.challenge_id = :cid ORDER BY cp.progress DESC"
+            ),
+            {"cid": challenge_id},
+        )
+        participants = part_result.mappings().all()
+
+        count_result = await session.execute(
+            text("SELECT COUNT(*) FROM challenge_participants WHERE challenge_id = :cid"),
+            {"cid": challenge_id},
+        )
+        count = count_result.scalar() or 0
 
     leaderboard = [
         {
-            "auth_user_id": p[0],
-            "progress": p[1],
-            "joined_at": p[2],
-            "display_name": p[3],
+            "auth_user_id": p["auth_user_id"],
+            "progress": p["progress"],
+            "joined_at": p["joined_at"],
+            "display_name": p["display_name"],
             "rank": i + 1,
         }
         for i, p in enumerate(participants)
     ]
 
-    count = db.conn.execute(
-        "SELECT COUNT(*) FROM challenge_participants WHERE challenge_id = ?",
-        (challenge_id,),
-    ).fetchone()[0]
-
     return ChallengeDetailOut(
-        id=row[0], title=row[1], description=row[2], category=row[3],
-        start_date=row[4], end_date=row[5], rules=rules,
-        created_at=row[7], participant_count=count,
+        id=row["id"], title=row["title"], description=row["description"],
+        category=row["category"], start_date=row["start_date"], end_date=row["end_date"],
+        rules=rules, created_at=row["created_at"], participant_count=count,
         leaderboard=leaderboard,
     )
 
@@ -901,27 +1093,45 @@ async def join_challenge(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    # Check challenge exists
-    ch = db.conn.execute("SELECT 1 FROM challenges WHERE id = ?", (challenge_id,)).fetchone()
-    if not ch:
-        raise HTTPException(404, "Challenge introuvable")
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            # Check challenge exists
+            ch_result = await session.execute(
+                text("SELECT 1 FROM challenges WHERE id = :cid"),
+                {"cid": challenge_id},
+            )
+            if not ch_result.first():
+                raise HTTPException(404, "Challenge introuvable")
 
-    # Check not already joined
-    existing = db.conn.execute(
-        "SELECT 1 FROM challenge_participants WHERE challenge_id = ? AND auth_user_id = ?",
-        (challenge_id, user_id),
-    ).fetchone()
-    if existing:
-        raise HTTPException(400, "Deja inscrit a ce challenge")
+            # Check not already joined
+            existing_result = await session.execute(
+                text(
+                    "SELECT 1 FROM challenge_participants "
+                    "WHERE challenge_id = :cid AND auth_user_id = :uid"
+                ),
+                {"cid": challenge_id, "uid": user_id},
+            )
+            if existing_result.first():
+                raise HTTPException(400, "Deja inscrit a ce challenge")
 
-    part_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "INSERT INTO challenge_participants (id, challenge_id, auth_user_id, progress, joined_at) "
-        "VALUES (?, ?, ?, 0.0, ?)",
-        (part_id, challenge_id, user_id, now),
-    )
-    db.conn.commit()
+            part_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc).isoformat()
+            await session.execute(
+                text(
+                    "INSERT INTO challenge_participants "
+                    "(id, challenge_id, auth_user_id, progress, joined_at) "
+                    "VALUES (:id, :cid, :uid, 0.0, :now)"
+                ),
+                {"id": part_id, "cid": challenge_id, "uid": user_id, "now": now},
+            )
+            await session.commit()
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
 
     return {"id": part_id, "status": "joined"}
 
@@ -938,20 +1148,34 @@ async def update_progress(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    row = db.conn.execute(
-        "SELECT id FROM challenge_participants WHERE challenge_id = ? AND auth_user_id = ?",
-        (challenge_id, user_id),
-    ).fetchone()
-    if not row:
-        raise HTTPException(404, "Non inscrit a ce challenge")
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT id FROM challenge_participants "
+                    "WHERE challenge_id = :cid AND auth_user_id = :uid"
+                ),
+                {"cid": challenge_id, "uid": user_id},
+            )
+            if not result.first():
+                raise HTTPException(404, "Non inscrit a ce challenge")
 
-    now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "UPDATE challenge_participants SET progress = ?, updated_at = ? "
-        "WHERE challenge_id = ? AND auth_user_id = ?",
-        (data.progress, now, challenge_id, user_id),
-    )
-    db.conn.commit()
+            now = datetime.now(timezone.utc).isoformat()
+            await session.execute(
+                text(
+                    "UPDATE challenge_participants SET progress = :progress, updated_at = :now "
+                    "WHERE challenge_id = :cid AND auth_user_id = :uid"
+                ),
+                {"progress": data.progress, "now": now, "cid": challenge_id, "uid": user_id},
+            )
+            await session.commit()
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
 
     return {"progress": data.progress}
 
@@ -970,21 +1194,27 @@ async def list_own_victories(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    rows = db.conn.execute(
-        "SELECT v.id, v.auth_user_id, v.title, v.description, v.category, "
-        "v.is_public, v.reactions_count, v.created_at, "
-        "COALESCE(cp.display_name, '') "
-        "FROM victories v "
-        "LEFT JOIN community_profiles cp ON v.auth_user_id = cp.auth_user_id "
-        "WHERE v.auth_user_id = ? ORDER BY v.created_at DESC",
-        (user_id,),
-    ).fetchall()
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT v.id, v.auth_user_id, v.title, v.description, v.category, "
+                "v.is_public, v.reactions_count, v.created_at, "
+                "COALESCE(cp.display_name, '') AS display_name "
+                "FROM victories v "
+                "LEFT JOIN community_profiles cp ON v.auth_user_id = cp.auth_user_id "
+                "WHERE v.auth_user_id = :uid ORDER BY v.created_at DESC"
+            ),
+            {"uid": user_id},
+        )
+        rows = result.mappings().all()
 
     return [
         VictoryOut(
-            id=r[0], auth_user_id=r[1], title=r[2], description=r[3],
-            category=r[4], is_public=r[5], reactions_count=r[6],
-            created_at=r[7], display_name=r[8],
+            id=r["id"], auth_user_id=r["auth_user_id"], title=r["title"],
+            description=r["description"], category=r["category"], is_public=r["is_public"],
+            reactions_count=r["reactions_count"], created_at=r["created_at"],
+            display_name=r["display_name"],
         )
         for r in rows
     ]
@@ -1000,37 +1230,53 @@ async def victories_feed(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    # Get connected user IDs
-    connected_ids = []
-    rows = db.conn.execute(
-        "SELECT requester_id, receiver_id FROM connections "
-        "WHERE (requester_id = ? OR receiver_id = ?) AND status = 'accepted'",
-        (user_id, user_id),
-    ).fetchall()
-    for r in rows:
-        other = r[1] if r[0] == user_id else r[0]
-        connected_ids.append(other)
+    factory = get_session_factory()
+    async with factory() as session:
+        # Get connected user IDs
+        connected_ids: list[str] = []
+        conn_result = await session.execute(
+            text(
+                "SELECT requester_id, receiver_id FROM connections "
+                "WHERE (requester_id = :uid OR receiver_id = :uid) AND status = 'accepted'"
+            ),
+            {"uid": user_id},
+        )
+        for r in conn_result.mappings().all():
+            other = r["receiver_id"] if r["requester_id"] == user_id else r["requester_id"]
+            connected_ids.append(other)
 
-    if not connected_ids:
-        return []
+        if not connected_ids:
+            return []
 
-    placeholders = ",".join("?" for _ in connected_ids)
-    victory_rows = db.conn.execute(
-        f"SELECT v.id, v.auth_user_id, v.title, v.description, v.category, "
-        f"v.is_public, v.reactions_count, v.created_at, "
-        f"COALESCE(cp.display_name, '') "
-        f"FROM victories v "
-        f"LEFT JOIN community_profiles cp ON v.auth_user_id = cp.auth_user_id "
-        f"WHERE v.auth_user_id IN ({placeholders}) AND v.is_public = 1 "
-        f"ORDER BY v.created_at DESC LIMIT 50",
-        connected_ids,
-    ).fetchall()
+        # Named-param placeholders for IN-clause
+        params: dict = {}
+        ph_keys = []
+        for i, cid in enumerate(connected_ids):
+            key = f"cid{i}"
+            ph_keys.append(f":{key}")
+            params[key] = cid
+        placeholders = ",".join(ph_keys)
+
+        vic_result = await session.execute(
+            text(
+                f"SELECT v.id, v.auth_user_id, v.title, v.description, v.category, "
+                f"v.is_public, v.reactions_count, v.created_at, "
+                f"COALESCE(cp.display_name, '') AS display_name "
+                f"FROM victories v "
+                f"LEFT JOIN community_profiles cp ON v.auth_user_id = cp.auth_user_id "
+                f"WHERE v.auth_user_id IN ({placeholders}) AND v.is_public = 1 "
+                f"ORDER BY v.created_at DESC LIMIT 50"
+            ),
+            params,
+        )
+        victory_rows = vic_result.mappings().all()
 
     return [
         VictoryOut(
-            id=r[0], auth_user_id=r[1], title=r[2], description=r[3],
-            category=r[4], is_public=r[5], reactions_count=r[6],
-            created_at=r[7], display_name=r[8],
+            id=r["id"], auth_user_id=r["auth_user_id"], title=r["title"],
+            description=r["description"], category=r["category"], is_public=r["is_public"],
+            reactions_count=r["reactions_count"], created_at=r["created_at"],
+            display_name=r["display_name"],
         )
         for r in victory_rows
     ]
@@ -1050,19 +1296,38 @@ async def create_victory(
     vic_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
 
-    db.conn.execute(
-        "INSERT INTO victories (id, auth_user_id, title, description, category, is_public, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (vic_id, user_id, data.title, data.description, data.category, data.is_public, now),
-    )
-    db.conn.commit()
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(
+                text(
+                    "INSERT INTO victories "
+                    "(id, auth_user_id, title, description, category, is_public, created_at) "
+                    "VALUES (:id, :uid, :title, :description, :category, :is_public, :now)"
+                ),
+                {
+                    "id": vic_id,
+                    "uid": user_id,
+                    "title": data.title,
+                    "description": data.description,
+                    "category": data.category,
+                    "is_public": data.is_public,
+                    "now": now,
+                },
+            )
+            await session.commit()
 
-    display_name = ""
-    row = db.conn.execute(
-        "SELECT display_name FROM community_profiles WHERE auth_user_id = ?", (user_id,)
-    ).fetchone()
-    if row:
-        display_name = row[0] or ""
+            display_name = ""
+            name_result = await session.execute(
+                text("SELECT display_name FROM community_profiles WHERE auth_user_id = :uid"),
+                {"uid": user_id},
+            )
+            row = name_result.mappings().first()
+            if row:
+                display_name = row["display_name"] or ""
+        except Exception:
+            await session.rollback()
+            raise
 
     return VictoryOut(
         id=vic_id, auth_user_id=user_id, title=data.title,
@@ -1084,31 +1349,58 @@ async def react_to_victory(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    # Check victory exists
-    vic = db.conn.execute("SELECT 1 FROM victories WHERE id = ?", (victory_id,)).fetchone()
-    if not vic:
-        raise HTTPException(404, "Victoire introuvable")
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            # Check victory exists
+            vic_result = await session.execute(
+                text("SELECT 1 FROM victories WHERE id = :vid"),
+                {"vid": victory_id},
+            )
+            if not vic_result.first():
+                raise HTTPException(404, "Victoire introuvable")
 
-    # Check not already reacted
-    existing = db.conn.execute(
-        "SELECT 1 FROM victory_reactions WHERE victory_id = ? AND reactor_id = ?",
-        (victory_id, user_id),
-    ).fetchone()
-    if existing:
-        raise HTTPException(400, "Deja reagit a cette victoire")
+            # Check not already reacted
+            existing_result = await session.execute(
+                text(
+                    "SELECT 1 FROM victory_reactions "
+                    "WHERE victory_id = :vid AND reactor_id = :uid"
+                ),
+                {"vid": victory_id, "uid": user_id},
+            )
+            if existing_result.first():
+                raise HTTPException(400, "Deja reagit a cette victoire")
 
-    react_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "INSERT INTO victory_reactions (id, victory_id, reactor_id, reaction_type, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (react_id, victory_id, user_id, data.reaction_type, now),
-    )
-    db.conn.execute(
-        "UPDATE victories SET reactions_count = reactions_count + 1 WHERE id = ?",
-        (victory_id,),
-    )
-    db.conn.commit()
+            react_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc).isoformat()
+            await session.execute(
+                text(
+                    "INSERT INTO victory_reactions "
+                    "(id, victory_id, reactor_id, reaction_type, created_at) "
+                    "VALUES (:id, :vid, :uid, :rtype, :now)"
+                ),
+                {
+                    "id": react_id,
+                    "vid": victory_id,
+                    "uid": user_id,
+                    "rtype": data.reaction_type,
+                    "now": now,
+                },
+            )
+            await session.execute(
+                text(
+                    "UPDATE victories SET reactions_count = reactions_count + 1 "
+                    "WHERE id = :vid"
+                ),
+                {"vid": victory_id},
+            )
+            await session.commit()
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
 
     return {"reaction_id": react_id, "reaction_type": data.reaction_type}
 
@@ -1124,16 +1416,78 @@ async def delete_victory(
     if not user_id:
         raise HTTPException(401, "Authentification requise")
 
-    row = db.conn.execute(
-        "SELECT auth_user_id FROM victories WHERE id = ?", (victory_id,)
-    ).fetchone()
-    if not row:
-        raise HTTPException(404, "Victoire introuvable")
-    if row[0] != user_id:
-        raise HTTPException(403, "Non autorise")
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text("SELECT auth_user_id FROM victories WHERE id = :vid"),
+                {"vid": victory_id},
+            )
+            row = result.mappings().first()
+            if not row:
+                raise HTTPException(404, "Victoire introuvable")
+            if row["auth_user_id"] != user_id:
+                raise HTTPException(403, "Non autorise")
 
-    db.conn.execute("DELETE FROM victory_reactions WHERE victory_id = ?", (victory_id,))
-    db.conn.execute("DELETE FROM victories WHERE id = ?", (victory_id,))
-    db.conn.commit()
+            await session.execute(
+                text("DELETE FROM victory_reactions WHERE victory_id = :vid"),
+                {"vid": victory_id},
+            )
+            await session.execute(
+                text("DELETE FROM victories WHERE id = :vid"),
+                {"vid": victory_id},
+            )
+            await session.commit()
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
 
     return {"deleted": True}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ASYNC HELPERS (SQLAlchemy text() — SQLite + PostgreSQL compatible)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _sync_profile_from_sylea_async(user_id: str) -> None:
+    """Async sibling of ``_sync_profile_from_sylea``.
+
+    Syncs objective_category and probability_current from profil_utilisateur
+    using the async SQLAlchemy session factory. Used by async endpoints to
+    avoid mixing sync (db.conn) and async access patterns.
+
+    Silently swallows exceptions to preserve original behavior.
+    """
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT objectif_categorie, probabilite_actuelle, objectif_description "
+                    "FROM profil_utilisateur WHERE auth_user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            row = result.mappings().first()
+            if row:
+                await session.execute(
+                    text(
+                        "UPDATE community_profiles SET objective_category = :cat, "
+                        "probability_current = :prob WHERE auth_user_id = :uid"
+                    ),
+                    {
+                        "cat": row["objectif_categorie"] or "",
+                        "prob": row["probabilite_actuelle"] or 0.0,
+                        "uid": user_id,
+                    },
+                )
+                await session.commit()
+        except Exception:
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+

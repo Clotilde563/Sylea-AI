@@ -198,9 +198,28 @@ class DecisionOut(BaseModel):
     sous_objectif_id: Optional[str] = None
     impact_sous_objectif: Optional[float] = None
 
+    # Cascade detail : tous les SOs touches (cible + ceux affectes par
+    # l'overflow). None si pas applicable (ex: dilemme classique).
+    sous_objectifs_impactes: Optional[List["SousObjectifImpactItem"]] = None
+
     # Temps-based fields
     temps_gagne_avant: float = 0.0
     temps_gagne_apres: float = 0.0
+
+
+class SousObjectifImpactItem(BaseModel):
+    """Detail de l'impact d'une decision sur un sous-objectif particulier.
+
+    Utilise pour expliquer a l'utilisateur le cascade d'overflow lorsqu'un
+    event depasse la capacite du SO cible.
+    """
+    so_id: str
+    titre: str
+    progression_avant: float
+    progression_apres: float
+    delta_pct: float          # progression_apres - progression_avant
+    est_cible: bool           # True si l'IA a designe ce SO comme cible principale
+    est_complete: bool        # True si progression_apres == 100
 
 
 # ── Probabilité ───────────────────────────────────────────────────────────────
@@ -404,3 +423,28 @@ class HistoriquePagineOut(BaseModel):
     page: int
     par_page: int
     pages_total: int
+
+
+# -- Pending actions (decisions en attente de confirmation) ------------------
+# Migration 2026-05-16 : ajout pour /api/pending router.
+
+class PendingActionOut(BaseModel):
+    """Decision/evenement en attente de confirmation utilisateur."""
+    id: str
+    source_type: str            # 'event' | 'dilemma'
+    source_id: Optional[str] = None
+    description: str
+    impact_jours: float
+    cree_le: str
+    echeance_le: str
+    prochaine_verification_le: str
+    statut: str                 # 'pending' | 'in_progress' | 'completed' | 'abandoned'
+    verifications_ok_count: int = 0
+    derniere_reponse_le: Optional[str] = None
+    is_long_terme: bool = False
+    is_final_check: bool = False
+
+
+class PendingRespondIn(BaseModel):
+    """Reponse Oui/Non a une pending_action."""
+    response: bool   # True = Oui (continuer ou completer), False = Non (abandon)

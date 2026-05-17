@@ -22,6 +22,7 @@ import pytest
 
 from api.agent3_native_dispatcher import Agent3ActionDispatcher
 from sylea.core.storage.database import DatabaseManager
+from tests.conftest import make_shared_db, dispose_shared_db
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -29,10 +30,13 @@ from sylea.core.storage.database import DatabaseManager
 # ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.fixture
-def db():
-    d = DatabaseManager(db_path=Path(":memory:"))
-    d.connect()
-    return d
+def db(tmp_path, monkeypatch):
+    """DB SQLite partagee (sync + async) via fichier temp.
+    Migration shared-DB : remplace `:memory:` pour permettre a l'async
+    session_factory de pointer sur la meme DB."""
+    d = make_shared_db(tmp_path, monkeypatch)
+    yield d
+    dispose_shared_db(d)
 
 
 @pytest.fixture
@@ -206,12 +210,12 @@ class TestRagRoundTrip:
 
     @pytest.mark.asyncio
     async def test_delete_by_source(self, db):
-        from api.rag import ingest_text, delete_by_source, semantic_search
+        from api.rag import ingest_text, delete_by_source_async, semantic_search
         text = "Du contenu pour tester la suppression." * 30
         await ingest_text(db, "u1", text, source_type="upload", source_ref="file.txt")
 
         # Suppression
-        n = delete_by_source(db, "u1", "upload", "file.txt")
+        n = await delete_by_source_async("u1", "upload", "file.txt")
         assert n >= 1
         hits = await semantic_search(db, "u1", "suppression", top_k=5, min_similarity=0.0)
         assert len(hits) == 0
@@ -239,9 +243,10 @@ class TestRagRoundTrip:
         assert all(h["source_type"] == "web_fetch" for h in hits)
 
     def test_get_rag_stats(self, db):
-        from api.rag import get_rag_stats, ensure_rag_tables
+        import asyncio
+        from api.rag import get_rag_stats_async, ensure_rag_tables
         ensure_rag_tables(db)
-        stats = get_rag_stats(db, "u_noop")
+        stats = asyncio.run(get_rag_stats_async("u_noop"))
         assert stats["total_chunks"] == 0
 
 
@@ -387,56 +392,60 @@ class TestDeepResearch:
 
 class TestAwareness:
     def test_block_empty_without_user(self, db):
-        from api.agent3_awareness import build_awareness_block
-        assert build_awareness_block(db, None) == ""
-        assert build_awareness_block(db, "") == ""
+        import asyncio
+        from api.agent3_awareness import build_awareness_block_async
+        assert asyncio.run(build_awareness_block_async(None)) == ""
+        assert asyncio.run(build_awareness_block_async("")) == ""
 
     def test_block_empty_without_db(self):
-        from api.agent3_awareness import build_awareness_block
-        assert build_awareness_block(None, "u1") == ""
+        import asyncio
+        from api.agent3_awareness import build_awareness_block_async
+        # Note : la version async n'utilise plus le param db (utilise session_factory)
+        # donc ce test devient redondant avec test_block_empty_without_user
+        assert asyncio.run(build_awareness_block_async("")) == ""
 
     def test_block_contains_moment(self, db):
-        from api.agent3_awareness import build_awareness_block, invalidate_awareness_cache
+        import asyncio
+        from api.agent3_awareness import build_awareness_block_async, invalidate_awareness_cache
         invalidate_awareness_cache("u_awareness")
-        block = build_awareness_block(db, "u_awareness")
-        # Le user n'a rien en DB → bloc peut etre vide... sauf si moment est ajoute.
-        # Dans l'impl, moment est toujours ajoute donc bloc != ""
+        block = asyncio.run(build_awareness_block_async("u_awareness"))
         assert "CONTEXTE ACTUEL" in block or block == ""
         if block:
-            # L'un des moments doit apparaitre
             assert any(m in block.lower() for m in ["matin", "midi", "apres-midi", "soir", "nuit"])
 
     def test_cache_speed(self, db):
         """Le 2eme appel doit etre tres rapide (cache hit)."""
-        from api.agent3_awareness import build_awareness_block, invalidate_awareness_cache
+        import asyncio
         import time
+        from api.agent3_awareness import build_awareness_block_async, invalidate_awareness_cache
         invalidate_awareness_cache("u_cache")
         t0 = time.time()
-        b1 = build_awareness_block(db, "u_cache")
+        b1 = asyncio.run(build_awareness_block_async("u_cache"))
         t1 = time.time()
-        b2 = build_awareness_block(db, "u_cache")
+        b2 = asyncio.run(build_awareness_block_async("u_cache"))
         t2 = time.time()
         assert b1 == b2
-        # Cache hit doit etre instant (< 10ms)
-        assert (t2 - t1) < 0.01
+        # Cache hit doit etre instant (< 100ms : on autorise large car asyncio.run a un overhead)
+        assert (t2 - t1) < 0.1
 
     def test_invalidate_cache_specific_user(self, db):
+        import asyncio
         from api.agent3_awareness import (
-            build_awareness_block, invalidate_awareness_cache, _awareness_cache,
+            build_awareness_block_async, invalidate_awareness_cache, _awareness_cache,
         )
-        # Prime cache pour 2 users
-        build_awareness_block(db, "user_x")
-        build_awareness_block(db, "user_y")
-        assert "user_x" in _awareness_cache or True  # peut etre vide si pas de contenu
+        asyncio.run(build_awareness_block_async("user_x"))
+        asyncio.run(build_awareness_block_async("user_y"))
+        assert "user_x" in _awareness_cache or True
         invalidate_awareness_cache("user_x")
         assert "user_x" not in _awareness_cache
 
     def test_invalidate_cache_all(self, db):
+        import asyncio
         from api.agent3_awareness import (
-            build_awareness_block, invalidate_awareness_cache, _awareness_cache,
+            build_awareness_block_async, invalidate_awareness_cache, _awareness_cache,
         )
-        build_awareness_block(db, "user_all_1")
-        build_awareness_block(db, "user_all_2")
+        asyncio.run(build_awareness_block_async("user_all_1"))
+        asyncio.run(build_awareness_block_async("user_all_2"))
         invalidate_awareness_cache(None)
         assert len(_awareness_cache) == 0
 
@@ -460,32 +469,39 @@ class TestAwareness:
 
     def test_objective_snapshot_with_profil(self, db):
         """Si le profil existe avec un objectif, le bloc le mentionne."""
-        from api.agent3_awareness import _objective_snapshot
+        import asyncio
+        from api.agent3_awareness import _objective_snapshot_async
         import uuid
 
-        # Seed un profil minimal respectant le vrai schema (NOT NULL requis)
+        # Seed un profil minimal respectant le vrai schema (NOT NULL requis).
+        # Note : la progression est calculee depuis temps_gagne_jours / temps_initial_jours
+        # (depuis l'unification 2026-05-13 prob = progression). Pour atteindre 65%,
+        # on met 100j initial et 65j gagne.
         now = "2026-04-21T14:00:00"
         db.conn.execute(
             "INSERT INTO profil_utilisateur "
             "(id, nom, age, profession, ville, situation_familiale, "
             " revenu_annuel, patrimoine_estime, charges_mensuelles, "
             " objectif_description, objectif_categorie, objectif_deadline, "
-            " probabilite_actuelle, auth_user_id, cree_le, mis_a_jour_le) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " probabilite_actuelle, temps_initial_jours, temps_gagne_jours, "
+            " auth_user_id, cree_le, mis_a_jour_le) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (str(uuid.uuid4()), "Test User", 30, "Dev", "Paris", "celibataire",
              50000.0, 10000.0, 1500.0,
              "Devenir freelance senior", "career", "2026-12-31", 65.0,
+             100.0, 65.0,
              "u_profil", now, now),
         )
         db.conn.commit()
 
-        lines = _objective_snapshot(db, "u_profil")
+        lines = asyncio.run(_objective_snapshot_async("u_profil"))
         assert any("freelance" in l.lower() for l in lines)
         assert any("2026-12-31" in l for l in lines)
         assert any("65" in l for l in lines)
 
     def test_usage_patterns_with_messages(self, db):
-        from api.agent3_awareness import _detect_usage_patterns
+        import asyncio
+        from api.agent3_awareness import _detect_usage_patterns_async
         from datetime import datetime, timezone, timedelta
         import uuid
 
@@ -507,7 +523,7 @@ class TestAwareness:
             )
         db.conn.commit()
 
-        obs = _detect_usage_patterns(db, "u_pattern", datetime.now())
+        obs = asyncio.run(_detect_usage_patterns_async("u_pattern", datetime.now()))
         assert isinstance(obs, list)
         # 20 messages sur 10 jours = 2.0/jour → devrait trouver une observation
         assert len(obs) >= 1
@@ -520,18 +536,18 @@ class TestAwareness:
 class TestPromptIntegration:
     def test_build_prompt_accepts_db_user_id(self, db):
         from api.routers.agent3_openclaw import _build_agent3_prompt
-        prompt = _build_agent3_prompt(
+        prompt = asyncio.run(_build_agent3_prompt(
             profil_data=None, decisions=[], sous_objectifs=[],
             db=db, user_id="u_integration",
-        )
+        ))
         assert isinstance(prompt, str)
         assert "Agent Sylea 3" in prompt
 
     def test_build_prompt_without_db(self):
         from api.routers.agent3_openclaw import _build_agent3_prompt
         # Sans db/user → awareness doit juste retourner "" sans crash
-        prompt = _build_agent3_prompt(
+        prompt = asyncio.run(_build_agent3_prompt(
             profil_data=None, decisions=[], sous_objectifs=[],
-        )
+        ))
         assert isinstance(prompt, str)
         assert "Agent Sylea 3" in prompt

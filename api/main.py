@@ -52,25 +52,49 @@ from api.routers.integrations import router as integrations_router
 from api.routers.notifications import router as notifications_router
 from api.routers.shared_workspaces import router as shared_workspaces_router
 from api.routers.credentials_vault import router as credentials_vault_router
+from api.routers.pending import router as pending_router
 from api.schemas import HealthOut
 
 
-# ── Initialisation tables Agent 3 au démarrage ────────────────────────────────
-def _init_agent3_tables():
-    """Crée les tables Agent 3 (cron, memory, files, preferences, tasks) au démarrage."""
-    try:
-        from sylea.core.storage.database import DatabaseManager
-        from api.routers.agent3_openclaw import _ensure_agent3_tables
-        db = DatabaseManager()
-        db.connect()
-        try:
-            _ensure_agent3_tables(db)
-        finally:
-            db.disconnect()
-    except Exception:
-        pass  # DB not available yet or import error — tables will be created on first use
+# ── Initialisation schema au démarrage (Alembic en PG, DDL en SQLite) ─────────
+def _init_db_schema():
+    """Initialise le schema DB au demarrage.
 
-_init_agent3_tables()
+    - PostgreSQL prod : execute `alembic upgrade head` automatiquement.
+    - SQLite dev      : execute les DDL idempotents (CREATE TABLE IF NOT EXISTS).
+
+    Le choix est fait via DATABASE_URL (postgres / sqlite).
+    """
+    database_url = os.environ.get("DATABASE_URL", "")
+    is_postgres = database_url.startswith(("postgres://", "postgresql://", "postgresql+"))
+
+    if is_postgres:
+        # PG prod : Alembic gere les migrations
+        try:
+            from alembic.config import Config
+            from alembic import command
+            alembic_cfg = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
+            alembic_cfg.set_main_option("sqlalchemy.url", database_url)
+            command.upgrade(alembic_cfg, "head")
+            print("[main] Alembic: schema PostgreSQL synchronise (upgrade head)")
+        except Exception as e:
+            print(f"[main] Alembic upgrade failed: {e}")
+    else:
+        # SQLite dev : DDL idempotents
+        try:
+            from sylea.core.storage.database import DatabaseManager
+            from api.routers.agent3_openclaw import _ensure_agent3_tables
+            db = DatabaseManager()
+            db.connect()
+            try:
+                _ensure_agent3_tables(db)
+            finally:
+                db.disconnect()
+            print("[main] SQLite: tables Agent 3 initialisees (DDL idempotent)")
+        except Exception:
+            pass  # DB not available yet or import error — tables will be created on first use
+
+_init_db_schema()
 
 # Start background cron scheduler — opt-in via env var pour eviter les fuites
 # de cout quand personne n'utilise l'app. Defaut OFF (protege contre les
@@ -146,6 +170,7 @@ app.include_router(integrations_router)
 app.include_router(notifications_router)
 app.include_router(shared_workspaces_router)
 app.include_router(credentials_vault_router)
+app.include_router(pending_router)
 
 
 # ── Routes utilitaires ────────────────────────────────────────────────────────

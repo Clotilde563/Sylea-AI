@@ -18,30 +18,10 @@ from fastapi.testclient import TestClient
 from api.main import app
 from api.dependencies import get_db, get_agent, get_optional_user
 from sylea.core.storage.database import DatabaseManager
+from tests.conftest import make_shared_db, dispose_shared_db
 
 
 TEST_USER_ID = "test-regression-user"
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def _make_test_db() -> DatabaseManager:
-    """Create a DatabaseManager with an in-memory SQLite DB allowing cross-thread access."""
-    db = DatabaseManager(db_path=Path(":memory:"))
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    db._conn = conn
-    db._initialiser_schema()
-    # Migration colonne manquante
-    try:
-        conn.execute(
-            "ALTER TABLE profil_utilisateur ADD COLUMN objectif_probabilite_calculee REAL DEFAULT 0.0"
-        )
-    except Exception:
-        pass
-    return db
 
 
 _PROFIL_PAYLOAD = {
@@ -65,19 +45,20 @@ _PROFIL_PAYLOAD = {
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
-def db():
-    """Create an in-memory DB with schema + test user for FK constraints."""
-    manager = _make_test_db()
-    conn = manager._conn
+def db(tmp_path, monkeypatch):
+    """Create a shared SQLite DB (sync + async) with schema + test user for FK constraints.
+    Migration shared-DB : remplace `:memory:` pour permettre a l'async
+    session_factory de pointer sur la meme DB."""
+    manager = make_shared_db(tmp_path, monkeypatch)
     # Insert a test user for FK on agent_collected_info
-    conn.execute(
+    manager._conn.execute(
         "INSERT INTO users (id, email, hashed_password, provider, created_at) "
         "VALUES (?, ?, ?, ?, datetime('now'))",
         (TEST_USER_ID, "regression@test.com", "fake_hash", "local"),
     )
-    conn.commit()
+    manager._conn.commit()
     yield manager
-    manager.disconnect()
+    dispose_shared_db(manager)
 
 
 @pytest.fixture()

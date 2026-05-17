@@ -28,7 +28,7 @@ from api.schemas import (
 )
 from api.dependencies import get_profil_repo, get_decision_repo, get_agent, get_optional_user, get_db
 from sylea.core.storage.database import DatabaseManager
-from api.context_helper import format_device_context, build_full_user_context
+from api.context_helper import format_device_context, build_full_user_context_async
 
 router = APIRouter(prefix="/api/dilemme", tags=["dilemme"])
 
@@ -102,14 +102,29 @@ async def analyser_dilemme(
 
     lettres = [chr(65 + i) for i in range(len(options_list))]
 
+    # Migration PG : lectures async via SQLAlchemy text() (compat SQLite + PG).
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+
     # Chercher UNIQUEMENT les messages agent pertinents aux options du dilemme
     collected_context = ""
+    msg_rows: list[tuple] = []
     try:
-        msg_rows = db.conn.execute(
-            "SELECT role, content FROM agent_messages WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT 30",
-            (user_id or "",),
-        ).fetchall()
-        if msg_rows:
+        _factory = _gsf()
+        async with _factory() as _session:
+            _result = await _session.execute(
+                _sa_text(
+                    "SELECT role, content FROM agent_messages "
+                    "WHERE auth_user_id = :uid "
+                    "ORDER BY created_at DESC LIMIT 30"
+                ),
+                {"uid": user_id or ""},
+            )
+            msg_rows = [(r["role"], r["content"]) for r in _result.mappings().all()]
+    except Exception:
+        msg_rows = []
+    if msg_rows:
+        try:
             relevant_msgs = []
             seen = set()
             for r in msg_rows:
@@ -133,16 +148,27 @@ async def analyser_dilemme(
                     + "\n".join(f"  {m}" for m in relevant_msgs[:5])
                     + "\n\n=== FIN DES INFORMATIONS CRITIQUES ===\n"
                 )
-    except Exception:
-        pass  # Message extraction failed — continue without agent context
+        except Exception:
+            pass  # Message extraction failed — continue without agent context
 
     # Aussi charger les infos collectées par l'agent (agent_collected_info)
+    info_rows: list[tuple] = []
     try:
-        info_rows = db.conn.execute(
-            "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 20",
-            (user_id or "",),
-        ).fetchall()
-        if info_rows:
+        _factory = _gsf()
+        async with _factory() as _session:
+            _result = await _session.execute(
+                _sa_text(
+                    "SELECT field, value FROM agent_collected_info "
+                    "WHERE user_id = :uid "
+                    "ORDER BY collected_at DESC LIMIT 20"
+                ),
+                {"uid": user_id or ""},
+            )
+            info_rows = [(r["field"], r["value"]) for r in _result.mappings().all()]
+    except Exception:
+        info_rows = []
+    if info_rows:
+        try:
             # Filtrer les infos pertinentes aux options du dilemme
             relevant_infos = []
             for field, value in info_rows:
@@ -161,11 +187,11 @@ async def analyser_dilemme(
                     + "\n".join(relevant_infos[:10])
                     + "\n=== FIN DU CONTEXTE SUPPLEMENTAIRE ===\n"
                 )
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     device_ctx = format_device_context(data.contexte_appareil)
-    full_ctx = build_full_user_context(db, user_id, profil)
+    full_ctx = await build_full_user_context_async(db, user_id, profil)
 
     if agent is not None:
         try:
@@ -285,6 +311,33 @@ async def choisir_option(
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
+    # Quota quotidien d'actions IA (free: 10/j, pro/avance: 30/j, team: illimite).
+    # Migration PG (2026-05-13) : utilise les versions async des quota helpers.
+    if user_id:
+        try:
+            from api.daily_action_limit import check_daily_action_quota_async
+            from api.agent3_quotas import get_user_plan_async
+            try:
+                plan_info = await get_user_plan_async(user_id)
+                plan_name = plan_info.get('name', 'free')
+            except Exception:
+                plan_name = 'free'
+            ok, count, limit = await check_daily_action_quota_async(
+                profil.id, user_id, plan_name,
+            )
+            if not ok:
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"Quota quotidien atteint ({count}/{limit} actions aujourd'hui). "
+                        f"{'Passe a Avance pour 30 actions/jour.' if plan_name == 'free' else 'Reessaie demain.'}"
+                    ),
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
     # Trouver l'option choisie par lettre
     analyse_choisie = None
     for opt in data.options:
@@ -295,16 +348,25 @@ async def choisir_option(
         raise HTTPException(status_code=400, detail=f"Option '{data.choix}' non trouvée.")
 
     # Anti-doublon: meme dilemme dans la periode d'impact temporel
+    # Migration PG (2026-05-12) : SELECT via SQLAlchemy text() async.
     if data.impact_temporel_jours and data.impact_temporel_jours > 0:
         from datetime import datetime as _dt, timedelta as _td
+        from sqlalchemy import text as _sql_text
+        from api.database import get_session_factory as _gsf
         cutoff = (_dt.now() - _td(days=data.impact_temporel_jours)).isoformat()
         options_normalized = sorted([opt.description.strip().lower() for opt in data.options])
-        recent = profil_repo._db.conn.execute(
-            "SELECT options_json, cree_le, impact_temporel_jours FROM decisions "
-            "WHERE user_id = ? AND cree_le > ? AND question NOT LIKE '[Evenement]%' "
-            "ORDER BY cree_le DESC",
-            (profil.id, cutoff),
-        ).fetchall()
+
+        _factory = _gsf()
+        async with _factory() as _session:
+            _result = await _session.execute(
+                _sql_text(
+                    "SELECT options_json, cree_le, impact_temporel_jours FROM decisions "
+                    "WHERE user_id = :uid AND cree_le > :cutoff "
+                    "AND question NOT LIKE '[Evenement]%' ORDER BY cree_le DESC"
+                ),
+                {"uid": profil.id, "cutoff": cutoff},
+            )
+            recent = _result.mappings().all()
         import json as _json
         for row in recent:
             try:
@@ -382,38 +444,49 @@ async def choisir_option(
     profil.marquer_modification()
     profil_repo.sauvegarder(profil)
 
-    # Identifier et mettre a jour le sous-objectif pertinent via IA
+    # Identifier et mettre a jour le sous-objectif pertinent via IA.
+    # Migration PG (2026-05-12) : SELECT sous_objectifs + apply_impact_invariant_safe
+    # via async (compat SQLite + PG). Tout dans UNE seule transaction.
     so_titre_impacte = None
     try:
-        db = profil_repo._db
-        # Charger TOUS les SO (y compris completes) pour le calcul proportionnel
-        all_so_all = db.conn.execute(
-            "SELECT id, titre, progression, ordre, temps_estime FROM sous_objectifs WHERE user_id = ? ORDER BY ordre",
-            (profil.id,),
-        ).fetchall()
-        all_so = [so for so in all_so_all if so["progression"] < 100]
-        if all_so:
-            # Construire la description du choix pour le matching
-            choix_desc = f"{data.question} - Choix: {analyse_choisie.description}"
-            so_cible = await _identifier_so_pertinent(choix_desc, all_so)
-            if so_cible is None:
-                so_cible = all_so[0]  # fallback: premier par ordre
-            # Invariant: sum(SO_restant) = objectif_restant
-            # Use proportional SO time: (te / sum_te_ALL) * temps_initial
-            total_te_all = sum(max(30, so["temps_estime"] or 180) for so in all_so_all)
-            te = max(30, so_cible["temps_estime"] if so_cible["temps_estime"] else 180)
-            so_initial_jours = (te / total_te_all) * profil.temps_initial_jours if total_te_all > 0 else te
-            impact_so = (impact_jours / so_initial_jours) * 100 if so_initial_jours > 0 else 0
-            new_prog = min(100, max(0, so_cible["progression"] + impact_so))
-            db.conn.execute(
-                "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
-                (new_prog, so_cible["id"]),
-            )
-            db.conn.commit()
-            so_titre_impacte = so_cible["titre"]
-            # Persister le lien SO dans la décision
-            decision.sous_objectif_id = so_cible["id"]
-            decision.impact_sous_objectif = impact_so
+        from sqlalchemy import text as _sql_text2
+        from api.database import get_session_factory as _gsf2
+        from api.so_invariant import apply_impact_invariant_safe_async
+
+        _factory2 = _gsf2()
+        async with _factory2() as _session2:
+            try:
+                _so_result = await _session2.execute(
+                    _sql_text2(
+                        "SELECT id, titre, progression, ordre, temps_estime "
+                        "FROM sous_objectifs WHERE user_id = :uid ORDER BY ordre"
+                    ),
+                    {"uid": profil.id},
+                )
+                all_so_all = list(_so_result.mappings().all())
+                all_so = [so for so in all_so_all if (so["progression"] or 0) < 100]
+                if all_so:
+                    choix_desc = f"{data.question} - Choix: {analyse_choisie.description}"
+                    so_cible = await _identifier_so_pertinent(choix_desc, all_so)
+                    if so_cible is None:
+                        so_cible = all_so[0]
+
+                    target_id_used, applied_delta_pct = await apply_impact_invariant_safe_async(
+                        _session2, profil.id, so_cible["id"], impact_jours,
+                        profil.temps_initial_jours,
+                    )
+                    so_titre_impacte = so_cible["titre"]
+                    decision.sous_objectif_id = target_id_used or so_cible["id"]
+                    decision.impact_sous_objectif = applied_delta_pct
+                    # Note : sauvegarde decision via sync repo, hors de la
+                    # transaction async — best-effort (l'invariant SO est deja
+                    # commit dans la transaction async).
+                await _session2.commit()
+            except Exception:
+                await _session2.rollback()
+                raise
+        # Mise a jour de la decision avec sous_objectif_id / impact (sync)
+        if so_titre_impacte:
             decision_repo.sauvegarder(decision)
     except Exception:
         pass

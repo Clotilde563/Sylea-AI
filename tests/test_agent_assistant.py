@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from api.main import app
 from api.dependencies import get_db, get_agent, get_optional_user
 from sylea.core.storage.database import DatabaseManager
+from tests.conftest import make_shared_db, dispose_shared_db
 
 TEST_USER_ID = "test-user-agent-assistant"
 
@@ -31,35 +32,29 @@ pytestmark = pytest.mark.skipif(
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
-def db():
-    """
-    Cree une base SQLite en memoire avec le schema initialise.
-    Utilise check_same_thread=False car le TestClient execute
-    les requetes dans un thread different.
-    """
-    manager = DatabaseManager(db_path=Path(":memory:"))
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    manager._conn = conn
-    manager._initialiser_schema()
-    # Migration colonne manquante
-    try:
-        conn.execute(
-            "ALTER TABLE profil_utilisateur ADD COLUMN objectif_probabilite_calculee REAL DEFAULT 0.0"
-        )
-    except Exception:
-        pass
+def db(tmp_path, monkeypatch):
+    """DB SQLite partagee (sync + async) via fichier temp.
+    Migration shared-DB : remplace `:memory:` pour permettre a
+    l'async session_factory de pointer sur la meme DB."""
+    import asyncio as _aio
+    manager = make_shared_db(tmp_path, monkeypatch)
     # Inserer un utilisateur test pour satisfaire la FK de agent2_messages
-    conn.execute(
+    manager._conn.execute(
         "INSERT INTO users (id, email, hashed_password, provider, created_at) "
         "VALUES (?, ?, ?, ?, datetime('now'))",
         (TEST_USER_ID, "test-agent2@test.com", "fake_hash", "local"),
     )
-    conn.commit()
+    manager._conn.commit()
+    # Agent 2 est gate par le plan : on bascule le user test en 'pro'
+    # pour permettre l'acces aux endpoints /api/agent2/* (sinon 403).
+    try:
+        from api.agent3_quotas import ensure_quota_tables, set_user_plan_async
+        ensure_quota_tables(manager)
+        _aio.run(set_user_plan_async(TEST_USER_ID, "pro"))
+    except Exception:
+        pass
     yield manager
-    manager.disconnect()
+    dispose_shared_db(manager)
 
 
 @pytest.fixture()

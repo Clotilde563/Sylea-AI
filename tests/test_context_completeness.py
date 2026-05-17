@@ -7,14 +7,14 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def test_build_full_user_context_includes_all_fields():
-    """Verify that build_full_user_context includes all critical fields."""
-    from api.context_helper import build_full_user_context
-    from sylea.core.storage.database import DatabaseManager
+def test_build_full_user_context_includes_all_fields(tmp_path, monkeypatch):
+    """Verify that build_full_user_context_async includes all critical fields."""
+    import asyncio
+    from tests.conftest import make_shared_db, dispose_shared_db
+    from api.context_helper import build_full_user_context_async
     from sylea.core.models.user import ProfilUtilisateur, Objectif
 
-    db = DatabaseManager(":memory:")
-    db.connect()
+    db = make_shared_db(tmp_path, monkeypatch)
 
     profil = ProfilUtilisateur(
         nom="Test User",
@@ -42,39 +42,41 @@ def test_build_full_user_context_includes_all_fields():
     profil.diplomes = ["Licence informatique"]
     profil.langues = ["Francais", "Anglais"]
 
-    ctx = build_full_user_context(
-        db, user_id=None, profil=profil,
-        include_collected_info=False,
-        include_decisions=False,
-        include_sous_objectifs=False,
-    )
+    try:
+        ctx = asyncio.run(build_full_user_context_async(
+            db, user_id=None, profil=profil,
+            include_collected_info=False,
+            include_decisions=False,
+            include_sous_objectifs=False,
+        ))
 
-    # ALL these must be present
-    assert "Test User" in ctx
-    assert "25" in ctx
-    assert "Homme" in ctx
-    assert "dev" in ctx
-    assert "Paris" in ctx
-    assert "celibataire" in ctx
-    assert "Devenir freelance" in ctx
-    assert "carri\u00e8re" in ctx
-    assert "Independance" in ctx  # Q&A context
-    assert "7/10" in ctx  # sante
-    assert "5/10" in ctx  # stress
-    assert "8h/jour" in ctx  # heures_travail
-    assert "2h/jour" in ctx  # heures_objectif
-    assert "Python" in ctx
-    assert "Licence informatique" in ctx
-    assert "Anglais" in ctx
-
-    db.disconnect()
+        # ALL these must be present
+        assert "Test User" in ctx
+        assert "25" in ctx
+        assert "Homme" in ctx
+        assert "dev" in ctx
+        assert "Paris" in ctx
+        assert "celibataire" in ctx
+        assert "Devenir freelance" in ctx
+        assert "carri\u00e8re" in ctx
+        assert "Independance" in ctx  # Q&A context
+        assert "7/10" in ctx  # sante
+        assert "5/10" in ctx  # stress
+        assert "8h/jour" in ctx  # heures_travail
+        assert "2h/jour" in ctx  # heures_objectif
+        assert "Python" in ctx
+        assert "Licence informatique" in ctx
+        assert "Anglais" in ctx
+    finally:
+        dispose_shared_db(db)
 
 
 def test_build_full_user_context_empty_when_no_profil():
-    """Verify that build_full_user_context returns empty string when no profile."""
-    from api.context_helper import build_full_user_context
+    """Verify that build_full_user_context_async returns empty string when no profile."""
+    import asyncio
+    from api.context_helper import build_full_user_context_async
 
-    ctx = build_full_user_context(db=None, user_id=None, profil=None)
+    ctx = asyncio.run(build_full_user_context_async(db=None, user_id=None, profil=None))
     assert ctx == ""
 
 
@@ -96,5 +98,7 @@ def test_all_features_import_build_full_user_context():
         assert os.path.exists(full_path), f"{rel_path} does not exist!"
         with open(full_path, "r", encoding="utf-8") as f:
             source = f.read()
-        assert "build_full_user_context" in source, \
-            f"{rel_path} does NOT use build_full_user_context!"
+        # Accept either the sync OR async variant (migration-friendly)
+        assert ("build_full_user_context" in source
+                or "build_full_user_context_async" in source), \
+            f"{rel_path} does NOT use build_full_user_context (sync or async)!"

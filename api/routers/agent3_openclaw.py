@@ -36,7 +36,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from api.context_helper import format_device_context, build_full_user_context
+from api.context_helper import format_device_context, build_full_user_context_async
 from api.dependencies import get_db, get_optional_user
 from api.openclaw_bridge import (
     openclaw_chat, openclaw_health, openclaw_capabilities,
@@ -76,6 +76,11 @@ from api.agent3_mcp_client import MCPRegistry, MCPClient, MCPCallResult, get_mcp
 from sylea.core.storage.database import DatabaseManager
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
 
+# Migration PG (2026-05-13) : helpers async via SQLAlchemy text() —
+# compatible SQLite + PostgreSQL.
+from sqlalchemy import text as _sa_text
+from api.database import get_session_factory as _get_session_factory
+
 logger = logging.getLogger("agent3")
 
 # ── OpenClaw connection config ────────────────────────────────────────────────
@@ -83,6 +88,40 @@ OPENCLAW_PORT = int(os.environ.get("OPENCLAW_PORT", "18789"))
 OPENCLAW_BASE_URL = os.environ.get("OPENCLAW_GATEWAY_URL", f"http://localhost:{OPENCLAW_PORT}")
 
 router = APIRouter(prefix="/api/agent3", tags=["agent3"])
+
+
+# ── Plan gating helper ───────────────────────────────────────────────────────
+# Agent 3 est reserve aux plans Team / Enterprise.
+# Free + Avance (pro) reçoivent un 403 sur les endpoints sensibles (chat,
+# computer-use, code execute, browser-agent plan/permission).
+# Note : cette dependency renvoie None et ne bloque pas si user_id absent
+# (laisse downstream gerer le 401). Si user a un plan inferieur a team,
+# elle leve 403.
+
+async def _require_agent3_plan(
+    db: DatabaseManager = Depends(get_db),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Bloque l'acces aux endpoints Agent 3 sensibles si plan != team/enterprise.
+
+    A ajouter en Depends sur chaque endpoint chat / computer-use / execute.
+    """
+    if user_id is None:
+        return  # laisse downstream renvoyer 401 si besoin
+    try:
+        from api.agent3_quotas import get_user_plan_async
+        plan_name = (await get_user_plan_async(user_id) or {}).get('name', 'free')
+    except Exception:
+        plan_name = 'free'  # defaut safe
+    if plan_name not in ('team', 'enterprise'):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Agent Sylea 3 est reserve aux plans Team et Enterprise. "
+                "Cette fonctionnalite est en preparation pour les abonnes Avance "
+                "et n'est pas encore disponible."
+            ),
+        )
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -173,7 +212,11 @@ class SaveContextOut(BaseModel):
 # ── DB schema init ──────────────────────────────────────────────────────────
 
 def _ensure_agent3_tables(db: DatabaseManager):
-    """Cree les tables supplementaires pour Agent 3 si elles n'existent pas."""
+    """Cree les tables supplementaires pour Agent 3 si elles n'existent pas.
+
+    Sync version (kept for backward compat). Use `_ensure_agent3_tables_async`
+    for new async paths.
+    """
     db.conn.execute("""
         CREATE TABLE IF NOT EXISTS agent3_cron (
             id TEXT PRIMARY KEY,
@@ -249,24 +292,119 @@ def _ensure_agent3_tables(db: DatabaseManager):
     db.conn.commit()
 
 
-def _get_user_preferences(db: DatabaseManager, user_id: str) -> dict:
-    """Load user preferences for Agent 3. Returns defaults if none set."""
-    try:
-        row = db.conn.execute(
-            "SELECT preferences_json FROM agent3_preferences WHERE auth_user_id = ?",
-            (user_id,),
-        ).fetchone()
-        if row:
-            return json.loads(row[0])
-    except Exception:
-        pass
-    # Default: mode sur = l'agent demande confirmation pour chaque action destructive.
-    # Le mode bypass (UI) force l'execution sans confirmation.
+async def _ensure_agent3_tables_async() -> None:
+    """Cree les tables Agent 3 — version async, portable SQLite + PostgreSQL.
+
+    Note : on n'inclut PAS la column AUTOINCREMENT (SQLite-specific). Pour PG,
+    on bascule sur SERIAL/IDENTITY via migration Alembic. Ici on cree juste
+    si SQLite, sinon on suppose que les tables existent deja via Alembic.
+    """
+    factory = _get_session_factory()
+    async with factory() as session:
+        try:
+            # Toutes les CREATE IF NOT EXISTS sont idempotents.
+            # On utilise INTEGER PRIMARY KEY pour SQLite ; sur PG les types
+            # seraient SERIAL / TEXT mais la migration Alembic gere ca.
+            await session.execute(_sa_text("""
+                CREATE TABLE IF NOT EXISTS agent3_cron (
+                    id TEXT PRIMARY KEY,
+                    auth_user_id TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    instruction TEXT NOT NULL,
+                    cron_expr TEXT NOT NULL DEFAULT '0 9 * * *',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    last_run TEXT,
+                    last_result TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """))
+            await session.execute(_sa_text("""
+                CREATE TABLE IF NOT EXISTS agent3_memory (
+                    id TEXT PRIMARY KEY,
+                    auth_user_id TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    category TEXT DEFAULT 'general',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """))
+            await session.execute(_sa_text("""
+                CREATE TABLE IF NOT EXISTS agent3_files (
+                    id TEXT PRIMARY KEY,
+                    auth_user_id TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    filetype TEXT NOT NULL,
+                    filesize INTEGER NOT NULL,
+                    filepath TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """))
+            await session.execute(_sa_text("""
+                CREATE TABLE IF NOT EXISTS agent3_preferences (
+                    auth_user_id TEXT PRIMARY KEY,
+                    preferences_json TEXT NOT NULL DEFAULT '{}'
+                )
+            """))
+            await session.execute(_sa_text("""
+                CREATE TABLE IF NOT EXISTS agent3_tasks (
+                    id TEXT PRIMARY KEY,
+                    auth_user_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    steps_json TEXT DEFAULT '[]',
+                    status TEXT DEFAULT 'en_cours',
+                    progress REAL DEFAULT 0.0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """))
+            await session.execute(_sa_text("""
+                CREATE TABLE IF NOT EXISTS agent3_clawhub_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    auth_user_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    slug TEXT NOT NULL,
+                    trigger_context TEXT DEFAULT '',
+                    success INTEGER NOT NULL DEFAULT 1,
+                    error_message TEXT DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+            """))
+            await session.execute(_sa_text("""
+                CREATE INDEX IF NOT EXISTS idx_clawhub_events_user
+                ON agent3_clawhub_events(auth_user_id, created_at DESC)
+            """))
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            # En PG, les CREATE TABLE IF NOT EXISTS sont normalement OK ;
+            # si la table existe deja avec un schema legerement different,
+            # on log silencieusement.
+            pass
+
+
+async def _get_user_preferences_async(user_id: str) -> dict:
+    """Async version of _get_user_preferences (portable SQLite + PG)."""
+    factory = _get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                _sa_text(
+                    "SELECT preferences_json FROM agent3_preferences "
+                    "WHERE auth_user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            row = result.first()
+            if row:
+                return json.loads(row[0])
+        except Exception:
+            pass
     return {"confirm_destructive": True}
 
 
-def _log_clawhub_event(
-    db: DatabaseManager,
+async def _log_clawhub_event_async(
     user_id: str,
     event_type: str,
     slug: str,
@@ -275,78 +413,106 @@ def _log_clawhub_event(
     success: bool = True,
     error_message: str = "",
 ) -> None:
-    """Enregistre un evenement d'auto-extension (install/publish/search).
-
-    Utilise par le dispatcher natif apres chaque appel meta-tool. Transparent
-    pour l'utilisateur : expose via GET /api/agent3/clawhub/events.
-    """
+    """Async version of _log_clawhub_event (portable SQLite + PG)."""
     try:
-        _ensure_agent3_tables(db)
-        db.conn.execute(
-            "INSERT INTO agent3_clawhub_events "
-            "(auth_user_id, event_type, slug, trigger_context, success, error_message, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
-            (
-                user_id,
-                event_type[:32],
-                slug[:100],
-                trigger_context[:500],
-                1 if success else 0,
-                error_message[:500],
-            ),
-        )
-        db.conn.commit()
+        await _ensure_agent3_tables_async()
+        now = datetime.now(timezone.utc).isoformat()
+        factory = _get_session_factory()
+        async with factory() as session:
+            try:
+                await session.execute(
+                    _sa_text(
+                        "INSERT INTO agent3_clawhub_events "
+                        "(auth_user_id, event_type, slug, trigger_context, success, error_message, created_at) "
+                        "VALUES (:uid, :etype, :slug, :ctx, :ok, :err, :now)"
+                    ),
+                    {
+                        "uid": user_id,
+                        "etype": event_type[:32],
+                        "slug": slug[:100],
+                        "ctx": trigger_context[:500],
+                        "ok": 1 if success else 0,
+                        "err": error_message[:500],
+                        "now": now,
+                    },
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
     except Exception as e:
-        logger.debug(f"Failed to log clawhub event: {e}")
+        logger.debug(f"Failed to log clawhub event (async): {e}")
 
 
-def _list_clawhub_events(
-    db: DatabaseManager, user_id: str, limit: int = 50,
+async def _list_clawhub_events_async(
+    user_id: str, limit: int = 50,
 ) -> list[dict]:
-    """Liste les derniers evenements d'auto-extension pour un user."""
+    """Async version of _list_clawhub_events (portable SQLite + PG)."""
     try:
-        _ensure_agent3_tables(db)
-        rows = db.conn.execute(
-            "SELECT id, event_type, slug, trigger_context, success, error_message, created_at "
-            "FROM agent3_clawhub_events WHERE auth_user_id = ? "
-            "ORDER BY created_at DESC, id DESC LIMIT ?",
-            (user_id, max(1, min(200, int(limit or 50)))),
-        ).fetchall()
-        result = []
-        for r in rows:
-            result.append({
-                "id": r[0],
-                "event_type": r[1],
-                "slug": r[2],
-                "trigger_context": r[3],
-                "success": bool(r[4]),
-                "error_message": r[5],
-                "created_at": r[6],
-            })
-        return result
+        await _ensure_agent3_tables_async()
+        capped = max(1, min(200, int(limit or 50)))
+        factory = _get_session_factory()
+        async with factory() as session:
+            res = await session.execute(
+                _sa_text(
+                    "SELECT id, event_type, slug, trigger_context, success, error_message, created_at "
+                    "FROM agent3_clawhub_events WHERE auth_user_id = :uid "
+                    "ORDER BY created_at DESC, id DESC LIMIT :lim"
+                ),
+                {"uid": user_id, "lim": capped},
+            )
+            rows = list(res.mappings().all())
+        return [
+            {
+                "id": r["id"],
+                "event_type": r["event_type"],
+                "slug": r["slug"],
+                "trigger_context": r["trigger_context"],
+                "success": bool(r["success"]),
+                "error_message": r["error_message"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
     except Exception as e:
-        logger.debug(f"Failed to list clawhub events: {e}")
+        logger.debug(f"Failed to list clawhub events (async): {e}")
         return []
 
 
-def _save_user_preferences(db: DatabaseManager, user_id: str, prefs: dict):
-    """Save user preferences for Agent 3."""
+async def _save_user_preferences_async(user_id: str, prefs: dict) -> None:
+    """Async version of _save_user_preferences (SELECT then UPDATE/INSERT, portable)."""
     prefs_json = json.dumps(prefs, ensure_ascii=False)
-    existing = db.conn.execute(
-        "SELECT auth_user_id FROM agent3_preferences WHERE auth_user_id = ?",
-        (user_id,),
-    ).fetchone()
-    if existing:
-        db.conn.execute(
-            "UPDATE agent3_preferences SET preferences_json = ? WHERE auth_user_id = ?",
-            (prefs_json, user_id),
-        )
-    else:
-        db.conn.execute(
-            "INSERT INTO agent3_preferences (auth_user_id, preferences_json) VALUES (?, ?)",
-            (user_id, prefs_json),
-        )
-    db.conn.commit()
+    factory = _get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                _sa_text(
+                    "SELECT auth_user_id FROM agent3_preferences "
+                    "WHERE auth_user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            existing = result.first()
+            if existing:
+                await session.execute(
+                    _sa_text(
+                        "UPDATE agent3_preferences SET preferences_json = :pj "
+                        "WHERE auth_user_id = :uid"
+                    ),
+                    {"pj": prefs_json, "uid": user_id},
+                )
+            else:
+                await session.execute(
+                    _sa_text(
+                        "INSERT INTO agent3_preferences (auth_user_id, preferences_json) "
+                        "VALUES (:uid, :pj)"
+                    ),
+                    {"uid": user_id, "pj": prefs_json},
+                )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 # ── File handling ──────────────────────────────────────────────────────────
@@ -360,18 +526,24 @@ FILES_DIR.mkdir(parents=True, exist_ok=True)
 WORKSPACE_BASE = Path(__file__).resolve().parent.parent.parent / "data" / "workspace"
 
 
-def get_workspace_folder_name(db, user_id: str) -> str:
-    """Derive workspace folder name from user's life objective. Single source of truth."""
+async def get_workspace_folder_name_async(user_id: str) -> str:
+    """Async version of get_workspace_folder_name (portable SQLite + PG)."""
     try:
-        obj_row = db.conn.execute(
-            "SELECT objectif_description FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1",
-            (user_id,),
-        ).fetchone()
-        if obj_row and obj_row[0]:
-            raw = obj_row[0][:50]
-            name = re.sub(r'[^\w\s-]', '', raw).strip().replace(' ', '_')
-            if name:
-                return name
+        factory = _get_session_factory()
+        async with factory() as session:
+            result = await session.execute(
+                _sa_text(
+                    "SELECT objectif_description FROM profil_utilisateur "
+                    "WHERE auth_user_id = :uid LIMIT 1"
+                ),
+                {"uid": user_id},
+            )
+            row = result.first()
+            if row and row[0]:
+                raw = row[0][:50]
+                name = re.sub(r'[^\w\s-]', '', raw).strip().replace(' ', '_')
+                if name:
+                    return name
     except Exception:
         pass
     return "Documents_Sylea"
@@ -425,18 +597,42 @@ def _save_uploaded_file(file_data: dict) -> dict | None:
         return None
 
 
-def _send_email_smtp(db, user_id: str, to: str, subject: str, body: str, html: bool = False) -> dict:
-    """Send email via user's configured SMTP settings. Returns {ok, error?, message_id?}."""
+async def _get_smtp_config_async(user_id: str) -> tuple | None:
+    """Charge la config SMTP du user via session async (PG-compatible).
+
+    Retourne (smtp_email, smtp_password, smtp_host, smtp_port, display_name) ou None.
+    """
     try:
-        row = db.conn.execute(
-            "SELECT smtp_email, smtp_password, smtp_host, smtp_port, display_name "
-            "FROM user_email_settings WHERE user_id = ?",
-            (user_id,),
-        ).fetchone()
+        factory = _get_session_factory()
+        async with factory() as session:
+            result = await session.execute(
+                _sa_text(
+                    "SELECT smtp_email, smtp_password, smtp_host, smtp_port, "
+                    "display_name FROM user_email_settings WHERE user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            row = result.first()
         if not row:
+            return None
+        return (row[0], row[1], row[2], row[3], row[4])
+    except Exception:
+        return None
+
+
+def _send_email_smtp(db, user_id: str, to: str, subject: str, body: str, html: bool = False) -> dict:
+    """Send email via user's configured SMTP settings. Returns {ok, error?, message_id?}.
+
+    Sync version utilisee dans les SSE generators. Lit la config SMTP via
+    asyncio.run(_get_smtp_config_async) pour rester PG-compatible.
+    """
+    try:
+        import asyncio as _aio
+        cfg = _aio.run(_get_smtp_config_async(user_id))
+        if not cfg:
             return {"ok": False, "error": "Email non configure. Va dans Parametres > Email pour configurer ton SMTP."}
 
-        smtp_email, smtp_password, smtp_host, smtp_port, display_name = row
+        smtp_email, smtp_password, smtp_host, smtp_port, display_name = cfg
 
         msg = MIMEMultipart("alternative")
         msg["From"] = f"{display_name} <{smtp_email}>" if display_name else smtp_email
@@ -599,80 +795,129 @@ def _extract_file_content(filepath: str, filetype: str) -> str:
 
 # ── Memory helpers ─────────────────────────────────────────────────────────
 
-def _save_memory(db: DatabaseManager, user_id: str, key: str, value: str, category: str = "general"):
-    """Sauvegarde une information en memoire inter-sessions."""
+async def _save_memory_async(
+    user_id: str, key: str, value: str, category: str = "general",
+) -> None:
+    """Async version of _save_memory : SELECT-then-UPDATE/INSERT, portable."""
     now = datetime.now(timezone.utc).isoformat()
-    existing = db.conn.execute(
-        "SELECT id FROM agent3_memory WHERE auth_user_id = ? AND key = ?",
-        (user_id, key),
-    ).fetchone()
-    if existing:
-        db.conn.execute(
-            "UPDATE agent3_memory SET value = ?, updated_at = ? WHERE id = ?",
-            (value, now, existing[0]),
+    factory = _get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                _sa_text(
+                    "SELECT id FROM agent3_memory "
+                    "WHERE auth_user_id = :uid AND key = :key"
+                ),
+                {"uid": user_id, "key": key},
+            )
+            existing = result.first()
+            if existing:
+                await session.execute(
+                    _sa_text(
+                        "UPDATE agent3_memory SET value = :val, updated_at = :now "
+                        "WHERE id = :id"
+                    ),
+                    {"val": value, "now": now, "id": existing[0]},
+                )
+            else:
+                await session.execute(
+                    _sa_text(
+                        "INSERT INTO agent3_memory "
+                        "(id, auth_user_id, key, value, category, created_at, updated_at) "
+                        "VALUES (:id, :uid, :key, :val, :cat, :now, :now)"
+                    ),
+                    {
+                        "id": str(uuid.uuid4()), "uid": user_id, "key": key,
+                        "val": value, "cat": category, "now": now,
+                    },
+                )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def _load_memories_async(user_id: str, limit: int = 50) -> list[dict]:
+    """Async version of _load_memories (portable SQLite + PG)."""
+    factory = _get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            _sa_text(
+                "SELECT key, value, category, updated_at FROM agent3_memory "
+                "WHERE auth_user_id = :uid ORDER BY updated_at DESC LIMIT :lim"
+            ),
+            {"uid": user_id, "lim": limit},
         )
-    else:
-        db.conn.execute(
-            "INSERT INTO agent3_memory (id, auth_user_id, key, value, category, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), user_id, key, value, category, now, now),
-        )
-    db.conn.commit()
+        rows = list(result.mappings().all())
+    return [
+        {
+            "key": r["key"], "value": r["value"],
+            "category": r["category"], "updated_at": r["updated_at"],
+        }
+        for r in rows
+    ]
 
 
-def _load_memories(db: DatabaseManager, user_id: str, limit: int = 50) -> list[dict]:
-    """Charge les souvenirs de l'agent pour cet utilisateur."""
-    rows = db.conn.execute(
-        "SELECT key, value, category, updated_at FROM agent3_memory "
-        "WHERE auth_user_id = ? ORDER BY updated_at DESC LIMIT ?",
-        (user_id, limit),
-    ).fetchall()
-    return [{"key": r[0], "value": r[1], "category": r[2], "updated_at": r[3]} for r in rows]
-
-
-def _cleanup_old_memories(db: DatabaseManager, user_id: str) -> int:
-    """Remove low-value memories older than 90 days. Keep high-impact decision memories."""
+async def _cleanup_old_memories_async(user_id: str) -> int:
+    """Async version of _cleanup_old_memories (portable SQLite + PG)."""
     from datetime import timedelta
     cutoff = (datetime.now() - timedelta(days=90)).isoformat()
-    # Get high-impact decision keywords to preserve
+    factory = _get_session_factory()
+    preserve_keywords: set[str] = set()
     try:
-        high_impact_rows = db.conn.execute(
-            "SELECT question FROM decisions WHERE user_id IN "
-            "(SELECT id FROM profil_utilisateur WHERE auth_user_id = ?) "
-            "AND ABS(COALESCE(impact_temporel_jours, 0)) >= 30",
-            (user_id,),
-        ).fetchall()
-        preserve_keywords = set()
-        for row in high_impact_rows:
-            for word in row[0].lower().split():
+        async with factory() as session:
+            res = await session.execute(
+                _sa_text(
+                    "SELECT question FROM decisions WHERE user_id IN "
+                    "(SELECT id FROM profil_utilisateur WHERE auth_user_id = :uid) "
+                    "AND ABS(COALESCE(impact_temporel_jours, 0)) >= 30"
+                ),
+                {"uid": user_id},
+            )
+            high_impact_rows = list(res.mappings().all())
+        for r in high_impact_rows:
+            for word in str(r.get("question", "")).lower().split():
                 if len(word) > 3:
                     preserve_keywords.add(word)
     except Exception:
         preserve_keywords = set()
 
-    # Delete old memories that don't match high-impact keywords
     try:
-        old_rows = db.conn.execute(
-            "SELECT key, value FROM agent3_memory WHERE auth_user_id = ? AND created_at < ?",
-            (user_id, cutoff),
-        ).fetchall()
-        deleted = 0
-        for key, value in old_rows:
-            text = f"{key} {value}".lower()
-            if not any(kw in text for kw in preserve_keywords):
-                db.conn.execute(
-                    "DELETE FROM agent3_memory WHERE auth_user_id = ? AND key = ?",
-                    (user_id, key),
-                )
-                deleted += 1
-        if deleted:
-            db.conn.commit()
+        async with factory() as session:
+            res = await session.execute(
+                _sa_text(
+                    "SELECT key, value FROM agent3_memory "
+                    "WHERE auth_user_id = :uid AND created_at < :cutoff"
+                ),
+                {"uid": user_id, "cutoff": cutoff},
+            )
+            old_rows = list(res.mappings().all())
+            deleted = 0
+            try:
+                for r in old_rows:
+                    key = r["key"]
+                    value = r["value"]
+                    txt = f"{key} {value}".lower()
+                    if not any(kw in txt for kw in preserve_keywords):
+                        await session.execute(
+                            _sa_text(
+                                "DELETE FROM agent3_memory "
+                                "WHERE auth_user_id = :uid AND key = :key"
+                            ),
+                            {"uid": user_id, "key": key},
+                        )
+                        deleted += 1
+                if deleted:
+                    await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
         return deleted
     except Exception:
         return 0
 
 
-def _search_memories(
+async def _search_memories(
     db: DatabaseManager,
     user_id: str,
     query: str,
@@ -684,7 +929,7 @@ def _search_memories(
     sinon fallback sur recherche par mots-cles.
     """
     # Charger tous les souvenirs (le corpus est petit, pas besoin de paginer)
-    all_memories = _load_memories(db, user_id, limit=500)
+    all_memories = await _load_memories_async(user_id, limit=500)
     if not all_memories:
         return []
     return semantic_search(query, all_memories, top_k=top_k)
@@ -744,7 +989,7 @@ async def _auto_extract_memories(
         logger.debug(f"MemoryExtractor: anthropic client init failed: {e}")
         return []
 
-    existing = _load_memories(db, user_id, limit=80)
+    existing = await _load_memories_async(user_id, limit=80)
     extractor = MemoryExtractor(client)
 
     try:
@@ -756,7 +1001,7 @@ async def _auto_extract_memories(
     saved: list[ExtractedFact] = []
     for fact in facts:
         try:
-            _save_memory(db, user_id, fact.key, fact.value, fact.category)
+            await _save_memory_async(user_id, fact.key, fact.value, fact.category)
             saved.append(fact)
         except Exception as e:
             logger.warning(f"_save_memory failed for {fact.key}: {e}")
@@ -770,52 +1015,86 @@ async def _auto_extract_memories(
 
 # ── DB helpers for agent3_messages ──────────────────────────────────────────
 
-def _save_agent3_message(
-    db: DatabaseManager, auth_user_id: str, role: str, content: str,
+async def _save_agent3_message_async(
+    auth_user_id: str, role: str, content: str,
     msg_type: str = "text", audio_data: str = "",
 ) -> None:
+    """Async version of _save_agent3_message (portable SQLite + PG)."""
     msg_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "INSERT INTO agent3_messages (id, auth_user_id, role, content, type, created_at, audio_data) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (msg_id, auth_user_id, role, content, msg_type, now, audio_data or ""),
-    )
-    db.conn.commit()
+    factory = _get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(
+                _sa_text(
+                    "INSERT INTO agent3_messages "
+                    "(id, auth_user_id, role, content, type, created_at, audio_data) "
+                    "VALUES (:id, :uid, :role, :content, :type, :now, :audio)"
+                ),
+                {
+                    "id": msg_id, "uid": auth_user_id, "role": role,
+                    "content": content, "type": msg_type,
+                    "now": now, "audio": audio_data or "",
+                },
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
-def _load_agent3_messages(
-    db: DatabaseManager, auth_user_id: str, limit: int = 50,
+async def _load_agent3_messages_async(
+    auth_user_id: str, limit: int = 50,
 ) -> list[dict]:
-    cursor = db.conn.execute(
-        "SELECT id, role, content, type, created_at, audio_data FROM agent3_messages "
-        "WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT ?",
-        (auth_user_id, limit),
-    )
-    rows = cursor.fetchall()
+    """Async version of _load_agent3_messages (portable SQLite + PG)."""
+    factory = _get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            _sa_text(
+                "SELECT id, role, content, type, created_at, audio_data FROM agent3_messages "
+                "WHERE auth_user_id = :uid ORDER BY created_at DESC LIMIT :lim"
+            ),
+            {"uid": auth_user_id, "lim": limit},
+        )
+        rows = list(result.mappings().all())
     return [
         {
-            "id": r[0], "role": r[1], "content": r[2],
-            "type": r[3], "created_at": r[4], "audio_data": r[5] or "",
+            "id": r["id"], "role": r["role"], "content": r["content"],
+            "type": r["type"], "created_at": r["created_at"],
+            "audio_data": r["audio_data"] or "",
         }
         for r in reversed(rows)
     ]
 
 
-def _count_agent3_messages(db: DatabaseManager, auth_user_id: str) -> int:
-    cursor = db.conn.execute(
-        "SELECT COUNT(*) FROM agent3_messages WHERE auth_user_id = ?",
-        (auth_user_id,),
-    )
-    return cursor.fetchone()[0]
+async def _count_agent3_messages_async(auth_user_id: str) -> int:
+    """Async version of _count_agent3_messages."""
+    factory = _get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            _sa_text(
+                "SELECT COUNT(*) FROM agent3_messages WHERE auth_user_id = :uid"
+            ),
+            {"uid": auth_user_id},
+        )
+        return int(result.scalar() or 0)
 
 
-def _clear_agent3_messages(db: DatabaseManager, auth_user_id: str) -> None:
-    db.conn.execute(
-        "DELETE FROM agent3_messages WHERE auth_user_id = ?",
-        (auth_user_id,),
-    )
-    db.conn.commit()
+async def _clear_agent3_messages_async(auth_user_id: str) -> None:
+    """Async version of _clear_agent3_messages."""
+    factory = _get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(
+                _sa_text(
+                    "DELETE FROM agent3_messages WHERE auth_user_id = :uid"
+                ),
+                {"uid": auth_user_id},
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 # ── Workspace helpers (creation de documents via Agent 3) ─────────────────────
@@ -852,7 +1131,7 @@ def _ensure_workspace_tables_agent3(db: DatabaseManager):
     db.conn.commit()
 
 
-def _handle_workspace_action(
+async def _handle_workspace_action(
     db: DatabaseManager, user_id: str, user_msg: str, ai_response: str,
 ) -> dict | None:
     """
@@ -864,23 +1143,41 @@ def _handle_workspace_action(
     try:
         _ensure_workspace_tables_agent3(db)
         now = datetime.now(timezone.utc).isoformat()
+        factory = _get_session_factory()
 
         # 1. Trouver ou creer le projet "Agent 3 - Documents"
-        project_row = db.conn.execute(
-            "SELECT id FROM workspace_projects WHERE auth_user_id = ? AND name = ?",
-            (user_id, "Agent 3 - Documents"),
-        ).fetchone()
-
-        if project_row:
-            project_id = project_row[0]
-        else:
-            project_id = uuid.uuid4().hex[:12]
-            db.conn.execute(
-                "INSERT INTO workspace_projects (id, auth_user_id, name, description, category, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (project_id, user_id, "Agent 3 - Documents",
-                 "Documents generes automatiquement par l'Agent 3", "agent3", now, now),
-            )
+        async with factory() as session:
+            try:
+                result = await session.execute(
+                    _sa_text(
+                        "SELECT id FROM workspace_projects "
+                        "WHERE auth_user_id = :uid AND name = :name"
+                    ),
+                    {"uid": user_id, "name": "Agent 3 - Documents"},
+                )
+                project_row = result.first()
+                if project_row:
+                    project_id = project_row[0]
+                else:
+                    project_id = uuid.uuid4().hex[:12]
+                    await session.execute(
+                        _sa_text(
+                            "INSERT INTO workspace_projects "
+                            "(id, auth_user_id, name, description, category, "
+                            " created_at, updated_at) "
+                            "VALUES (:pid, :uid, :name, :desc, :cat, :now, :now)"
+                        ),
+                        {
+                            "pid": project_id, "uid": user_id,
+                            "name": "Agent 3 - Documents",
+                            "desc": "Documents generes automatiquement par l'Agent 3",
+                            "cat": "agent3", "now": now,
+                        },
+                    )
+                    await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
 
         # 2. Extraire le titre du message utilisateur (premieres mots significatifs)
         _title_words = user_msg.strip().split()[:8]
@@ -890,7 +1187,7 @@ def _handle_workspace_action(
         if not doc_title:
             doc_title = "Document Agent 3"
 
-        # 3. Creer le document
+        # 3. Creer le document (async)
         doc_id = uuid.uuid4().hex[:12]
         content_json = json.dumps({
             "text": ai_response,
@@ -898,19 +1195,32 @@ def _handle_workspace_action(
             "user_request": user_msg[:200],
         }, ensure_ascii=False)
 
-        db.conn.execute(
-            "INSERT INTO workspace_documents "
-            "(id, project_id, auth_user_id, title, doc_type, content_json, tags, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (doc_id, project_id, user_id, doc_title, "note", content_json, "agent3,auto", now, now),
-        )
-        db.conn.commit()
+        async with factory() as session:
+            try:
+                await session.execute(
+                    _sa_text(
+                        "INSERT INTO workspace_documents "
+                        "(id, project_id, auth_user_id, title, doc_type, "
+                        " content_json, tags, created_at, updated_at) "
+                        "VALUES (:did, :pid, :uid, :title, 'note', "
+                        " :content, 'agent3,auto', :now, :now)"
+                    ),
+                    {
+                        "did": doc_id, "pid": project_id, "uid": user_id,
+                        "title": doc_title, "content": content_json,
+                        "now": now,
+                    },
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
 
         # ── NEW: Also save as a real file on disk ──
         filepath_rel = ""
         try:
             # 1. Get workspace folder
-            obj_name = get_workspace_folder_name(db, user_id)
+            obj_name = await get_workspace_folder_name_async(user_id)
             project_dir = WORKSPACE_BASE / obj_name
             project_dir.mkdir(parents=True, exist_ok=True)
 
@@ -936,12 +1246,24 @@ def _handle_workspace_action(
 """
             filepath.write_text(file_content, encoding='utf-8')
 
-            # 5. Update DB with filepath and filesize
-            db.conn.execute(
-                "UPDATE workspace_documents SET filepath = ?, filesize = ? WHERE id = ?",
-                (str(filepath), filepath.stat().st_size, doc_id),
-            )
-            db.conn.commit()
+            # 5. Update DB with filepath and filesize (async)
+            async with factory() as session:
+                try:
+                    await session.execute(
+                        _sa_text(
+                            "UPDATE workspace_documents "
+                            "SET filepath = :fp, filesize = :sz WHERE id = :did"
+                        ),
+                        {
+                            "fp": str(filepath),
+                            "sz": filepath.stat().st_size,
+                            "did": doc_id,
+                        },
+                    )
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    raise
 
             filepath_rel = str(filepath.relative_to(workspace_base))
             logger.info(f"Workspace file saved: {filepath}")
@@ -962,14 +1284,20 @@ def _handle_workspace_action(
 
 # ── Integration helpers (acces aux services externes pour Agent 3) ────────────
 
-def _get_integration_data(db: DatabaseManager, user_id: str, provider: str) -> dict | None:
-    """Verifie si une integration est connectee et retourne ses infos."""
+async def _get_integration_data_async(user_id: str, provider: str) -> dict | None:
+    """Async version of _get_integration_data."""
     try:
-        row = db.conn.execute(
-            "SELECT access_token FROM user_integrations WHERE auth_user_id = ? AND provider = ?",
-            (user_id, provider),
-        ).fetchone()
-        return {"access_token": row[0]} if row else None
+        factory = _get_session_factory()
+        async with factory() as session:
+            result = await session.execute(
+                _sa_text(
+                    "SELECT access_token FROM user_integrations "
+                    "WHERE auth_user_id = :uid AND provider = :provider"
+                ),
+                {"uid": user_id, "provider": provider},
+            )
+            row = result.first()
+            return {"access_token": row[0]} if row else None
     except Exception:
         return None
 
@@ -1456,71 +1784,61 @@ def get_agent_routes() -> list[dict]:
 
 # ── Familiarity level ────────────────────────────────────────────────────────
 
-def _compute_familiarity_level(
-    db,
-    user_id: str | None,
+def _compute_familiarity_score(
     profil_data: dict | None,
     decisions: list,
-    memories_count: int = 0,
+    msg_count: int,
+    memories_count: int,
 ) -> int:
-    """Calcule le niveau de familiarite avec l'utilisateur (0-3).
-
-    0 = inconnu (nouvel utilisateur, aucune donnee) → ton neutre, poli, professionnel
-    1 = debut   (profil cree OU quelques messages) → ton cordial, leger tutoiement
-    2 = familier (profil + messages + decisions)   → ton direct, familier, coach
-    3 = intime   (historique long, beaucoup de data) → ton cash, brutal, grand frere
-
-    Le score augmente de maniere crescendo avec les donnees disponibles.
-    """
+    """Logique pure : convertit les inputs en niveau de familiarite (0-3)."""
     score = 0
-
-    # Profil rempli ? (+2 si profil complet, +1 si partiel)
     if profil_data:
-        filled = sum(1 for k in ("nom", "profession", "ville", "objectif_description")
-                     if profil_data.get(k) and profil_data[k] not in ("Non renseigne", "Non defini", "Inconnu", "?", ""))
+        filled = sum(
+            1 for k in ("nom", "profession", "ville", "objectif_description")
+            if profil_data.get(k)
+            and profil_data[k] not in ("Non renseigne", "Non defini", "Inconnu", "?", "")
+        )
         if filled >= 3:
             score += 2
         elif filled >= 1:
             score += 1
-
-    # Nombre de messages echanges
-    msg_count = 0
-    if user_id and db:
-        try:
-            row = db.conn.execute(
-                "SELECT COUNT(*) FROM agent3_messages WHERE auth_user_id = ?",
-                (user_id,),
-            ).fetchone()
-            msg_count = row[0] if row else 0
-        except Exception:
-            pass
     if msg_count >= 50:
         score += 3
     elif msg_count >= 20:
         score += 2
     elif msg_count >= 5:
         score += 1
-
-    # Decisions prises
     if len(decisions) >= 5:
         score += 2
     elif len(decisions) >= 1:
         score += 1
-
-    # Memoires sauvegardees
     if memories_count >= 10:
         score += 2
     elif memories_count >= 3:
         score += 1
-
-    # Convertir le score brut (0-9) en niveau (0-3)
     if score >= 7:
-        return 3  # intime
+        return 3
     elif score >= 4:
-        return 2  # familier
+        return 2
     elif score >= 1:
-        return 1  # debut
-    return 0  # inconnu
+        return 1
+    return 0
+
+
+async def _compute_familiarity_level_async(
+    user_id: str | None,
+    profil_data: dict | None,
+    decisions: list,
+    memories_count: int = 0,
+) -> int:
+    """Version async — PG-compatible. Plus de parametre `db`."""
+    msg_count = 0
+    if user_id:
+        try:
+            msg_count = await _count_agent3_messages_async(user_id)
+        except Exception:
+            pass
+    return _compute_familiarity_score(profil_data, decisions, msg_count, memories_count)
 
 
 def _get_tone_instructions(familiarity: int, decision_score: int | None = None) -> str:
@@ -1570,7 +1888,7 @@ def _get_tone_instructions(familiarity: int, decision_score: int | None = None) 
 
 # ── System prompt builder ────────────────────────────────────────────────────
 
-def _build_agent3_prompt(
+async def _build_agent3_prompt(
     profil_data: dict | None,
     decisions: list,
     sous_objectifs: list,
@@ -1588,8 +1906,8 @@ def _build_agent3_prompt(
 ) -> str:
     # Awareness block : contexte temporel + objectif + wellbeing + patterns (cache 10min)
     try:
-        from api.agent3_awareness import build_awareness_block
-        awareness_block = build_awareness_block(db, user_id)
+        from api.agent3_awareness import build_awareness_block_async
+        awareness_block = await build_awareness_block_async(user_id)
     except Exception:
         awareness_block = ""
     if profil_data:
@@ -2528,35 +2846,6 @@ Reponds UNIQUEMENT avec les regles, une par ligne, sans numerotation."""
         except Exception:
             return " | ".join(m.get("value", "")[:80] for m in lessons[:10])
 
-    @staticmethod
-    def build_optimized_context(db, user_id: str, query: str = "", max_tokens: int = 1500) -> str:
-        """Construit un contexte memoire optimise : pertinent + compresse."""
-        try:
-            _ensure_agent3_tables(db)
-            all_mems = db.conn.execute(
-                "SELECT key, value, category, updated_at FROM agent3_memory WHERE auth_user_id = ? ORDER BY updated_at DESC LIMIT 100",
-                (user_id,),
-            ).fetchall()
-            if not all_mems:
-                return ""
-
-            mems = [{"key": r[0], "value": r[1], "category": r[2], "updated_at": r[3]} for r in all_mems]
-            compressed = MemoryCompressor.compress_memories(mems, max_per_category=5)
-
-            # Formater
-            lines = []
-            for m in compressed:
-                line = f"[{m.get('category', 'general')}] {m['key']}: {m['value'][:150]}"
-                lines.append(line)
-
-            result = "\n".join(lines)
-            # Tronquer si trop long (estimation ~4 chars/token)
-            if len(result) > max_tokens * 4:
-                result = result[:max_tokens * 4] + "\n..."
-            return result
-        except Exception:
-            return ""
-
 
 class BehavioralProfile:
     """Profil comportemental persistant : resume les preferences et patterns de l'utilisateur.
@@ -2566,42 +2855,52 @@ class BehavioralProfile:
     """
 
     @staticmethod
-    def load(db, user_id: str) -> dict:
-        """Charge le profil comportemental depuis la DB."""
+    async def load(db, user_id: str) -> dict:
+        """Charge le profil comportemental depuis la DB (async, portable SQLite + PG)."""
         try:
-            row = db.conn.execute(
-                "SELECT preferences_json FROM agent3_preferences WHERE auth_user_id = ?",
-                (user_id,),
-            ).fetchone()
-            if row:
-                prefs = json.loads(row[0])
-                return prefs.get("behavioral_profile", {})
+            factory = _get_session_factory()
+            async with factory() as session:
+                result = await session.execute(
+                    _sa_text("SELECT preferences_json FROM agent3_preferences WHERE auth_user_id = :uid"),
+                    {"uid": user_id},
+                )
+                row = result.first()
+                if row:
+                    prefs = json.loads(row[0])
+                    return prefs.get("behavioral_profile", {})
         except Exception:
             pass
         return {}
 
     @staticmethod
-    def save(db, user_id: str, profile: dict):
-        """Sauvegarde le profil comportemental dans la DB."""
+    async def save(db, user_id: str, profile: dict):
+        """Sauvegarde le profil comportemental dans la DB (async, portable SQLite + PG)."""
         try:
-            row = db.conn.execute(
-                "SELECT preferences_json FROM agent3_preferences WHERE auth_user_id = ?",
-                (user_id,),
-            ).fetchone()
-            if row:
-                prefs = json.loads(row[0])
-                prefs["behavioral_profile"] = profile
-                db.conn.execute(
-                    "UPDATE agent3_preferences SET preferences_json = ? WHERE auth_user_id = ?",
-                    (json.dumps(prefs, ensure_ascii=False), user_id),
-                )
-            else:
-                prefs = {"behavioral_profile": profile}
-                db.conn.execute(
-                    "INSERT INTO agent3_preferences (auth_user_id, preferences_json) VALUES (?, ?)",
-                    (user_id, json.dumps(prefs, ensure_ascii=False)),
-                )
-            db.conn.commit()
+            factory = _get_session_factory()
+            async with factory() as session:
+                try:
+                    result = await session.execute(
+                        _sa_text("SELECT preferences_json FROM agent3_preferences WHERE auth_user_id = :uid"),
+                        {"uid": user_id},
+                    )
+                    row = result.first()
+                    if row:
+                        prefs = json.loads(row[0])
+                        prefs["behavioral_profile"] = profile
+                        await session.execute(
+                            _sa_text("UPDATE agent3_preferences SET preferences_json = :p WHERE auth_user_id = :uid"),
+                            {"p": json.dumps(prefs, ensure_ascii=False), "uid": user_id},
+                        )
+                    else:
+                        prefs = {"behavioral_profile": profile}
+                        await session.execute(
+                            _sa_text("INSERT INTO agent3_preferences (auth_user_id, preferences_json) VALUES (:uid, :p)"),
+                            {"uid": user_id, "p": json.dumps(prefs, ensure_ascii=False)},
+                        )
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    raise
         except Exception as e:
             logger.debug(f"BehavioralProfile save error: {e}")
 
@@ -2612,7 +2911,7 @@ class BehavioralProfile:
         if len(user_msgs) < 4:
             return  # Pas assez de messages pour apprendre
 
-        current = BehavioralProfile.load(db, user_id)
+        current = await BehavioralProfile.load(db, user_id)
 
         # Analyse heuristique (sans LLM)
         total_words = sum(len(m.get("content", "").split()) for m in user_msgs)
@@ -2641,7 +2940,7 @@ class BehavioralProfile:
         current["last_updated"] = datetime.now(timezone.utc).isoformat()
 
         # Sauvegarder
-        BehavioralProfile.save(db, user_id, current)
+        await BehavioralProfile.save(db, user_id, current)
 
     @staticmethod
     def get_instructions(profile: dict) -> str:
@@ -3557,7 +3856,7 @@ class FeedbackLearner:
         # Sauvegarder en memoire si DB disponible
         if db and user_id:
             try:
-                _save_memory(db, user_id, f"feedback_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                await _save_memory_async(user_id, f"feedback_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                              feedback["lesson"], category="feedback")
             except Exception:
                 pass
@@ -4152,7 +4451,7 @@ async def cost_monitor(user_id: str | None = Depends(get_optional_user)):
     }
 
 
-@router.post("/chat/abort")
+@router.post("/chat/abort", dependencies=[Depends(_require_agent3_plan)])
 async def abort_chat(user_id: str | None = Depends(get_optional_user)):
     """Abort an ongoing Agent 3 chat request."""
     uid = user_id or ""
@@ -4177,7 +4476,7 @@ async def abort_chat(user_id: str | None = Depends(get_optional_user)):
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-@router.post("/chat/native")
+@router.post("/chat/native", dependencies=[Depends(_require_agent3_plan)])
 async def agent3_chat_native(
     data: Agent3ChatIn,
     request: Request,
@@ -4227,12 +4526,17 @@ async def agent3_chat_native(
             for _ref in _refs:
                 _ref = _ref.strip()
                 # Recherche par id (file_id 12 chars hex) OU par filename
-                _row = db.conn.execute(
-                    "SELECT id, filename, filetype, filepath FROM agent3_files "
-                    "WHERE auth_user_id = ? AND (id = ? OR filename = ? OR filename LIKE ?) "
-                    "ORDER BY created_at DESC LIMIT 1",
-                    (user_id, _ref, _ref, f"%{_ref}%"),
-                ).fetchone()
+                _factory_fr = _get_session_factory()
+                async with _factory_fr() as _session_fr:
+                    _result_fr = await _session_fr.execute(
+                        _sa_text(
+                            "SELECT id, filename, filetype, filepath FROM agent3_files "
+                            "WHERE auth_user_id = :uid AND (id = :ref OR filename = :ref OR filename LIKE :like_ref) "
+                            "ORDER BY created_at DESC LIMIT 1"
+                        ),
+                        {"uid": user_id, "ref": _ref, "like_ref": f"%{_ref}%"},
+                    )
+                    _row = _result_fr.first()
                 if not _row:
                     user_msg = user_msg.replace(
                         f"[Fichier: {_ref}]",
@@ -4320,8 +4624,8 @@ async def agent3_chat_native(
         # Phase 10A : quota check (tokens mensuels)
         if user_id:
             try:
-                from api.agent3_quotas import check_quota, record_usage
-                _ok_q, _reason_q, _remaining = check_quota(db, user_id, "requests", 1)
+                from api.agent3_quotas import check_quota_async, record_usage_async
+                _ok_q, _reason_q, _remaining = await check_quota_async(user_id, "requests", 1)
                 if not _ok_q:
                     yield _sse_event("error", {
                         "message": _reason_q,
@@ -4329,7 +4633,7 @@ async def agent3_chat_native(
                         "remaining": _remaining,
                     })
                     return
-                record_usage(db, user_id, "requests", 1)
+                await record_usage_async(user_id, "requests", 1)
             except Exception as _q_err:
                 logger.debug(f"quota check failed: {_q_err}")
 
@@ -4352,9 +4656,9 @@ async def agent3_chat_native(
             if slash_result.handled:
                 # Sauvegarde le message user et la reponse agent (pour historique)
                 if user_id:
-                    _save_agent3_message(db, user_id, "user", user_msg, "text")
+                    await _save_agent3_message_async(user_id, "user", user_msg, "text")
                     if slash_result.response:
-                        _save_agent3_message(db, user_id, "agent", slash_result.response, "text")
+                        await _save_agent3_message_async(user_id, "agent", slash_result.response, "text")
                 yield _sse_event("result", {
                     "message": slash_result.response or ("Commande executee." if not slash_result.error else slash_result.error),
                     "turns": 0,
@@ -4404,7 +4708,7 @@ async def agent3_chat_native(
                         }
                 except Exception as _pe:
                     logger.debug(f"profil load failed (non-fatal): {_pe}")
-            system_prompt = _build_agent3_prompt(
+            system_prompt = await _build_agent3_prompt(
                 _profil_data, _decisions, _sous_obj,
                 db=db, user_id=user_id,
             )
@@ -4412,8 +4716,8 @@ async def agent3_chat_native(
             logger.warning(f"agent3_chat_native build_prompt failed: {_bp_err}")
             # Fallback : on garde au moins l'awareness pour l'heure/date/objectif
             try:
-                from api.agent3_awareness import build_awareness_block
-                _awareness = build_awareness_block(db, user_id)
+                from api.agent3_awareness import build_awareness_block_async
+                _awareness = await build_awareness_block_async(user_id)
             except Exception:
                 _awareness = ""
             system_prompt = (
@@ -4492,7 +4796,7 @@ async def agent3_chat_native(
         # Si pas dans le payload, on lit les prefs user en DB (source de verite).
         # Par defaut, les meta-tools ET les skills sont ACTIVES (agent auto-extensible).
         try:
-            _prefs = _get_user_preferences(db, user_id) if user_id else {}
+            _prefs = await _get_user_preferences_async(user_id) if user_id else {}
         except Exception:
             _prefs = {}
 
@@ -4923,9 +5227,9 @@ async def agent3_chat_native(
             # ── Persistence + memoire auto-extraction ──────────────────────
             if user_id and user_msg:
                 try:
-                    _save_agent3_message(db, user_id, "user", user_msg, "text")
+                    await _save_agent3_message_async(user_id, "user", user_msg, "text")
                     if final_text:
-                        _save_agent3_message(db, user_id, "agent", final_text, "text")
+                        await _save_agent3_message_async(user_id, "agent", final_text, "text")
                 except Exception as _save_err:
                     logger.warning(f"_save_agent3_message failed silently: {_save_err}")
 
@@ -4937,12 +5241,12 @@ async def agent3_chat_native(
                         {"role": "user", "content": user_msg},
                         {"role": "agent", "content": final_text},
                     ]
-                    existing = _load_memories(db, user_id, limit=30)
+                    existing = await _load_memories_async(user_id, limit=30)
                     facts = await extractor.extract(conv_turns, existing)
                     saved = []
                     for fact in (facts or [])[:5]:
                         try:
-                            _save_memory(db, user_id, fact.key, fact.value, getattr(fact, "category", "general"))
+                            await _save_memory_async(user_id, fact.key, fact.value, getattr(fact, "category", "general"))
                             saved.append({"key": fact.key, "value": fact.value[:120]})
                         except Exception:
                             continue
@@ -5022,7 +5326,7 @@ def _purge_stale_native_sessions(max_age_s: float = 900) -> None:
         _pending_native_sessions.pop(k, None)
 
 
-@router.post("/chat/native/cancel")
+@router.post("/chat/native/cancel", dependencies=[Depends(_require_agent3_plan)])
 async def agent3_chat_native_cancel(data: dict):
     """Annule une boucle agentique native en cours de streaming.
 
@@ -5045,7 +5349,7 @@ async def agent3_chat_native_cancel(data: dict):
     return {"cancelled": True}
 
 
-@router.post("/chat/native/resume")
+@router.post("/chat/native/resume", dependencies=[Depends(_require_agent3_plan)])
 async def agent3_chat_native_resume(
     data: dict,
     db: DatabaseManager = Depends(get_db),
@@ -5112,9 +5416,9 @@ async def agent3_chat_native_resume(
 
             # Sinon, fin naturelle : on sauvegarde en DB comme un flow normal.
             if user_id and user_msg:
-                _save_agent3_message(db, user_id, "user", user_msg, "text")
+                await _save_agent3_message_async(user_id, "user", user_msg, "text")
                 if loop.result.final_text:
-                    _save_agent3_message(db, user_id, "agent", loop.result.final_text, "text")
+                    await _save_agent3_message_async(user_id, "agent", loop.result.final_text, "text")
             yield _sse_event("result", {
                 "message": loop.result.final_text,
                 "turns": loop.result.turns,
@@ -5127,7 +5431,7 @@ async def agent3_chat_native_resume(
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-@router.post("/chat/stream", deprecated=True)
+@router.post("/chat/stream", deprecated=True, dependencies=[Depends(_require_agent3_plan)])
 async def agent3_chat_stream(
     data: Agent3ChatIn,
     request: Request,
@@ -5177,9 +5481,9 @@ async def agent3_chat_stream(
                         yield _sse_event("result", {"message": "OK", "slash_command": True})
                     # Sauvegarder les messages user/agent
                     try:
-                        _ensure_agent3_tables(db)
-                        _save_agent3_message(db, user_id or "", "user", user_msg, "text")
-                        _save_agent3_message(db, user_id or "", "agent", _slash_result.response or "OK", "text")
+                        await _ensure_agent3_tables_async()
+                        await _save_agent3_message_async(user_id or "", "user", user_msg, "text")
+                        await _save_agent3_message_async(user_id or "", "agent", _slash_result.response or "OK", "text")
                     except Exception as _save_err:
                         logger.warning(f"Slash cmd save failed (non-fatal): {_save_err}")
                     return
@@ -5194,7 +5498,7 @@ async def agent3_chat_stream(
                 yield _sse_event("log", {"text": "Correction detectee — apprentissage...", "type": "info"})
                 try:
                     # Charger le dernier message agent pour comparer
-                    _prev_msgs = _load_agent3_messages(db, user_id, limit=2)
+                    _prev_msgs = await _load_agent3_messages_async(user_id, limit=2)
                     _prev_agent = next((m["content"] for m in reversed(_prev_msgs) if m["role"] == "agent"), "")
                     _fb = await FeedbackLearner.learn_from_correction(user_msg, _prev_agent, db=db, user_id=user_id)
                     if _fb.get("lesson"):
@@ -5205,7 +5509,7 @@ async def agent3_chat_stream(
             # Charger les feedbacks precedents pour le contexte
             if user_id:
                 try:
-                    _fb_memories = [m for m in _load_memories(db, user_id, limit=50) if m.get("category") == "feedback"]
+                    _fb_memories = [m for m in await _load_memories_async(user_id, limit=50) if m.get("category") == "feedback"]
                     _feedback_ctx = FeedbackLearner.format_feedback_context(_fb_memories)
                 except Exception:
                     pass
@@ -5250,7 +5554,7 @@ async def agent3_chat_stream(
                 if user_id:
                     _fast_history = [
                         {"role": "assistant" if m["role"] == "agent" else "user", "content": m["content"]}
-                        for m in _load_agent3_messages(db, user_id, limit=6)
+                        for m in await _load_agent3_messages_async(user_id, limit=6)
                     ]
                 _fast_history.append({"role": "user", "content": user_msg})
 
@@ -5264,10 +5568,13 @@ async def agent3_chat_stream(
                         # Lookup internal user_id like main path
                         _fp_iuid = ""
                         try:
-                            _fp_row = db.conn.execute(
-                                "SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1",
-                                (user_id,),
-                            ).fetchone()
+                            _factory_fp = _get_session_factory()
+                            async with _factory_fp() as _session_fp:
+                                _result_fp = await _session_fp.execute(
+                                    _sa_text("SELECT id FROM profil_utilisateur WHERE auth_user_id = :uid LIMIT 1"),
+                                    {"uid": user_id},
+                                )
+                                _fp_row = _result_fp.first()
                             if _fp_row:
                                 _fp_iuid = _fp_row[0]
                         except Exception:
@@ -5289,11 +5596,17 @@ async def agent3_chat_stream(
                 _fast_mem_count = 0
                 if user_id:
                     try:
-                        _fmc = db.conn.execute("SELECT COUNT(*) FROM agent3_memory WHERE auth_user_id = ?", (user_id,)).fetchone()
+                        _factory_fmc = _get_session_factory()
+                        async with _factory_fmc() as _session_fmc:
+                            _result_fmc = await _session_fmc.execute(
+                                _sa_text("SELECT COUNT(*) FROM agent3_memory WHERE auth_user_id = :uid"),
+                                {"uid": user_id},
+                            )
+                            _fmc = _result_fmc.first()
                         _fast_mem_count = _fmc[0] if _fmc else 0
                     except Exception:
                         pass
-                _fast_fam = _compute_familiarity_level(db, user_id, _fast_profil_data, _fast_decisions, _fast_mem_count)
+                _fast_fam = await _compute_familiarity_level_async(user_id, _fast_profil_data, _fast_decisions, _fast_mem_count)
                 _fast_ton = _get_tone_instructions(_fast_fam, _fscore)
 
                 _fast_sys = f"""Tu es l'Agent Sylea 3, un coach de vie.
@@ -5307,8 +5620,8 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
                 if _fast_reply:
                     # Sauvegarder les messages
                     if user_id:
-                        _save_agent3_message(db, user_id, "user", user_msg)
-                        _save_agent3_message(db, user_id, "agent", _fast_reply)
+                        await _save_agent3_message_async(user_id, "user", user_msg)
+                        await _save_agent3_message_async(user_id, "agent", _fast_reply)
                     yield _sse_event("result", {
                         "content": _fast_reply,
                         "actions": [],
@@ -5373,10 +5686,13 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
             _internal_user_id = ""
             if profil_data and user_id:
                 try:
-                    _iuid_row = db.conn.execute(
-                        "SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1",
-                        (user_id,),
-                    ).fetchone()
+                    _factory_iuid = _get_session_factory()
+                    async with _factory_iuid() as _session_iuid:
+                        _result_iuid = await _session_iuid.execute(
+                            _sa_text("SELECT id FROM profil_utilisateur WHERE auth_user_id = :uid LIMIT 1"),
+                            {"uid": user_id},
+                        )
+                        _iuid_row = _result_iuid.first()
                     if _iuid_row:
                         _internal_user_id = _iuid_row[0]
                 except Exception:
@@ -5394,21 +5710,29 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
 
             sous_objectifs: list[dict] = []
             try:
-                cursor = db.conn.execute(
-                    "SELECT titre, progression FROM sous_objectifs WHERE user_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1)",
-                    (user_id or "",),
-                )
-                sous_objectifs = [{"titre": r[0], "progression": r[1]} for r in cursor.fetchall()]
+                _factory_so = _get_session_factory()
+                async with _factory_so() as _session_so:
+                    _result_so = await _session_so.execute(
+                        _sa_text(
+                            "SELECT titre, progression FROM sous_objectifs WHERE user_id = "
+                            "(SELECT id FROM profil_utilisateur WHERE auth_user_id = :uid LIMIT 1)"
+                        ),
+                        {"uid": user_id or ""},
+                    )
+                    sous_objectifs = [{"titre": r[0], "progression": r[1]} for r in _result_so.fetchall()]
             except Exception:
                 pass
 
             collected_info = ""
             if user_id:
                 try:
-                    rows = db.conn.execute(
-                        "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 30",
-                        (user_id,),
-                    ).fetchall()
+                    _factory_ci = _get_session_factory()
+                    async with _factory_ci() as _session_ci:
+                        _result_ci = await _session_ci.execute(
+                            _sa_text("SELECT field, value FROM agent_collected_info WHERE user_id = :uid ORDER BY collected_at DESC LIMIT 30"),
+                            {"uid": user_id},
+                        )
+                        rows = _result_ci.fetchall()
                     if rows:
                         collected_info = "\nINFORMATIONS COLLECTEES :\n"
                         for field, value in rows:
@@ -5421,28 +5745,28 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
             step_idx += 1
 
             # ── 4. Charger memoire (semantique) + fichiers ──
-            _ensure_agent3_tables(db)
+            await _ensure_agent3_tables_async()
             memory_ctx = ""
             if user_id:
                 # Cleanup old memories occasionally (every ~10th request)
                 try:
-                    _msg_count = _count_agent3_messages(db, user_id)
+                    _msg_count = await _count_agent3_messages_async(user_id)
                     if _msg_count % 10 == 0:
-                        _cleaned = _cleanup_old_memories(db, user_id)
+                        _cleaned = await _cleanup_old_memories_async(user_id)
                         if _cleaned > 0:
                             yield _sse_event("log", {"text": f"Memoire nettoyee : {_cleaned} souvenirs obsoletes supprimes", "type": "info"})
                 except Exception:
                     pass
                 # Recherche semantique : souvenirs pertinents a la question
                 if user_msg and len(user_msg) > 3:
-                    relevant_memories = _search_memories(db, user_id, user_msg, top_k=10)
+                    relevant_memories = await _search_memories(db, user_id, user_msg, top_k=10)
                     if relevant_memories:
                         memories_as_dicts = [{"key": m.key, "value": m.value, "category": m.category, "updated_at": m.updated_at} for m in relevant_memories]
                         memory_ctx = _format_memories(memories_as_dicts)
                         yield _sse_event("log", {"text": f"Memoire : {len(relevant_memories)} souvenirs pertinents trouves", "type": "info"})
                 # Fallback : charger les plus recents si rien de pertinent
                 if not memory_ctx:
-                    memories = _load_memories(db, user_id, limit=15)
+                    memories = await _load_memories_async(user_id, limit=15)
                     memory_ctx = _format_memories(memories)
 
             files_ctx = ""
@@ -5473,11 +5797,28 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
                                 logger.debug(f"Vision analysis failed for {saved['filename']}: {vision_err}")
                         files_ctx += f"\n--- FICHIER: {saved['filename']} ({saved['filetype']}) ---\n{content}\n"
                         if user_id:
-                            db.conn.execute(
-                                "INSERT INTO agent3_files (id, auth_user_id, filename, filetype, filesize, filepath, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                (saved["id"], user_id, saved["filename"], saved["filetype"], saved["filesize"], saved["filepath"], datetime.now(timezone.utc).isoformat()),
-                            )
-                            db.conn.commit()
+                            _factory_af = _get_session_factory()
+                            async with _factory_af() as _session_af:
+                                try:
+                                    await _session_af.execute(
+                                        _sa_text(
+                                            "INSERT INTO agent3_files (id, auth_user_id, filename, filetype, filesize, filepath, created_at) "
+                                            "VALUES (:id, :uid, :fn, :ft, :fs, :fp, :ca)"
+                                        ),
+                                        {
+                                            "id": saved["id"],
+                                            "uid": user_id,
+                                            "fn": saved["filename"],
+                                            "ft": saved["filetype"],
+                                            "fs": saved["filesize"],
+                                            "fp": saved["filepath"],
+                                            "ca": datetime.now(timezone.utc).isoformat(),
+                                        },
+                                    )
+                                    await _session_af.commit()
+                                except Exception:
+                                    await _session_af.rollback()
+                                    raise
                         yield _sse_event("log", {"text": f"Fichier traite : {saved['filename']}", "type": "success"})
 
             # ── 4a-bis. Resoudre les [Fichier: nom] dans le message ──
@@ -5492,10 +5833,16 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
                     for _fref in _fichier_refs:
                         _fref = _fref.strip()
                         try:
-                            _row = db.conn.execute(
-                                "SELECT id, filename, filetype, filepath FROM agent3_files WHERE auth_user_id = ? AND filename = ? ORDER BY created_at DESC LIMIT 1",
-                                (user_id, _fref),
-                            ).fetchone()
+                            _factory_fref = _get_session_factory()
+                            async with _factory_fref() as _session_fref:
+                                _result_fref = await _session_fref.execute(
+                                    _sa_text(
+                                        "SELECT id, filename, filetype, filepath FROM agent3_files "
+                                        "WHERE auth_user_id = :uid AND filename = :fn ORDER BY created_at DESC LIMIT 1"
+                                    ),
+                                    {"uid": user_id, "fn": _fref},
+                                )
+                                _row = _result_fref.first()
                             logger.info(f"[FILE-REF] DB lookup for '{_fref}': row={_row}")
                             if _row:
                                 _fpath = _row[3]
@@ -5540,15 +5887,21 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
             _compact_user_context = "\n".join(_user_ctx_parts) if _user_ctx_parts else ""
 
             # System prompt complet (utilise SEULEMENT pour le fallback Claude, pas OpenClaw)
-            full_ctx = build_full_user_context(db, user_id)
+            full_ctx = await build_full_user_context_async(db, user_id)
 
             # Check Google connection status for streaming endpoint
             if user_id:
                 try:
-                    _g_integ_s = db.conn.execute(
-                        "SELECT provider FROM integrations WHERE user_id = ? AND status = 'connected' AND provider IN ('google_calendar', 'gmail', 'google_drive')",
-                        (user_id,),
-                    ).fetchall()
+                    _factory_gis = _get_session_factory()
+                    async with _factory_gis() as _session_gis:
+                        _result_gis = await _session_gis.execute(
+                            _sa_text(
+                                "SELECT provider FROM integrations WHERE user_id = :uid AND status = 'connected' "
+                                "AND provider IN ('google_calendar', 'gmail', 'google_drive')"
+                            ),
+                            {"uid": user_id},
+                        )
+                        _g_integ_s = _result_gis.fetchall()
                     _google_services_s = [r[0] for r in _g_integ_s] if _g_integ_s else []
                 except Exception:
                     _google_services_s = []
@@ -5557,17 +5910,23 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
                 else:
                     full_ctx += "\nGoogle NON connecte. Si l'utilisateur demande d'envoyer un email ou creer un evenement, dis-lui de se connecter avec Google."
 
-            _user_prefs = _get_user_preferences(db, user_id) if user_id else {}
+            _user_prefs = await _get_user_preferences_async(user_id) if user_id else {}
 
             # ── Calculer le niveau de familiarite (ton progressif) ──
             _mem_count = 0
             if user_id:
                 try:
-                    _mc_row = db.conn.execute("SELECT COUNT(*) FROM agent3_memory WHERE auth_user_id = ?", (user_id,)).fetchone()
+                    _factory_mc = _get_session_factory()
+                    async with _factory_mc() as _session_mc:
+                        _result_mc = await _session_mc.execute(
+                            _sa_text("SELECT COUNT(*) FROM agent3_memory WHERE auth_user_id = :uid"),
+                            {"uid": user_id},
+                        )
+                        _mc_row = _result_mc.first()
                     _mem_count = _mc_row[0] if _mc_row else 0
                 except Exception:
                     pass
-            _familiarity = _compute_familiarity_level(db, user_id, profil_data, decisions, _mem_count)
+            _familiarity = await _compute_familiarity_level_async(user_id, profil_data, decisions, _mem_count)
             # Score de decisions pour moduler le ton
             _dec_score = None
             if decisions:
@@ -5615,7 +5974,7 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
             # Injecter le scratchpad (memoire de travail) si non vide
             _scratchpad_ctx = WorkingMemory.summarize(user_id or "anon") if user_id else ""
 
-            system_prompt = _build_agent3_prompt(
+            system_prompt = await _build_agent3_prompt(
                 profil_data, decisions, sous_objectifs, collected_info, device_ctx,
                 full_context=full_ctx, memory_context=memory_ctx, files_context=files_ctx,
                 user_preferences=_user_prefs,
@@ -5629,8 +5988,8 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
 
             # Phase 9C : injecter le contexte feedback explicite (thumbs)
             try:
-                from api.agent3_feedback import format_feedback_context
-                _fb_ctx = format_feedback_context(db, user_id)
+                from api.agent3_feedback import format_feedback_context_async
+                _fb_ctx = await format_feedback_context_async(user_id)
                 if _fb_ctx:
                     system_prompt += f"\n\n{_fb_ctx}"
             except Exception as _fb_err:
@@ -5669,7 +6028,7 @@ Tu PEUX generer des PDFs. Le systeme le fait automatiquement. Ne dis JAMAIS que 
 
             # ── PersonalityAdapter : adapter le style au user ──
             if user_id:
-                db_messages = _load_agent3_messages(db, user_id, limit=20)
+                db_messages = await _load_agent3_messages_async(user_id, limit=20)
                 chat_messages = [
                     {"role": "assistant" if m["role"] == "agent" else "user", "content": m["content"]}
                     for m in db_messages
@@ -6655,7 +7014,7 @@ REGLES ABSOLUES :
             if user_id and data.messages:
                 last_user = data.messages[-1]
                 if last_user.get("role") == "user":
-                    _save_agent3_message(db, user_id, "user", last_user["content"], user_msg_type, audio_data=data.audio_data or "")
+                    await _save_agent3_message_async(user_id, "user", last_user["content"], user_msg_type, audio_data=data.audio_data or "")
 
             # ── 8. Parser les actions (toutes, y compris chainées) ──
             _observer.log_observation(f"Reponse agent recue ({len(agent_response)} chars)")
@@ -6685,7 +7044,7 @@ REGLES ABSOLUES :
                         _perm_mode = get_policy(user_id or "default").mode.value
                     except Exception:
                         _perm_mode = "default"
-                    _user_prefs = _get_user_preferences(db, user_id or "") if user_id else {"confirm_destructive": True}
+                    _user_prefs = await _get_user_preferences_async(user_id or "") if user_id else {"confirm_destructive": True}
                     if ActionValidator.requires_confirmation(action_type, _perm_mode, _user_prefs):
                         if not action_data.get("_confirmed"):
                             action_data["_requires_confirmation"] = True
@@ -6821,7 +7180,7 @@ REGLES ABSOLUES :
                                         user_id=user_id or "",
                                         user_msg=user_msg,
                                         profil=profil_data or {},
-                                        memories=_load_memories(db, user_id, limit=20) if user_id else [],
+                                        memories=await _load_memories_async(user_id, limit=20) if user_id else [],
                                         session_key=session_key,
                                     )
                                     _sk_result = await _sk.safe_execute(_sk_instr, _sk_ctx)
@@ -6923,12 +7282,15 @@ REGLES ABSOLUES :
                         if mem_key and mem_value:
                             # Undo snapshot avant modification
                             if _undo_mgr:
-                                _old_mem = db.conn.execute(
-                                    "SELECT value FROM agent3_memory WHERE auth_user_id = ? AND key = ?",
-                                    (user_id, mem_key),
-                                ).fetchone()
+                                _factory_om = _get_session_factory()
+                                async with _factory_om() as _session_om:
+                                    _result_om = await _session_om.execute(
+                                        _sa_text("SELECT value FROM agent3_memory WHERE auth_user_id = :uid AND key = :k"),
+                                        {"uid": user_id, "k": mem_key},
+                                    )
+                                    _old_mem = _result_om.first()
                                 _undo_mgr.snapshot_memory(mem_key, _old_mem[0] if _old_mem else "", mem_value, mem_cat)
-                            _save_memory(db, user_id, mem_key, mem_value, mem_cat)
+                            await _save_memory_async(user_id, mem_key, mem_value, mem_cat)
                             yield _sse_event("log", {"text": f"Memoire sauvegardee : {mem_key}", "type": "success"})
 
                     # MCP_TOOL — invoquer un outil MCP externe
@@ -6956,11 +7318,27 @@ REGLES ABSOLUES :
                     elif action_type == "CRON" and user_id:
                         cron_id = str(uuid.uuid4())
                         now = datetime.now(timezone.utc).isoformat()
-                        db.conn.execute(
-                            "INSERT INTO agent3_cron (id, auth_user_id, label, instruction, cron_expr, enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
-                            (cron_id, user_id, action_data.get("label", "Tache"), action_data.get("instruction", ""), action_data.get("cron_expr", "0 9 * * *"), now),
-                        )
-                        db.conn.commit()
+                        _factory_cr = _get_session_factory()
+                        async with _factory_cr() as _session_cr:
+                            try:
+                                await _session_cr.execute(
+                                    _sa_text(
+                                        "INSERT INTO agent3_cron (id, auth_user_id, label, instruction, cron_expr, enabled, created_at) "
+                                        "VALUES (:id, :uid, :lbl, :inst, :ce, 1, :ca)"
+                                    ),
+                                    {
+                                        "id": cron_id,
+                                        "uid": user_id,
+                                        "lbl": action_data.get("label", "Tache"),
+                                        "inst": action_data.get("instruction", ""),
+                                        "ce": action_data.get("cron_expr", "0 9 * * *"),
+                                        "ca": now,
+                                    },
+                                )
+                                await _session_cr.commit()
+                            except Exception:
+                                await _session_cr.rollback()
+                                raise
                         action_data["cron_id"] = cron_id
                         if _undo_mgr:
                             _undo_mgr.snapshot_cron(cron_id, action_data.get("label", "Tache"))
@@ -7030,12 +7408,28 @@ REGLES ABSOLUES :
                             [{"label": s, "status": "pending", "result": ""} for s in task_steps],
                             ensure_ascii=False,
                         )
-                        db.conn.execute(
-                            "INSERT INTO agent3_tasks (id, auth_user_id, title, description, steps_json, status, progress, created_at, updated_at) "
-                            "VALUES (?, ?, ?, ?, ?, 'en_cours', 0.0, ?, ?)",
-                            (task_id, user_id, task_title, action_data.get("description", ""), steps_json, now, now),
-                        )
-                        db.conn.commit()
+                        _factory_tc = _get_session_factory()
+                        async with _factory_tc() as _session_tc:
+                            try:
+                                await _session_tc.execute(
+                                    _sa_text(
+                                        "INSERT INTO agent3_tasks (id, auth_user_id, title, description, steps_json, status, progress, created_at, updated_at) "
+                                        "VALUES (:id, :uid, :title, :desc, :sj, 'en_cours', 0.0, :ca, :ua)"
+                                    ),
+                                    {
+                                        "id": task_id,
+                                        "uid": user_id,
+                                        "title": task_title,
+                                        "desc": action_data.get("description", ""),
+                                        "sj": steps_json,
+                                        "ca": now,
+                                        "ua": now,
+                                    },
+                                )
+                                await _session_tc.commit()
+                            except Exception:
+                                await _session_tc.rollback()
+                                raise
                         action_data["task_id"] = task_id
                         yield _sse_event("log", {"text": f"Tache creee : {task_title} ({len(task_steps)} etapes)", "type": "success"})
 
@@ -7047,26 +7441,41 @@ REGLES ABSOLUES :
                         step_result = action_data.get("result", "")
                         if t_id:
                             try:
-                                row = db.conn.execute(
-                                    "SELECT steps_json FROM agent3_tasks WHERE id = ? AND auth_user_id = ?",
-                                    (t_id, user_id),
-                                ).fetchone()
-                                if row:
-                                    t_steps = json.loads(row[0])
-                                    if step_idx_val is not None and 0 <= step_idx_val < len(t_steps):
-                                        t_steps[step_idx_val]["status"] = step_status
-                                        t_steps[step_idx_val]["result"] = step_result
-                                    done_count = sum(1 for s in t_steps if s.get("status") == "done")
-                                    progress = (done_count / len(t_steps) * 100) if t_steps else 0
-                                    t_status = "termine" if done_count == len(t_steps) else "en_cours"
-                                    now = datetime.now(timezone.utc).isoformat()
-                                    db.conn.execute(
-                                        "UPDATE agent3_tasks SET steps_json = ?, progress = ?, status = ?, updated_at = ? WHERE id = ?",
-                                        (json.dumps(t_steps, ensure_ascii=False), progress, t_status, now, t_id),
+                                _factory_tu = _get_session_factory()
+                                async with _factory_tu() as _session_tu:
+                                    _result_tu = await _session_tu.execute(
+                                        _sa_text("SELECT steps_json FROM agent3_tasks WHERE id = :id AND auth_user_id = :uid"),
+                                        {"id": t_id, "uid": user_id},
                                     )
-                                    db.conn.commit()
-                                    action_data["progress"] = progress
-                                    yield _sse_event("log", {"text": f"Tache mise a jour : {progress:.0f}%", "type": "success"})
+                                    row = _result_tu.first()
+                                    if row:
+                                        t_steps = json.loads(row[0])
+                                        if step_idx_val is not None and 0 <= step_idx_val < len(t_steps):
+                                            t_steps[step_idx_val]["status"] = step_status
+                                            t_steps[step_idx_val]["result"] = step_result
+                                        done_count = sum(1 for s in t_steps if s.get("status") == "done")
+                                        progress = (done_count / len(t_steps) * 100) if t_steps else 0
+                                        t_status = "termine" if done_count == len(t_steps) else "en_cours"
+                                        now = datetime.now(timezone.utc).isoformat()
+                                        try:
+                                            await _session_tu.execute(
+                                                _sa_text(
+                                                    "UPDATE agent3_tasks SET steps_json = :sj, progress = :pr, status = :st, updated_at = :ua WHERE id = :id"
+                                                ),
+                                                {
+                                                    "sj": json.dumps(t_steps, ensure_ascii=False),
+                                                    "pr": progress,
+                                                    "st": t_status,
+                                                    "ua": now,
+                                                    "id": t_id,
+                                                },
+                                            )
+                                            await _session_tu.commit()
+                                        except Exception:
+                                            await _session_tu.rollback()
+                                            raise
+                                        action_data["progress"] = progress
+                                        yield _sse_event("log", {"text": f"Tache mise a jour : {progress:.0f}%", "type": "success"})
                             except Exception as _task_err:
                                 yield _sse_event("log", {"text": f"Erreur mise a jour tache : {_task_err}", "type": "error"})
 
@@ -7156,7 +7565,7 @@ REGLES ABSOLUES :
                         if fc_content and user_id:
                             yield _sse_event("log", {"text": f"Creation fichier workspace : {fc_filename}", "type": "tool"})
                             try:
-                                obj_name = get_workspace_folder_name(db, user_id)
+                                obj_name = await get_workspace_folder_name_async(user_id)
                                 project_dir = WORKSPACE_BASE / obj_name
                                 project_dir.mkdir(parents=True, exist_ok=True)
                                 safe_name = Path(fc_filename).name or "fichier.txt"
@@ -7818,7 +8227,7 @@ REGLES ABSOLUES :
             # ── 8c. Si workspace demande, creer un document ──
             if _wants_workspace and user_id and clean_message:
                 yield _sse_event("log", {"text": "Acces au workspace...", "type": "info"})
-                _ws_result = _handle_workspace_action(db, user_id, user_msg, clean_message)
+                _ws_result = await _handle_workspace_action(db, user_id, user_msg, clean_message)
                 if _ws_result:
                     actions.append({
                         "type": "WORKSPACE_DOC",
@@ -7956,12 +8365,12 @@ REGLES ABSOLUES :
             # ── 9. Sauvegarder le message agent ──
             if user_id:
                 agent_msg_type = "voice" if user_msg_type == "voice" else "text"
-                _save_agent3_message(db, user_id, "agent", clean_message or "C'est fait.", agent_msg_type)
+                await _save_agent3_message_async(user_id, "agent", clean_message or "C'est fait.", agent_msg_type)
 
             # ── 9b. Auto-extraction de memoires durables (Haiku) ──
             if user_id:
                 try:
-                    _recent_msgs = _load_agent3_messages(db, user_id, limit=20)
+                    _recent_msgs = await _load_agent3_messages_async(user_id, limit=20)
                     _recent_turns = [
                         {"role": m["role"], "content": m["content"]}
                         for m in _recent_msgs
@@ -8092,7 +8501,7 @@ Ses decisions recentes montrent un score de comportement de {_behavior_score}/10
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
-@router.post("/chat", response_model=Agent3ChatOut, deprecated=True)
+@router.post("/chat", response_model=Agent3ChatOut, deprecated=True, dependencies=[Depends(_require_agent3_plan)])
 async def agent3_chat(
     data: Agent3ChatIn,
     db: DatabaseManager = Depends(get_db),
@@ -8122,9 +8531,9 @@ async def agent3_chat(
                     _resp_text = _slash_result.response or _slash_result.error or "OK"
                     # Sauvegarder les messages
                     try:
-                        _ensure_agent3_tables(db)
-                        _save_agent3_message(db, user_id or "", "user", _user_msg_for_slash, "text")
-                        _save_agent3_message(db, user_id or "", "agent", _resp_text, "text")
+                        await _ensure_agent3_tables_async()
+                        await _save_agent3_message_async(user_id or "", "user", _user_msg_for_slash, "text")
+                        await _save_agent3_message_async(user_id or "", "agent", _resp_text, "text")
                     except Exception as _save_err:
                         logger.warning(f"Slash cmd save failed (non-fatal): {_save_err}")
                     return {
@@ -8162,10 +8571,13 @@ async def agent3_chat(
     _ns_internal_user_id = ""
     if user_id:
         try:
-            _ns_row = db.conn.execute(
-                "SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1",
-                (user_id,),
-            ).fetchone()
+            _factory_ns = _get_session_factory()
+            async with _factory_ns() as _session_ns:
+                _result_ns = await _session_ns.execute(
+                    _sa_text("SELECT id FROM profil_utilisateur WHERE auth_user_id = :uid LIMIT 1"),
+                    {"uid": user_id},
+                )
+                _ns_row = _result_ns.first()
             if _ns_row:
                 _ns_internal_user_id = _ns_row[0]
         except Exception:
@@ -8184,12 +8596,16 @@ async def agent3_chat(
     # Sous-objectifs
     sous_objectifs: list[dict] = []
     try:
-        cursor = db.conn.execute(
-            "SELECT titre, progression FROM sous_objectifs "
-            "WHERE profil_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1)",
-            (user_id or "",),
-        )
-        sous_objectifs = [{"titre": r[0], "progression": r[1]} for r in cursor.fetchall()]
+        _factory_so2 = _get_session_factory()
+        async with _factory_so2() as _session_so2:
+            _result_so2 = await _session_so2.execute(
+                _sa_text(
+                    "SELECT titre, progression FROM sous_objectifs "
+                    "WHERE profil_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = :uid LIMIT 1)"
+                ),
+                {"uid": user_id or ""},
+            )
+            sous_objectifs = [{"titre": r[0], "progression": r[1]} for r in _result_so2.fetchall()]
     except Exception:
         pass
 
@@ -8197,10 +8613,13 @@ async def agent3_chat(
     collected_info = ""
     if user_id:
         try:
-            rows = db.conn.execute(
-                "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 30",
-                (user_id,),
-            ).fetchall()
+            _factory_ci2 = _get_session_factory()
+            async with _factory_ci2() as _session_ci2:
+                _result_ci2 = await _session_ci2.execute(
+                    _sa_text("SELECT field, value FROM agent_collected_info WHERE user_id = :uid ORDER BY collected_at DESC LIMIT 30"),
+                    {"uid": user_id},
+                )
+                rows = _result_ci2.fetchall()
             if rows:
                 collected_info = "\nINFORMATIONS COLLECTEES :\n"
                 for field, value in rows:
@@ -8209,7 +8628,7 @@ async def agent3_chat(
             pass
 
     # ── 2. Memoire (semantique) + fichiers ───────────────────────────────
-    _ensure_agent3_tables(db)
+    await _ensure_agent3_tables_async()
     memory_ctx = ""
     last_user_msg_content = ""
     if data.messages:
@@ -8220,13 +8639,13 @@ async def agent3_chat(
     if user_id:
         # Recherche semantique : souvenirs pertinents a la question
         if last_user_msg_content and len(last_user_msg_content) > 3:
-            relevant = _search_memories(db, user_id, last_user_msg_content, top_k=10)
+            relevant = await _search_memories(db, user_id, last_user_msg_content, top_k=10)
             if relevant:
                 memories_as_dicts = [{"key": m.key, "value": m.value, "category": m.category, "updated_at": m.updated_at} for m in relevant]
                 memory_ctx = _format_memories(memories_as_dicts)
         # Fallback : charger les plus recents
         if not memory_ctx:
-            memories = _load_memories(db, user_id, limit=15)
+            memories = await _load_memories_async(user_id, limit=15)
             memory_ctx = _format_memories(memories)
 
     files_ctx = ""
@@ -8256,23 +8675,46 @@ async def agent3_chat(
                         logger.debug(f"Vision analysis failed for {saved['filename']}: {vision_err}")
                 files_ctx += f"\n--- FICHIER: {saved['filename']} ({saved['filetype']}) ---\n{content}\n"
                 if user_id:
-                    db.conn.execute(
-                        "INSERT INTO agent3_files (id, auth_user_id, filename, filetype, filesize, filepath, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (saved["id"], user_id, saved["filename"], saved["filetype"], saved["filesize"], saved["filepath"], datetime.now(timezone.utc).isoformat()),
-                    )
-                    db.conn.commit()
+                    _factory_af2 = _get_session_factory()
+                    async with _factory_af2() as _session_af2:
+                        try:
+                            await _session_af2.execute(
+                                _sa_text(
+                                    "INSERT INTO agent3_files (id, auth_user_id, filename, filetype, filesize, filepath, created_at) "
+                                    "VALUES (:id, :uid, :fn, :ft, :fs, :fp, :ca)"
+                                ),
+                                {
+                                    "id": saved["id"],
+                                    "uid": user_id,
+                                    "fn": saved["filename"],
+                                    "ft": saved["filetype"],
+                                    "fs": saved["filesize"],
+                                    "fp": saved["filepath"],
+                                    "ca": datetime.now(timezone.utc).isoformat(),
+                                },
+                            )
+                            await _session_af2.commit()
+                        except Exception:
+                            await _session_af2.rollback()
+                            raise
 
     # ── 2b. Construire le system prompt ────────────────────────────────────
     device_ctx = format_device_context(data.contexte_appareil) if data.contexte_appareil else ""
-    full_ctx = build_full_user_context(db, user_id)
+    full_ctx = await build_full_user_context_async(db, user_id)
 
     # Check Google connection status for Agent 3
     if user_id:
         try:
-            _g_integ = db.conn.execute(
-                "SELECT provider FROM integrations WHERE user_id = ? AND status = 'connected' AND provider IN ('google_calendar', 'gmail', 'google_drive')",
-                (user_id,),
-            ).fetchall()
+            _factory_gi = _get_session_factory()
+            async with _factory_gi() as _session_gi:
+                _result_gi = await _session_gi.execute(
+                    _sa_text(
+                        "SELECT provider FROM integrations WHERE user_id = :uid AND status = 'connected' "
+                        "AND provider IN ('google_calendar', 'gmail', 'google_drive')"
+                    ),
+                    {"uid": user_id},
+                )
+                _g_integ = _result_gi.fetchall()
             _google_services = [r[0] for r in _g_integ] if _g_integ else []
         except Exception:
             _google_services = []
@@ -8281,17 +8723,23 @@ async def agent3_chat(
         else:
             full_ctx += "\nGoogle NON connecte. Si l'utilisateur demande d'envoyer un email ou creer un evenement, dis-lui de se connecter avec Google."
 
-    _user_prefs = _get_user_preferences(db, user_id) if user_id else {}
+    _user_prefs = await _get_user_preferences_async(user_id) if user_id else {}
 
     # Calculer familiarite + score decisions
     _mem_count_2 = 0
     if user_id:
         try:
-            _mc2 = db.conn.execute("SELECT COUNT(*) FROM agent3_memory WHERE auth_user_id = ?", (user_id,)).fetchone()
+            _factory_mc2 = _get_session_factory()
+            async with _factory_mc2() as _session_mc2:
+                _result_mc2 = await _session_mc2.execute(
+                    _sa_text("SELECT COUNT(*) FROM agent3_memory WHERE auth_user_id = :uid"),
+                    {"uid": user_id},
+                )
+                _mc2 = _result_mc2.first()
             _mem_count_2 = _mc2[0] if _mc2 else 0
         except Exception:
             pass
-    _fam_2 = _compute_familiarity_level(db, user_id, profil_data, decisions, _mem_count_2)
+    _fam_2 = await _compute_familiarity_level_async(user_id, profil_data, decisions, _mem_count_2)
     _dec_score_2 = None
     if decisions:
         _dp2 = sum(1 for d in decisions if d.get('impact', 0) > 0)
@@ -8301,7 +8749,7 @@ async def agent3_chat(
 
     _scratchpad_ctx_2 = WorkingMemory.summarize(user_id or "anon") if user_id else ""
 
-    system_prompt = _build_agent3_prompt(
+    system_prompt = await _build_agent3_prompt(
         profil_data, decisions, sous_objectifs, collected_info, device_ctx,
         full_context=full_ctx, memory_context=memory_ctx, files_context=files_ctx,
         user_preferences=_user_prefs,
@@ -8312,7 +8760,7 @@ async def agent3_chat(
 
     # ── 3. Construire l'historique de chat ────────────────────────────────
     if user_id:
-        db_messages = _load_agent3_messages(db, user_id, limit=50)
+        db_messages = await _load_agent3_messages_async(user_id, limit=50)
         chat_messages = [
             {"role": "assistant" if m["role"] == "agent" else "user", "content": m["content"]}
             for m in db_messages
@@ -8336,7 +8784,7 @@ async def agent3_chat(
     # FeedbackLearner : detecter corrections
     if user_id and last_user_msg_content and FeedbackLearner.detect_correction(last_user_msg_content):
         try:
-            _prev_msgs_ns = _load_agent3_messages(db, user_id, limit=2)
+            _prev_msgs_ns = await _load_agent3_messages_async(user_id, limit=2)
             _prev_agent_ns = ""
             for _pm in reversed(_prev_msgs_ns):
                 if _pm.get("role") == "agent":
@@ -8352,7 +8800,7 @@ async def agent3_chat(
     _feedback_ctx_ns = ""
     if user_id:
         try:
-            _fb_mems = _search_memories(db, user_id, "feedback correction lesson", top_k=5)
+            _fb_mems = await _search_memories(db, user_id, "feedback correction lesson", top_k=5)
             if _fb_mems:
                 _feedback_ctx_ns = FeedbackLearner.format_feedback_context(
                     [{"key": m.key, "value": m.value} for m in _fb_mems]
@@ -8429,8 +8877,8 @@ async def agent3_chat(
     if user_id and data.messages:
         last_user = data.messages[-1]
         if last_user.get("role") == "user":
-            _save_agent3_message(
-                db, user_id, "user", last_user["content"], user_msg_type,
+            await _save_agent3_message_async(
+                user_id, "user", last_user["content"], user_msg_type,
                 audio_data=data.audio_data or "",
             )
 
@@ -8524,7 +8972,7 @@ async def agent3_chat(
                                 user_id=user_id or "",
                                 user_msg=user_msg,
                                 profil=profil_data or {},
-                                memories=_load_memories(db, user_id, limit=20) if user_id else [],
+                                memories=await _load_memories_async(user_id, limit=20) if user_id else [],
                                 session_key=session_key,
                             )
                             _sk_result = await _sk.safe_execute(_sk_instr, _sk_ctx)
@@ -8543,17 +8991,33 @@ async def agent3_chat(
                 mem_value = action_data.get("value", "")
                 mem_cat = action_data.get("category", "general")
                 if mem_key and mem_value:
-                    _save_memory(db, user_id, mem_key, mem_value, mem_cat)
+                    await _save_memory_async(user_id, mem_key, mem_value, mem_cat)
 
             # CRON
             elif action_type == "CRON" and user_id:
                 cron_id = str(uuid.uuid4())
                 now = datetime.now(timezone.utc).isoformat()
-                db.conn.execute(
-                    "INSERT INTO agent3_cron (id, auth_user_id, label, instruction, cron_expr, enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
-                    (cron_id, user_id, action_data.get("label", "Tache"), action_data.get("instruction", ""), action_data.get("cron_expr", "0 9 * * *"), now),
-                )
-                db.conn.commit()
+                _factory_cr2 = _get_session_factory()
+                async with _factory_cr2() as _session_cr2:
+                    try:
+                        await _session_cr2.execute(
+                            _sa_text(
+                                "INSERT INTO agent3_cron (id, auth_user_id, label, instruction, cron_expr, enabled, created_at) "
+                                "VALUES (:id, :uid, :lbl, :inst, :ce, 1, :ca)"
+                            ),
+                            {
+                                "id": cron_id,
+                                "uid": user_id,
+                                "lbl": action_data.get("label", "Tache"),
+                                "inst": action_data.get("instruction", ""),
+                                "ce": action_data.get("cron_expr", "0 9 * * *"),
+                                "ca": now,
+                            },
+                        )
+                        await _session_cr2.commit()
+                    except Exception:
+                        await _session_cr2.rollback()
+                        raise
                 action_data["cron_id"] = cron_id
 
             # SPAWN_AGENT — lancer un sous-agent (local orchestrator + fallback OpenClaw)
@@ -8647,7 +9111,7 @@ async def agent3_chat(
                 fc_content = action_data.get("content", "")
                 if fc_content and user_id:
                     try:
-                        obj_name = get_workspace_folder_name(db, user_id)
+                        obj_name = await get_workspace_folder_name_async(user_id)
                         project_dir = WORKSPACE_BASE / obj_name
                         project_dir.mkdir(parents=True, exist_ok=True)
                         safe_name = Path(fc_filename).name or "fichier.txt"
@@ -9097,14 +9561,14 @@ async def agent3_chat(
     # ── 10. Sauvegarder le message agent NETTOYE en DB ────────────────────
     if user_id:
         agent_msg_type = "voice" if user_msg_type == "voice" else "text"
-        _save_agent3_message(
-            db, user_id, "agent", clean_message or "C'est fait.", agent_msg_type,
+        await _save_agent3_message_async(
+            user_id, "agent", clean_message or "C'est fait.", agent_msg_type,
             audio_data=agent_audio_data,
         )
 
         # Auto-extraction de memoires durables (non-bloquant)
         try:
-            _recent_msgs = _load_agent3_messages(db, user_id, limit=20)
+            _recent_msgs = await _load_agent3_messages_async(user_id, limit=20)
             _recent_turns = [
                 {"role": m["role"], "content": m["content"]}
                 for m in _recent_msgs
@@ -9130,7 +9594,7 @@ async def get_agent3_messages(
 ):
     if not user_id:
         return []
-    messages = _load_agent3_messages(db, user_id, limit=200)
+    messages = await _load_agent3_messages_async(user_id, limit=200)
     return [
         Agent3MessageOut(
             id=m["id"], role=m["role"], content=m["content"],
@@ -9147,7 +9611,7 @@ async def clear_agent3_messages(
     user_id: str | None = Depends(get_optional_user),
 ):
     if user_id:
-        _clear_agent3_messages(db, user_id)
+        await _clear_agent3_messages_async(user_id)
     return {"detail": "Historique de conversation Agent 3 supprime."}
 
 
@@ -9293,31 +9757,65 @@ async def get_agent_tool_profile(agent_id: str):
 #   - effectively_enabled: resultat final (profile AND user_pref)
 
 
-def _get_user_tool_preferences(db: DatabaseManager, user_id: str) -> dict[str, bool]:
-    """Charge les preferences tool_name -> enabled pour un user."""
-    rows = db.conn.execute(
-        "SELECT tool_name, enabled FROM user_tool_preferences WHERE user_id = ?",
-        (user_id,),
-    ).fetchall()
+async def _get_user_tool_preferences_async(user_id: str) -> dict[str, bool]:
+    """Async version of _get_user_tool_preferences (portable SQLite + PG)."""
+    factory = _get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            _sa_text(
+                "SELECT tool_name, enabled FROM user_tool_preferences "
+                "WHERE user_id = :uid"
+            ),
+            {"uid": user_id},
+        )
+        rows = list(result.mappings().all())
     return {r["tool_name"]: bool(r["enabled"]) for r in rows}
 
 
-def _set_user_tool_preference(
-    db: DatabaseManager, user_id: str, tool_name: str, enabled: bool,
+async def _set_user_tool_preference_async(
+    user_id: str, tool_name: str, enabled: bool,
 ) -> None:
-    """UPSERT une preference tool pour un user."""
+    """Async UPSERT. Uses SELECT-then-UPDATE/INSERT (portable, no ON CONFLICT)."""
     now = datetime.now(timezone.utc).isoformat()
-    with db.conn:
-        db.conn.execute(
-            """
-            INSERT INTO user_tool_preferences (user_id, tool_name, enabled, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id, tool_name) DO UPDATE SET
-                enabled = excluded.enabled,
-                updated_at = excluded.updated_at
-            """,
-            (user_id, tool_name, 1 if enabled else 0, now),
-        )
+    factory = _get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                _sa_text(
+                    "SELECT user_id FROM user_tool_preferences "
+                    "WHERE user_id = :uid AND tool_name = :tname"
+                ),
+                {"uid": user_id, "tname": tool_name},
+            )
+            existing = result.first()
+            if existing:
+                await session.execute(
+                    _sa_text(
+                        "UPDATE user_tool_preferences "
+                        "SET enabled = :ena, updated_at = :now "
+                        "WHERE user_id = :uid AND tool_name = :tname"
+                    ),
+                    {
+                        "ena": 1 if enabled else 0, "now": now,
+                        "uid": user_id, "tname": tool_name,
+                    },
+                )
+            else:
+                await session.execute(
+                    _sa_text(
+                        "INSERT INTO user_tool_preferences "
+                        "(user_id, tool_name, enabled, updated_at) "
+                        "VALUES (:uid, :tname, :ena, :now)"
+                    ),
+                    {
+                        "uid": user_id, "tname": tool_name,
+                        "ena": 1 if enabled else 0, "now": now,
+                    },
+                )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 @router.get("/tools")
@@ -9333,7 +9831,7 @@ async def list_user_tools(
     - l'etat effectif final
     """
     allowed_by_profile = {t["name"] for t in get_allowed_tools(agent_id)}
-    user_prefs = _get_user_tool_preferences(db, user_id) if user_id else {}
+    user_prefs = await _get_user_tool_preferences_async(user_id) if user_id else {}
 
     tools_enriched = []
     for tool in ALL_OPENCLAW_TOOLS:
@@ -9392,7 +9890,7 @@ async def toggle_user_tool(
         raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' inconnu")
 
     enabled = bool(data.get("enabled", True))
-    _set_user_tool_preference(db, user_id, tool_name, enabled)
+    await _set_user_tool_preference_async(user_id, tool_name, enabled)
 
     # Recalculer l'etat effectif
     allowed_by_profile = {t["name"] for t in get_allowed_tools("agent3")}
@@ -9419,11 +9917,17 @@ async def clear_user_tool_override(
     """
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentification requise")
-    with db.conn:
-        db.conn.execute(
-            "DELETE FROM user_tool_preferences WHERE user_id = ? AND tool_name = ?",
-            (user_id, tool_name),
-        )
+    _factory_co = _get_session_factory()
+    async with _factory_co() as _session_co:
+        try:
+            await _session_co.execute(
+                _sa_text("DELETE FROM user_tool_preferences WHERE user_id = :uid AND tool_name = :tn"),
+                {"uid": user_id, "tn": tool_name},
+            )
+            await _session_co.commit()
+        except Exception:
+            await _session_co.rollback()
+            raise
     return {"success": True, "tool": tool_name, "override_cleared": True}
 
 
@@ -9450,7 +9954,7 @@ async def bulk_toggle_user_tools(
         if name not in valid_tool_names:
             skipped.append(name)
             continue
-        _set_user_tool_preference(db, user_id, name, bool(enabled))
+        await _set_user_tool_preference_async(user_id, name, bool(enabled))
         updated.append(name)
 
     return {
@@ -9535,10 +10039,13 @@ async def generate_proactive_message(
         return {"message": None}
 
     # Verifier la derniere interaction
-    last_msg = db.conn.execute(
-        "SELECT created_at FROM agent3_messages WHERE auth_user_id = ? AND role = 'agent' ORDER BY created_at DESC LIMIT 1",
-        (user_id,),
-    ).fetchone()
+    _factory_lm = _get_session_factory()
+    async with _factory_lm() as _session_lm:
+        _result_lm = await _session_lm.execute(
+            _sa_text("SELECT created_at FROM agent3_messages WHERE auth_user_id = :uid AND role = 'agent' ORDER BY created_at DESC LIMIT 1"),
+            {"uid": user_id},
+        )
+        last_msg = _result_lm.first()
 
     now = datetime.now(timezone.utc)
     hours_since = 999
@@ -9563,10 +10070,13 @@ async def generate_proactive_message(
     dec_repo = DecisionRepository(db)
     _pr_iuid = ""
     try:
-        _pr_row = db.conn.execute(
-            "SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1",
-            (user_id,),
-        ).fetchone()
+        _factory_pr = _get_session_factory()
+        async with _factory_pr() as _session_pr:
+            _result_pr = await _session_pr.execute(
+                _sa_text("SELECT id FROM profil_utilisateur WHERE auth_user_id = :uid LIMIT 1"),
+                {"uid": user_id},
+            )
+            _pr_row = _result_pr.first()
         if _pr_row:
             _pr_iuid = _pr_row[0]
     except Exception:
@@ -9579,11 +10089,16 @@ async def generate_proactive_message(
 
     sous_objectifs = []
     try:
-        cursor = db.conn.execute(
-            "SELECT titre, progression FROM sous_objectifs WHERE user_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1)",
-            (user_id,),
-        )
-        sous_objectifs = [{"titre": r[0], "progression": r[1]} for r in cursor.fetchall()]
+        _factory_so3 = _get_session_factory()
+        async with _factory_so3() as _session_so3:
+            _result_so3 = await _session_so3.execute(
+                _sa_text(
+                    "SELECT titre, progression FROM sous_objectifs WHERE user_id = "
+                    "(SELECT id FROM profil_utilisateur WHERE auth_user_id = :uid LIMIT 1)"
+                ),
+                {"uid": user_id},
+            )
+            sous_objectifs = [{"titre": r[0], "progression": r[1]} for r in _result_so3.fetchall()]
     except Exception:
         pass
 
@@ -9595,11 +10110,17 @@ async def generate_proactive_message(
     try:
         _mem_count = 0
         try:
-            _mc = db.conn.execute("SELECT COUNT(*) FROM agent3_memory WHERE auth_user_id = ?", (user_id,)).fetchone()
+            _factory_mcp = _get_session_factory()
+            async with _factory_mcp() as _session_mcp:
+                _result_mcp = await _session_mcp.execute(
+                    _sa_text("SELECT COUNT(*) FROM agent3_memory WHERE auth_user_id = :uid"),
+                    {"uid": user_id},
+                )
+                _mc = _result_mcp.first()
             _mem_count = _mc[0] if _mc else 0
         except Exception:
             pass
-        _fam = _compute_familiarity_level(db, user_id, profil_data, decisions, _mem_count)
+        _fam = await _compute_familiarity_level_async(user_id, profil_data, decisions, _mem_count)
         _tone = _get_tone_instructions(_fam)
         _proactive_sys = f"""Tu es l'Agent Sylea 3. {_tone}
 Message proactif court (1-2 phrases). Inspire-toi de ceci mais reformule naturellement : "{agent_text}"
@@ -9610,7 +10131,7 @@ Propose une action concrete que tu peux realiser. Tutoiement, confiant."""
     except Exception:
         pass  # Garder le template de base
 
-    _save_agent3_message(db, user_id, "agent", agent_text, "text")
+    await _save_agent3_message_async(user_id, "agent", agent_text, "text")
     return {"message": agent_text, "type": msg_type}
 
 
@@ -9716,31 +10237,40 @@ async def check_context_agent3(
             "objectif": profil.objectif.description if profil.objectif else None,
         }
         try:
-            rows = db.conn.execute(
-                "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 30",
-                (user_id,),
-            ).fetchall()
+            _factory_ci3 = _get_session_factory()
+            async with _factory_ci3() as _session_ci3:
+                _result_ci3 = await _session_ci3.execute(
+                    _sa_text("SELECT field, value FROM agent_collected_info WHERE user_id = :uid ORDER BY collected_at DESC LIMIT 30"),
+                    {"uid": user_id},
+                )
+                rows = _result_ci3.fetchall()
             if rows:
                 collected_info = "\n".join(f"{r[0]}: {r[1]}" for r in rows)
         except Exception:
             pass
         # Load memories for Agent 3
         try:
-            _ensure_agent3_tables(db)
-            mem_rows = db.conn.execute(
-                "SELECT key, value FROM agent3_memory WHERE auth_user_id = ? ORDER BY updated_at DESC LIMIT 20",
-                (user_id,),
-            ).fetchall()
+            await _ensure_agent3_tables_async()
+            _factory_mr = _get_session_factory()
+            async with _factory_mr() as _session_mr:
+                _result_mr = await _session_mr.execute(
+                    _sa_text("SELECT key, value FROM agent3_memory WHERE auth_user_id = :uid ORDER BY updated_at DESC LIMIT 20"),
+                    {"uid": user_id},
+                )
+                mem_rows = _result_mr.fetchall()
             if mem_rows:
                 collected_info += "\n\nMEMOIRES AGENT 3:\n" + "\n".join(f"{r[0]}: {r[1]}" for r in mem_rows)
         except Exception:
             pass
         # Load recent messages
         try:
-            msg_rows = db.conn.execute(
-                "SELECT role, content FROM agent3_messages WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT 20",
-                (user_id,),
-            ).fetchall()
+            _factory_msr = _get_session_factory()
+            async with _factory_msr() as _session_msr:
+                _result_msr = await _session_msr.execute(
+                    _sa_text("SELECT role, content FROM agent3_messages WHERE auth_user_id = :uid ORDER BY created_at DESC LIMIT 20"),
+                    {"uid": user_id},
+                )
+                msg_rows = _result_msr.fetchall()
             if msg_rows:
                 collected_info += "\n\nCONVERSATION RECENTE:\n" + "\n".join(
                     f"{'User' if r[0]=='user' else 'Agent'}: {r[1][:150]}" for r in reversed(msg_rows)
@@ -9806,11 +10336,17 @@ async def save_context_agent3(
     """Sauvegarde le contexte utilisateur et verifie s'il est suffisant."""
     if user_id:
         try:
-            db.conn.execute(
-                "INSERT INTO agent_collected_info (user_id, field, value, collected_at) VALUES (?, ?, ?, datetime('now'))",
-                (user_id, f"contexte_{data.related_to[:50]}", data.context_text),
-            )
-            db.conn.commit()
+            _factory_ic = _get_session_factory()
+            async with _factory_ic() as _session_ic:
+                try:
+                    _now_ic = datetime.now(timezone.utc).isoformat()
+                    await _session_ic.execute(
+                        _sa_text("INSERT INTO agent_collected_info (user_id, field, value, collected_at) VALUES (:uid, :f, :v, :ca)"),
+                        {"uid": user_id, "f": f"contexte_{data.related_to[:50]}", "v": data.context_text, "ca": _now_ic},
+                    )
+                    await _session_ic.commit()
+                except Exception:
+                    await _session_ic.rollback()
         except Exception:
             pass
 
@@ -9821,10 +10357,13 @@ async def save_context_agent3(
     collected_info = ""
     if user_id:
         try:
-            rows = db.conn.execute(
-                "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 20",
-                (user_id,),
-            ).fetchall()
+            _factory_sc = _get_session_factory()
+            async with _factory_sc() as _session_sc:
+                _result_sc = await _session_sc.execute(
+                    _sa_text("SELECT field, value FROM agent_collected_info WHERE user_id = :uid ORDER BY collected_at DESC LIMIT 20"),
+                    {"uid": user_id},
+                )
+                rows = _result_sc.fetchall()
             collected_info = "\n".join(f"{r[0]}: {r[1]}" for r in rows)
         except Exception:
             pass
@@ -9866,7 +10405,7 @@ class CodeExecIn(BaseModel):
     timeout: int = 30
 
 
-@router.post("/code/execute")
+@router.post("/code/execute", dependencies=[Depends(_require_agent3_plan)])
 async def execute_code(data: CodeExecIn):
     """
     Execute du code dans le sandbox securise.
@@ -10461,7 +11000,7 @@ async def upload_file(
     if not user_id:
         return {"error": "Non authentifie"}
 
-    _ensure_agent3_tables(db)
+    await _ensure_agent3_tables_async()
 
     # Limites
     MAX_SIZE = 20 * 1024 * 1024  # 20 Mo
@@ -10491,11 +11030,28 @@ async def upload_file(
 
     # DB
     now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "INSERT INTO agent3_files (id, auth_user_id, filename, filetype, filesize, filepath, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (file_id, user_id, safe_name, filetype, len(content), str(filepath), now),
-    )
-    db.conn.commit()
+    _factory_uf = _get_session_factory()
+    async with _factory_uf() as _session_uf:
+        try:
+            await _session_uf.execute(
+                _sa_text(
+                    "INSERT INTO agent3_files (id, auth_user_id, filename, filetype, filesize, filepath, created_at) "
+                    "VALUES (:id, :uid, :fn, :ft, :fs, :fp, :ca)"
+                ),
+                {
+                    "id": file_id,
+                    "uid": user_id,
+                    "fn": safe_name,
+                    "ft": filetype,
+                    "fs": len(content),
+                    "fp": str(filepath),
+                    "ca": now,
+                },
+            )
+            await _session_uf.commit()
+        except Exception:
+            await _session_uf.rollback()
+            raise
 
     # Extraire le contenu via le nouveau module file_ingestion (Phase 8) + auto-RAG
     rag_ingested = False
@@ -10540,7 +11096,7 @@ async def upload_file(
     # ── Also copy uploaded file to workspace folder ──
     ws_filepath_rel = ""
     try:
-        obj_name = get_workspace_folder_name(db, user_id)
+        obj_name = await get_workspace_folder_name_async(user_id)
         ws_dir = WORKSPACE_BASE / obj_name
         ws_dir.mkdir(parents=True, exist_ok=True)
         ws_dest = ws_dir / safe_name
@@ -10582,11 +11138,14 @@ async def list_files(
     """Liste les fichiers uploades par l'utilisateur."""
     if not user_id:
         return []
-    _ensure_agent3_tables(db)
-    rows = db.conn.execute(
-        "SELECT id, filename, filetype, filesize, created_at FROM agent3_files WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT 50",
-        (user_id,),
-    ).fetchall()
+    await _ensure_agent3_tables_async()
+    _factory_lf = _get_session_factory()
+    async with _factory_lf() as _session_lf:
+        _result_lf = await _session_lf.execute(
+            _sa_text("SELECT id, filename, filetype, filesize, created_at FROM agent3_files WHERE auth_user_id = :uid ORDER BY created_at DESC LIMIT 50"),
+            {"uid": user_id},
+        )
+        rows = _result_lf.fetchall()
     return [{"id": r[0], "filename": r[1], "filetype": r[2], "filesize": r[3], "created_at": r[4]} for r in rows]
 
 
@@ -10601,7 +11160,7 @@ async def get_workspace_info(
     if not user_id:
         return {"exists": False}
     try:
-        obj_name = get_workspace_folder_name(db, user_id)
+        obj_name = await get_workspace_folder_name_async(user_id)
         project_dir = WORKSPACE_BASE / obj_name
         if project_dir.exists():
             # Ensure Hypotheses subfolder exists
@@ -10653,7 +11212,7 @@ async def list_workspace_files(
     if not user_id:
         return {"files": [], "workspace": None}
     try:
-        obj_name = get_workspace_folder_name(db, user_id)
+        obj_name = await get_workspace_folder_name_async(user_id)
         project_dir = WORKSPACE_BASE / obj_name
         if not project_dir.exists() or not project_dir.is_dir():
             return {"files": [], "workspace": obj_name}
@@ -10692,7 +11251,7 @@ async def download_workspace_file(
         raise HTTPException(status_code=401, detail="Authentification requise")
     try:
         from api.agent3_security import ensure_within_base
-        obj_name = get_workspace_folder_name(db, user_id)
+        obj_name = await get_workspace_folder_name_async(user_id)
         project_dir = WORKSPACE_BASE / obj_name
         safe_candidate = project_dir / Path(filename).name  # strip any path parts
         resolved = ensure_within_base(safe_candidate, project_dir)
@@ -10731,14 +11290,31 @@ async def create_cron(
     """Cree une tache planifiee pour l'Agent 3."""
     if not user_id:
         return {"error": "Non authentifie"}
-    _ensure_agent3_tables(db)
+    await _ensure_agent3_tables_async()
     cron_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "INSERT INTO agent3_cron (id, auth_user_id, label, instruction, cron_expr, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (cron_id, user_id, data.label, data.instruction, data.cron_expr, 1 if data.enabled else 0, now),
-    )
-    db.conn.commit()
+    _factory_cc = _get_session_factory()
+    async with _factory_cc() as _session_cc:
+        try:
+            await _session_cc.execute(
+                _sa_text(
+                    "INSERT INTO agent3_cron (id, auth_user_id, label, instruction, cron_expr, enabled, created_at) "
+                    "VALUES (:id, :uid, :lbl, :inst, :ce, :en, :ca)"
+                ),
+                {
+                    "id": cron_id,
+                    "uid": user_id,
+                    "lbl": data.label,
+                    "inst": data.instruction,
+                    "ce": data.cron_expr,
+                    "en": 1 if data.enabled else 0,
+                    "ca": now,
+                },
+            )
+            await _session_cc.commit()
+        except Exception:
+            await _session_cc.rollback()
+            raise
     return {"success": True, "cron_id": cron_id}
 
 
@@ -10750,11 +11326,14 @@ async def list_crons(
     """Liste les taches planifiees de l'utilisateur."""
     if not user_id:
         return []
-    _ensure_agent3_tables(db)
-    rows = db.conn.execute(
-        "SELECT id, label, instruction, cron_expr, enabled, last_run, last_result, created_at FROM agent3_cron WHERE auth_user_id = ? ORDER BY created_at DESC",
-        (user_id,),
-    ).fetchall()
+    await _ensure_agent3_tables_async()
+    _factory_lc = _get_session_factory()
+    async with _factory_lc() as _session_lc:
+        _result_lc = await _session_lc.execute(
+            _sa_text("SELECT id, label, instruction, cron_expr, enabled, last_run, last_result, created_at FROM agent3_cron WHERE auth_user_id = :uid ORDER BY created_at DESC"),
+            {"uid": user_id},
+        )
+        rows = _result_lc.fetchall()
     return [
         Agent3CronOut(
             id=r[0], label=r[1], instruction=r[2], cron_expr=r[3],
@@ -10773,12 +11352,18 @@ async def delete_cron(
     """Supprime une tache planifiee."""
     if not user_id:
         return {"error": "Non authentifie"}
-    _ensure_agent3_tables(db)
-    db.conn.execute(
-        "DELETE FROM agent3_cron WHERE id = ? AND auth_user_id = ?",
-        (cron_id, user_id),
-    )
-    db.conn.commit()
+    await _ensure_agent3_tables_async()
+    _factory_dc = _get_session_factory()
+    async with _factory_dc() as _session_dc:
+        try:
+            await _session_dc.execute(
+                _sa_text("DELETE FROM agent3_cron WHERE id = :id AND auth_user_id = :uid"),
+                {"id": cron_id, "uid": user_id},
+            )
+            await _session_dc.commit()
+        except Exception:
+            await _session_dc.rollback()
+            raise
     return {"success": True}
 
 
@@ -10791,19 +11376,26 @@ async def toggle_cron(
     """Active/desactive une tache planifiee."""
     if not user_id:
         return {"error": "Non authentifie"}
-    _ensure_agent3_tables(db)
-    row = db.conn.execute(
-        "SELECT enabled FROM agent3_cron WHERE id = ? AND auth_user_id = ?",
-        (cron_id, user_id),
-    ).fetchone()
-    if not row:
-        return {"error": "Tache non trouvee"}
-    new_state = 0 if row[0] else 1
-    db.conn.execute(
-        "UPDATE agent3_cron SET enabled = ? WHERE id = ?",
-        (new_state, cron_id),
-    )
-    db.conn.commit()
+    await _ensure_agent3_tables_async()
+    _factory_tc2 = _get_session_factory()
+    async with _factory_tc2() as _session_tc2:
+        _result_tc2 = await _session_tc2.execute(
+            _sa_text("SELECT enabled FROM agent3_cron WHERE id = :id AND auth_user_id = :uid"),
+            {"id": cron_id, "uid": user_id},
+        )
+        row = _result_tc2.first()
+        if not row:
+            return {"error": "Tache non trouvee"}
+        new_state = 0 if row[0] else 1
+        try:
+            await _session_tc2.execute(
+                _sa_text("UPDATE agent3_cron SET enabled = :en WHERE id = :id"),
+                {"en": new_state, "id": cron_id},
+            )
+            await _session_tc2.commit()
+        except Exception:
+            await _session_tc2.rollback()
+            raise
     return {"success": True, "enabled": bool(new_state)}
 
 
@@ -10816,11 +11408,14 @@ async def run_cron_now(
     """Execute une tache planifiee immediatement."""
     if not user_id:
         return {"error": "Non authentifie"}
-    _ensure_agent3_tables(db)
-    row = db.conn.execute(
-        "SELECT instruction FROM agent3_cron WHERE id = ? AND auth_user_id = ?",
-        (cron_id, user_id),
-    ).fetchone()
+    await _ensure_agent3_tables_async()
+    _factory_rc = _get_session_factory()
+    async with _factory_rc() as _session_rc:
+        _result_rc = await _session_rc.execute(
+            _sa_text("SELECT instruction FROM agent3_cron WHERE id = :id AND auth_user_id = :uid"),
+            {"id": cron_id, "uid": user_id},
+        )
+        row = _result_rc.first()
     if not row:
         return {"error": "Tache non trouvee"}
 
@@ -10835,11 +11430,17 @@ async def run_cron_now(
 
     now = datetime.now(timezone.utc).isoformat()
     result_text = result.content if not result.error else f"Erreur: {result.error}"
-    db.conn.execute(
-        "UPDATE agent3_cron SET last_run = ?, last_result = ? WHERE id = ?",
-        (now, result_text[:2000], cron_id),
-    )
-    db.conn.commit()
+    _factory_rcu = _get_session_factory()
+    async with _factory_rcu() as _session_rcu:
+        try:
+            await _session_rcu.execute(
+                _sa_text("UPDATE agent3_cron SET last_run = :lr, last_result = :lres WHERE id = :id"),
+                {"lr": now, "lres": result_text[:2000], "id": cron_id},
+            )
+            await _session_rcu.commit()
+        except Exception:
+            await _session_rcu.rollback()
+            raise
 
     return {"success": True, "result": result_text[:2000]}
 
@@ -10854,12 +11455,17 @@ async def list_tasks(
     """Liste les taches actives de l'Agent 3."""
     if not user_id:
         return []
-    _ensure_agent3_tables(db)
-    rows = db.conn.execute(
-        "SELECT id, title, description, steps_json, status, progress, created_at, updated_at "
-        "FROM agent3_tasks WHERE auth_user_id = ? ORDER BY updated_at DESC",
-        (user_id,),
-    ).fetchall()
+    await _ensure_agent3_tables_async()
+    _factory_lt = _get_session_factory()
+    async with _factory_lt() as _session_lt:
+        _result_lt = await _session_lt.execute(
+            _sa_text(
+                "SELECT id, title, description, steps_json, status, progress, created_at, updated_at "
+                "FROM agent3_tasks WHERE auth_user_id = :uid ORDER BY updated_at DESC"
+            ),
+            {"uid": user_id},
+        )
+        rows = _result_lt.fetchall()
     return [
         {
             "id": r[0], "title": r[1], "description": r[2],
@@ -10880,12 +11486,18 @@ async def delete_task(
     """Supprime une tache."""
     if not user_id:
         return {"error": "Non authentifie"}
-    _ensure_agent3_tables(db)
-    db.conn.execute(
-        "DELETE FROM agent3_tasks WHERE id = ? AND auth_user_id = ?",
-        (task_id, user_id),
-    )
-    db.conn.commit()
+    await _ensure_agent3_tables_async()
+    _factory_dt = _get_session_factory()
+    async with _factory_dt() as _session_dt:
+        try:
+            await _session_dt.execute(
+                _sa_text("DELETE FROM agent3_tasks WHERE id = :id AND auth_user_id = :uid"),
+                {"id": task_id, "uid": user_id},
+            )
+            await _session_dt.commit()
+        except Exception:
+            await _session_dt.rollback()
+            raise
     return {"success": True}
 
 
@@ -10899,8 +11511,8 @@ async def get_memories(
     """Retourne les souvenirs de l'Agent 3 pour cet utilisateur."""
     if not user_id:
         return []
-    _ensure_agent3_tables(db)
-    return _load_memories(db, user_id, limit=100)
+    await _ensure_agent3_tables_async()
+    return await _load_memories_async(user_id, limit=100)
 
 
 @router.post("/memory/search")
@@ -10923,8 +11535,8 @@ async def search_memories(
         return {"error": "Query manquante"}
     top_k = min(data.get("top_k", 10), 50)
 
-    _ensure_agent3_tables(db)
-    results = _search_memories(db, user_id, query, top_k=top_k)
+    await _ensure_agent3_tables_async()
+    results = await _search_memories(db, user_id, query, top_k=top_k)
     return {
         "query": query,
         "results": [r.to_dict() for r in results],
@@ -10944,8 +11556,8 @@ async def extract_memories_now(
     """
     if not user_id:
         return {"error": "Non authentifie"}
-    _ensure_agent3_tables(db)
-    recent = _load_agent3_messages(db, user_id, limit=20)
+    await _ensure_agent3_tables_async()
+    recent = await _load_agent3_messages_async(user_id, limit=20)
     turns = [
         {"role": m["role"], "content": m["content"]}
         for m in recent
@@ -10970,12 +11582,18 @@ async def delete_memory(
     """Supprime un souvenir specifique."""
     if not user_id:
         return {"error": "Non authentifie"}
-    _ensure_agent3_tables(db)
-    db.conn.execute(
-        "DELETE FROM agent3_memory WHERE auth_user_id = ? AND key = ?",
-        (user_id, key),
-    )
-    db.conn.commit()
+    await _ensure_agent3_tables_async()
+    _factory_dm = _get_session_factory()
+    async with _factory_dm() as _session_dm:
+        try:
+            await _session_dm.execute(
+                _sa_text("DELETE FROM agent3_memory WHERE auth_user_id = :uid AND key = :k"),
+                {"uid": user_id, "k": key},
+            )
+            await _session_dm.commit()
+        except Exception:
+            await _session_dm.rollback()
+            raise
     return {"success": True}
 
 
@@ -11003,7 +11621,7 @@ async def get_skill_info(skill_name: str):
     return skill.to_dict()
 
 
-@router.post("/skills/{skill_name}/execute")
+@router.post("/skills/{skill_name}/execute", dependencies=[Depends(_require_agent3_plan)])
 async def execute_skill(
     skill_name: str,
     data: dict,
@@ -11025,7 +11643,7 @@ async def execute_skill(
         user_id=user_id or "",
         user_msg=instruction,
         profil={},
-        memories=_load_memories(db, user_id, limit=20) if user_id else [],
+        memories=await _load_memories_async(user_id, limit=20) if user_id else [],
         session_key=data.get("session_key", ""),
     )
     result = await skill.safe_execute(instruction, ctx)
@@ -11370,8 +11988,8 @@ async def get_preferences(
     """Retourne les preferences de l'Agent 3 pour cet utilisateur."""
     if not user_id:
         return {"error": "Non authentifie"}
-    _ensure_agent3_tables(db)
-    return _get_user_preferences(db, user_id)
+    await _ensure_agent3_tables_async()
+    return await _get_user_preferences_async(user_id)
 
 
 @router.put("/preferences")
@@ -11394,8 +12012,8 @@ async def update_preferences(
     """
     if not user_id:
         return {"error": "Non authentifie"}
-    _ensure_agent3_tables(db)
-    current = _get_user_preferences(db, user_id)
+    await _ensure_agent3_tables_async()
+    current = await _get_user_preferences_async(user_id)
     # Whitelist des noms Anthropic valides (pour validation cote backend).
     try:
         from api.openclaw_tool_schemas import all_anthropic_tool_names
@@ -11442,7 +12060,7 @@ async def update_preferences(
                 current[key] = cleaned_names[:50]
             elif value is None:
                 current.pop(key, None)
-    _save_user_preferences(db, user_id, current)
+    await _save_user_preferences_async(user_id, current)
     return {"success": True, "preferences": current}
 
 
@@ -11569,8 +12187,8 @@ async def clawhub_list_all_skills(
         logger.exception("clawhub_loader indisponible")
         return {"success": False, "error": f"Loader indisponible: {type(e).__name__}", "skills": []}
 
-    _ensure_agent3_tables(db)
-    prefs = _get_user_preferences(db, user_id)
+    await _ensure_agent3_tables_async()
+    prefs = await _get_user_preferences_async(user_id)
     enabled_slugs_pref = prefs.get("clawhub_enabled_slugs")
     # Si la liste n'existe pas => tout enabled par defaut (agent auto-extensible)
     if not isinstance(enabled_slugs_pref, list):
@@ -11722,8 +12340,8 @@ async def clawhub_list_events(
     """
     if not user_id:
         return {"error": "Non authentifie"}
-    _ensure_agent3_tables(db)
-    events = _list_clawhub_events(db, user_id, limit=limit)
+    await _ensure_agent3_tables_async()
+    events = await _list_clawhub_events_async(user_id, limit=limit)
     # Stats rapides pour l'UI
     counts = {"auto_search": 0, "auto_install": 0, "auto_publish": 0, "auto_unknown": 0}
     for ev in events:
@@ -11752,15 +12370,20 @@ async def agent3_list_audit(
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentification requise")
     try:
-        from api.agent3_security import _ensure_audit_table
-        _ensure_audit_table(db)
+        from api.agent3_security import _ensure_audit_table_async
+        await _ensure_audit_table_async()
         capped = max(1, min(int(limit or 100), 500))
-        rows = db.conn.execute(
-            "SELECT id, action_type, action_summary, success, error_message, created_at "
-            "FROM agent3_audit_log WHERE auth_user_id = ? "
-            "ORDER BY created_at DESC, id DESC LIMIT ?",
-            (user_id, capped),
-        ).fetchall()
+        _factory_au = _get_session_factory()
+        async with _factory_au() as _session_au:
+            _result_au = await _session_au.execute(
+                _sa_text(
+                    "SELECT id, action_type, action_summary, success, error_message, created_at "
+                    "FROM agent3_audit_log WHERE auth_user_id = :uid "
+                    "ORDER BY created_at DESC, id DESC LIMIT :lim"
+                ),
+                {"uid": user_id, "lim": capped},
+            )
+            rows = _result_au.fetchall()
         entries = [
             {
                 "id": r[0],
@@ -11811,7 +12434,7 @@ async def list_openclaw_direct_tools(
             _OC_TOOL_META,
             DESTRUCTIVE_OPENCLAW_TOOLS,
         )
-        prefs = _get_user_preferences(db, user_id)
+        prefs = await _get_user_preferences_async(user_id)
         direct_enabled = bool(prefs.get("openclaw_direct_tools_enabled", True))
         enabled_list_raw = prefs.get("openclaw_enabled_tools")
         # Distinguer "all" (None / absent) de "subset" (liste, [] = preset "Aucun").
@@ -11882,7 +12505,7 @@ async def agent3_metrics(
             get_tool_latency_stats, get_daily_cost_for_user,
             DEFAULT_DAILY_COST_CAP_USD,
         )
-        prefs = _get_user_preferences(db, user_id) if user_id else {}
+        prefs = await _get_user_preferences_async(user_id) if user_id else {}
         cap = prefs.get("external_cost_cap_usd_per_day")
         if not isinstance(cap, (int, float)) or cap < 0:
             cap = DEFAULT_DAILY_COST_CAP_USD
@@ -11948,8 +12571,8 @@ async def clawhub_get_settings(
     """Retourne les preferences ClawHub de l'utilisateur (avec defauts)."""
     if not user_id:
         return {"error": "Non authentifie"}
-    _ensure_agent3_tables(db)
-    prefs = _get_user_preferences(db, user_id)
+    await _ensure_agent3_tables_async()
+    prefs = await _get_user_preferences_async(user_id)
     enabled_slugs = prefs.get("clawhub_enabled_slugs")
     return {
         "success": True,
@@ -11974,9 +12597,9 @@ async def clawhub_update_settings(
     """
     if not user_id:
         return {"error": "Non authentifie"}
-    _ensure_agent3_tables(db)
+    await _ensure_agent3_tables_async()
 
-    prefs = _get_user_preferences(db, user_id)
+    prefs = await _get_user_preferences_async(user_id)
     if "permission_mode" in data:
         val = str(data.get("permission_mode") or "default").strip().lower()
         if val in {"default", "bypass"}:
@@ -11993,7 +12616,7 @@ async def clawhub_update_settings(
             cleaned = [str(s).strip() for s in v if isinstance(s, str) and s.strip()]
             prefs["clawhub_enabled_slugs"] = cleaned[:200]
 
-    _save_user_preferences(db, user_id, prefs)
+    await _save_user_preferences_async(user_id, prefs)
     return {
         "success": True,
         "permission_mode": prefs.get("permission_mode", "default"),
@@ -12012,12 +12635,17 @@ async def export_conversation(
     """Export Agent 3 conversation history as TXT or JSON."""
     if not user_id:
         return Response(content="Non authentifie", status_code=401)
-    _ensure_agent3_tables(db)
-    rows = db.conn.execute(
-        "SELECT role, content, type, created_at FROM agent3_messages "
-        "WHERE auth_user_id = ? ORDER BY created_at ASC",
-        (user_id,),
-    ).fetchall()
+    await _ensure_agent3_tables_async()
+    _factory_ex = _get_session_factory()
+    async with _factory_ex() as _session_ex:
+        _result_ex = await _session_ex.execute(
+            _sa_text(
+                "SELECT role, content, type, created_at FROM agent3_messages "
+                "WHERE auth_user_id = :uid ORDER BY created_at ASC"
+            ),
+            {"uid": user_id},
+        )
+        rows = _result_ex.fetchall()
 
     if format == "json":
         data = [
@@ -12072,8 +12700,8 @@ async def export_my_data_endpoint(
     """
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentification requise")
-    from api.agent3_gdpr import export_my_data
-    bundle = export_my_data(db, user_id)
+    from api.agent3_gdpr import export_my_data_async
+    bundle = await export_my_data_async(user_id)
     payload = json.dumps(bundle, ensure_ascii=False, indent=2, default=str)
     return Response(
         content=payload,
@@ -12102,8 +12730,8 @@ async def delete_my_data_endpoint(
             status_code=400,
             detail="Confirmation requise : envoyer ?confirm=YES-DELETE-EVERYTHING",
         )
-    from api.agent3_gdpr import delete_my_data
-    result = delete_my_data(db, user_id)
+    from api.agent3_gdpr import delete_my_data_async
+    result = await delete_my_data_async(user_id)
     return result
 
 
@@ -12120,8 +12748,8 @@ async def retention_run_endpoint(
     """
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentification requise")
-    from api.agent3_retention import run_retention_pass
-    return run_retention_pass(db, force=force)
+    from api.agent3_retention import run_retention_pass_async
+    return await run_retention_pass_async(force=force)
 
 
 @router.get("/retention/status")
@@ -12153,9 +12781,9 @@ async def feedback_post(
     """Enregistre un 👍 / 👎 explicite sur une reponse agent."""
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentification requise")
-    from api.agent3_feedback import record_feedback
-    result = record_feedback(
-        db, user_id,
+    from api.agent3_feedback import record_feedback_async
+    result = await record_feedback_async(
+        user_id,
         vote=data.vote,
         message_id=data.message_id,
         comment=data.comment,
@@ -12189,8 +12817,8 @@ async def feedback_get_recent(
     """Derniers feedbacks du user authentifie."""
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentification requise")
-    from api.agent3_feedback import get_recent_feedback
-    return {"items": get_recent_feedback(db, user_id, limit=limit)}
+    from api.agent3_feedback import get_recent_feedback_async
+    return {"items": await get_recent_feedback_async(user_id, limit=limit)}
 
 
 @router.get("/feedback/stats")
@@ -12201,8 +12829,8 @@ async def feedback_stats_endpoint(
     """Agrege : thumbs_up, thumbs_down, ratio."""
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentification requise")
-    from api.agent3_feedback import get_feedback_stats
-    return get_feedback_stats(db, user_id)
+    from api.agent3_feedback import get_feedback_stats_async
+    return await get_feedback_stats_async(user_id)
 
 
 @router.get("/chat-ratelimit-stats")
@@ -12239,7 +12867,7 @@ async def openclaw_sync_credentials_endpoint(
     from api.openclaw_config_sync import (
         sync_user_credentials_to_openclaw, reload_openclaw_gateway,
     )
-    result = sync_user_credentials_to_openclaw(
+    result = await sync_user_credentials_to_openclaw(
         db, user_id, remove_missing=remove_missing, dry_run=dry_run,
     )
     if reload and result.get("ok") and result.get("changes"):
@@ -12257,7 +12885,7 @@ async def openclaw_sync_status_endpoint(
         raise HTTPException(status_code=401, detail="Auth requise")
     from api.openclaw_config_sync import sync_user_credentials_to_openclaw
     # Dry run -> revele lequels sont prets sans ecrire
-    return sync_user_credentials_to_openclaw(db, user_id, dry_run=True)
+    return await sync_user_credentials_to_openclaw(db, user_id, dry_run=True)
 
 
 # ── Setup Wizard — Installation automatique OpenClaw ──────────────────────────
@@ -12511,7 +13139,7 @@ async def setup_save_token(data: dict):
 # Computer Use — Control the user's PC
 # ──────────────────────────────────────────────────────────────────────────────
 
-@router.post("/computer-use/start")
+@router.post("/computer-use/start", dependencies=[Depends(_require_agent3_plan)])
 async def start_computer_use(
     request: Request,
 ):
@@ -12571,7 +13199,7 @@ async def start_computer_use(
     )
 
 
-@router.post("/browser-agent/start")
+@router.post("/browser-agent/start", dependencies=[Depends(_require_agent3_plan)])
 async def start_browser_agent(request: Request):
     """Lance le BrowserAgent Playwright pour une tache web autonome.
 
@@ -12638,7 +13266,7 @@ async def start_browser_agent(request: Request):
     )
 
 
-@router.get("/browser-agent/screenshot")
+@router.get("/browser-agent/screenshot", dependencies=[Depends(_require_agent3_plan)])
 async def get_browser_agent_screenshot():
     """Get the latest screenshot from the BrowserAgent (actif ou sauvegarde sur disque)."""
     from api.browser_agent import get_active_browser_agent, SCREENSHOTS_DIR
@@ -12654,7 +13282,7 @@ async def get_browser_agent_screenshot():
     raise HTTPException(404, "Pas de screenshot disponible")
 
 
-@router.post("/browser-agent/user-action")
+@router.post("/browser-agent/user-action", dependencies=[Depends(_require_agent3_plan)])
 async def browser_agent_user_action(request: Request):
     """Signal Effectue/Abandonner pour le BrowserAgent."""
     body = await request.json()
@@ -12667,7 +13295,7 @@ async def browser_agent_user_action(request: Request):
     return {"success": True, "result": result}
 
 
-@router.post("/browser-agent/abort")
+@router.post("/browser-agent/abort", dependencies=[Depends(_require_agent3_plan)])
 async def abort_browser_agent():
     """Abort le BrowserAgent."""
     from api.browser_agent import get_active_browser_agent
@@ -12680,7 +13308,7 @@ async def abort_browser_agent():
 
 # ── Plan Mode / Permissions / Cost tracking ────────────────────────────────
 
-@router.post("/browser-agent/plan")
+@router.post("/browser-agent/plan", dependencies=[Depends(_require_agent3_plan)])
 async def browser_agent_generate_plan(request: Request):
     """Genere un plan d'execution avant de lancer le BrowserAgent.
 
@@ -12707,7 +13335,7 @@ async def browser_agent_generate_plan(request: Request):
     return plan.to_dict()
 
 
-@router.post("/browser-agent/plan/{plan_id}/approve")
+@router.post("/browser-agent/plan/{plan_id}/approve", dependencies=[Depends(_require_agent3_plan)])
 async def browser_agent_approve_plan(plan_id: str, request: Request):
     """Approuve un plan genere. L'user peut ensuite lancer /browser-agent/start."""
     from api.agent3_plan_mode import get_plan_store
@@ -12718,7 +13346,7 @@ async def browser_agent_approve_plan(plan_id: str, request: Request):
     return plan.to_dict()
 
 
-@router.post("/browser-agent/plan/{plan_id}/edit-step")
+@router.post("/browser-agent/plan/{plan_id}/edit-step", dependencies=[Depends(_require_agent3_plan)])
 async def browser_agent_edit_plan_step(plan_id: str, request: Request):
     """Modifie une etape d'un plan DRAFT avant approbation.
 
@@ -12741,7 +13369,7 @@ async def browser_agent_edit_plan_step(plan_id: str, request: Request):
     return plan.to_dict() if plan else {"success": True}
 
 
-@router.post("/browser-agent/plan/{plan_id}/abort")
+@router.post("/browser-agent/plan/{plan_id}/abort", dependencies=[Depends(_require_agent3_plan)])
 async def browser_agent_abort_plan(plan_id: str):
     """Annule un plan non encore execute."""
     from api.agent3_plan_mode import get_plan_store
@@ -12752,7 +13380,7 @@ async def browser_agent_abort_plan(plan_id: str):
     return plan.to_dict()
 
 
-@router.get("/browser-agent/plan/{plan_id}")
+@router.get("/browser-agent/plan/{plan_id}", dependencies=[Depends(_require_agent3_plan)])
 async def browser_agent_get_plan(plan_id: str):
     from api.agent3_plan_mode import get_plan_store
     plan = get_plan_store().get(plan_id)
@@ -12761,7 +13389,7 @@ async def browser_agent_get_plan(plan_id: str):
     return plan.to_dict()
 
 
-@router.post("/browser-agent/permission/respond")
+@router.post("/browser-agent/permission/respond", dependencies=[Depends(_require_agent3_plan)])
 async def browser_agent_permission_respond(request: Request):
     """Reponse user a une demande de permission (ALLOW / DENY).
 
@@ -12778,7 +13406,7 @@ async def browser_agent_permission_respond(request: Request):
     return {"success": True, "decision": "allow" if allow else "deny"}
 
 
-@router.get("/browser-agent/permission/policy")
+@router.get("/browser-agent/permission/policy", dependencies=[Depends(_require_agent3_plan)])
 async def browser_agent_get_policy(user_id: str = "default"):
     """Retourne la policy de permissions active."""
     from api.agent3_permissions import get_policy
@@ -12793,7 +13421,7 @@ async def browser_agent_get_policy(user_id: str = "default"):
     }
 
 
-@router.post("/browser-agent/permission/policy")
+@router.post("/browser-agent/permission/policy", dependencies=[Depends(_require_agent3_plan)])
 async def browser_agent_set_policy(request: Request):
     """Met a jour la policy de permissions.
 
@@ -12830,21 +13458,21 @@ async def browser_agent_set_policy(request: Request):
     }
 
 
-@router.get("/browser-agent/cost")
+@router.get("/browser-agent/cost", dependencies=[Depends(_require_agent3_plan)])
 async def browser_agent_cost(user_id: str = "default"):
     """Snapshot du cost tracker pour l'UI."""
     from api.agent3_cost_tracker import get_cost_tracker
     return get_cost_tracker(user_id).get()
 
 
-@router.post("/browser-agent/cost/reset")
+@router.post("/browser-agent/cost/reset", dependencies=[Depends(_require_agent3_plan)])
 async def browser_agent_cost_reset(user_id: str = "default"):
     from api.agent3_cost_tracker import reset_cost_tracker
     reset_cost_tracker(user_id)
     return {"success": True}
 
 
-@router.get("/computer-use/screenshot")
+@router.get("/computer-use/screenshot", dependencies=[Depends(_require_agent3_plan)])
 async def get_latest_screenshot():
     """Get the latest screenshot from the active Computer Use session."""
     session = get_active_session("default")
@@ -12859,7 +13487,7 @@ async def get_latest_screenshot():
     return {"screenshot": session._latest_screenshot}
 
 
-@router.post("/computer-use/confirm")
+@router.post("/computer-use/confirm", dependencies=[Depends(_require_agent3_plan)])
 async def confirm_computer_use(request: Request):
     """Confirm or reject a Computer Use action that requires approval."""
     body = await request.json()
@@ -12873,7 +13501,7 @@ async def confirm_computer_use(request: Request):
     return {"success": True, "approved": approved}
 
 
-@router.post("/computer-use/abort")
+@router.post("/computer-use/abort", dependencies=[Depends(_require_agent3_plan)])
 async def abort_computer_use():
     """Abort the active Computer Use session."""
     session = get_active_session("default")
@@ -12884,7 +13512,7 @@ async def abort_computer_use():
     return {"success": True, "message": "Session Computer Use annulee"}
 
 
-@router.post("/computer-use/user-action")
+@router.post("/computer-use/user-action", dependencies=[Depends(_require_agent3_plan)])
 async def computer_use_user_action(request: Request):
     """Signal que l'utilisateur a effectue ou abandonne l'action demandee."""
     body = await request.json()
@@ -12898,7 +13526,7 @@ async def computer_use_user_action(request: Request):
     return {"success": True, "result": result}
 
 
-@router.get("/computer-use/stats")
+@router.get("/computer-use/stats", dependencies=[Depends(_require_agent3_plan)])
 async def computer_use_stats():
     """Get statistics for the current/last Computer Use session."""
     from api.computer_use import _sessions
@@ -12908,7 +13536,7 @@ async def computer_use_stats():
     return {"active": session.is_running, **session.get_stats()}
 
 
-@router.get("/computer-use/cost")
+@router.get("/computer-use/cost", dependencies=[Depends(_require_agent3_plan)])
 async def computer_use_cost():
     """Get cost tracking for the current Computer Use session."""
     try:
@@ -13130,10 +13758,10 @@ async def get_my_plan(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_quotas import get_user_plan, get_usage
+    from api.agent3_quotas import get_user_plan_async, get_usage_async
     return {
-        "plan": get_user_plan(db, user_id),
-        "usage": get_usage(db, user_id),
+        "plan": await get_user_plan_async(user_id),
+        "usage": await get_usage_async(user_id),
     }
 
 
@@ -13145,8 +13773,8 @@ async def my_usage(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_quotas import get_usage
-    return get_usage(db, user_id, month_key=month)
+    from api.agent3_quotas import get_usage_async
+    return await get_usage_async(user_id, month_key=month)
 
 
 # ── Workspaces ──────────────────────────────────────────────────────────────
@@ -13174,8 +13802,8 @@ async def workspace_create(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_workspaces import create_workspace
-    r = create_workspace(db, user_id, data.name)
+    from api.agent3_workspaces import create_workspace_async
+    r = await create_workspace_async(user_id, data.name)
     if not r.get("ok"):
         raise HTTPException(400, r.get("error") or "fail")
     return r
@@ -13188,8 +13816,8 @@ async def workspace_list(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_workspaces import list_user_workspaces
-    return {"items": list_user_workspaces(db, user_id)}
+    from api.agent3_workspaces import list_user_workspaces_async
+    return {"items": await list_user_workspaces_async(user_id)}
 
 
 @router.delete("/workspaces/{workspace_id}")
@@ -13200,8 +13828,8 @@ async def workspace_delete(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_workspaces import delete_workspace
-    r = delete_workspace(db, workspace_id, user_id)
+    from api.agent3_workspaces import delete_workspace_async
+    r = await delete_workspace_async(workspace_id, user_id)
     if not r.get("ok"):
         raise HTTPException(403, r.get("error") or "fail")
     return r
@@ -13215,10 +13843,10 @@ async def workspace_members(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_workspaces import list_members, is_member
-    if not is_member(db, workspace_id, user_id):
+    from api.agent3_workspaces import list_members_async, is_member_async
+    if not await is_member_async(workspace_id, user_id):
         raise HTTPException(403, "Not a member")
-    return {"members": list_members(db, workspace_id)}
+    return {"members": await list_members_async(workspace_id)}
 
 
 @router.post("/workspaces/{workspace_id}/members")
@@ -13230,8 +13858,8 @@ async def workspace_add_member(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_workspaces import add_member
-    r = add_member(db, workspace_id, data.user_id, data.role, requester_id=user_id)
+    from api.agent3_workspaces import add_member_async
+    r = await add_member_async(workspace_id, data.user_id, data.role, requester_id=user_id)
     if not r.get("ok"):
         raise HTTPException(403, r.get("error") or "fail")
     return r
@@ -13246,8 +13874,8 @@ async def workspace_remove_member(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_workspaces import remove_member
-    r = remove_member(db, workspace_id, target_user_id, requester_id=user_id)
+    from api.agent3_workspaces import remove_member_async
+    r = await remove_member_async(workspace_id, target_user_id, requester_id=user_id)
     if not r.get("ok"):
         raise HTTPException(403, r.get("error") or "fail")
     return r
@@ -13262,8 +13890,8 @@ async def workspace_share_memory(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_workspaces import share_memory
-    r = share_memory(db, workspace_id, user_id, key=data.key, value=data.value, category=data.category)
+    from api.agent3_workspaces import share_memory_async
+    r = await share_memory_async(workspace_id, user_id, key=data.key, value=data.value, category=data.category)
     if not r.get("ok"):
         raise HTTPException(403, r.get("error") or "fail")
     return r
@@ -13278,19 +13906,19 @@ async def workspace_get_memory(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_workspaces import is_member, get_workspace_memory
-    if not is_member(db, workspace_id, user_id):
+    from api.agent3_workspaces import is_member_async, get_workspace_memory_async
+    if not await is_member_async(workspace_id, user_id):
         raise HTTPException(403, "Not a member")
-    return {"items": get_workspace_memory(db, workspace_id, limit=limit)}
+    return {"items": await get_workspace_memory_async(workspace_id, limit=limit)}
 
 
 # ── Admin dashboard ─────────────────────────────────────────────────────────
 
-def _require_admin(db: DatabaseManager, user_id: str | None) -> None:
+async def _require_admin(db: DatabaseManager, user_id: str | None) -> None:
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_admin import is_admin
-    if not is_admin(db, user_id):
+    from api.agent3_admin import is_admin_async
+    if not await is_admin_async(user_id):
         raise HTTPException(403, "Admin requis")
 
 
@@ -13300,9 +13928,9 @@ async def admin_list_users(
     db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
-    _require_admin(db, user_id)
-    from api.agent3_admin import list_users_with_stats
-    return {"items": list_users_with_stats(db, limit=limit)}
+    await _require_admin(db, user_id)
+    from api.agent3_admin import list_users_with_stats_async
+    return {"items": await list_users_with_stats_async(limit=limit)}
 
 
 @router.get("/admin/stats")
@@ -13310,9 +13938,9 @@ async def admin_stats(
     db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
-    _require_admin(db, user_id)
-    from api.agent3_admin import get_global_stats
-    return get_global_stats(db)
+    await _require_admin(db, user_id)
+    from api.agent3_admin import get_global_stats_async
+    return await get_global_stats_async()
 
 
 @router.get("/admin/activity")
@@ -13321,9 +13949,9 @@ async def admin_activity(
     db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
-    _require_admin(db, user_id)
-    from api.agent3_admin import get_recent_activity
-    return {"items": get_recent_activity(db, limit=limit)}
+    await _require_admin(db, user_id)
+    from api.agent3_admin import get_recent_activity_async
+    return {"items": await get_recent_activity_async(limit=limit)}
 
 
 class _AdminPlanIn(BaseModel):
@@ -13337,9 +13965,9 @@ async def admin_set_plan(
     db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
-    _require_admin(db, user_id)
-    from api.agent3_quotas import set_user_plan
-    r = set_user_plan(db, target_id, data.plan_name)
+    await _require_admin(db, user_id)
+    from api.agent3_quotas import set_user_plan_async
+    r = await set_user_plan_async(target_id, data.plan_name)
     if not r.get("ok"):
         raise HTTPException(400, r.get("error") or "fail")
     return r
@@ -13351,9 +13979,9 @@ async def admin_disable_user(
     db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
-    _require_admin(db, user_id)
-    from api.agent3_admin import disable_user
-    return disable_user(db, target_id)
+    await _require_admin(db, user_id)
+    from api.agent3_admin import disable_user_async
+    return await disable_user_async(target_id)
 
 
 @router.post("/admin/users/{target_id}/enable")
@@ -13362,9 +13990,9 @@ async def admin_enable_user(
     db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
-    _require_admin(db, user_id)
-    from api.agent3_admin import enable_user
-    return enable_user(db, target_id)
+    await _require_admin(db, user_id)
+    from api.agent3_admin import enable_user_async
+    return await enable_user_async(target_id)
 
 
 # ── API keys (pour API publique B2B) ────────────────────────────────────────
@@ -13382,8 +14010,8 @@ async def api_key_create(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_api_keys import create_api_key
-    r = create_api_key(db, user_id, data.name, scopes=data.scopes)
+    from api.agent3_api_keys import create_api_key_async
+    r = await create_api_key_async(user_id, data.name, scopes=data.scopes)
     if not r.get("ok"):
         raise HTTPException(400, r.get("error") or "fail")
     return r
@@ -13396,8 +14024,8 @@ async def api_key_list(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_api_keys import list_api_keys
-    return {"items": list_api_keys(db, user_id)}
+    from api.agent3_api_keys import list_api_keys_async
+    return {"items": await list_api_keys_async(user_id)}
 
 
 @router.delete("/api-keys/{key_id}")
@@ -13408,8 +14036,8 @@ async def api_key_revoke(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_api_keys import revoke_api_key
-    r = revoke_api_key(db, key_id, user_id)
+    from api.agent3_api_keys import revoke_api_key_async
+    r = await revoke_api_key_async(key_id, user_id)
     if not r.get("ok"):
         raise HTTPException(403, r.get("error") or "fail")
     return r
@@ -13430,8 +14058,8 @@ async def webhook_create(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_webhooks import create_subscription
-    r = create_subscription(db, user_id, data.target_url, data.events)
+    from api.agent3_webhooks import create_subscription_async
+    r = await create_subscription_async(user_id, data.target_url, data.events)
     if not r.get("ok"):
         raise HTTPException(400, r.get("error") or "fail")
     return r
@@ -13444,8 +14072,8 @@ async def webhook_list(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_webhooks import list_subscriptions
-    return {"items": list_subscriptions(db, user_id)}
+    from api.agent3_webhooks import list_subscriptions_async
+    return {"items": await list_subscriptions_async(user_id)}
 
 
 @router.delete("/webhooks/{sub_id}")
@@ -13456,8 +14084,8 @@ async def webhook_delete(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_webhooks import delete_subscription
-    r = delete_subscription(db, sub_id, user_id)
+    from api.agent3_webhooks import delete_subscription_async
+    r = await delete_subscription_async(sub_id, user_id)
     if not r.get("ok"):
         raise HTTPException(403, r.get("error") or "fail")
     return r
@@ -13471,8 +14099,8 @@ async def webhook_deliveries(
 ):
     if not user_id:
         raise HTTPException(401, "Auth requise")
-    from api.agent3_webhooks import list_recent_deliveries
-    return {"items": list_recent_deliveries(db, user_id, limit=limit)}
+    from api.agent3_webhooks import list_recent_deliveries_async
+    return {"items": await list_recent_deliveries_async(user_id, limit=limit)}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -13553,9 +14181,13 @@ async def stripe_checkout(
         raise HTTPException(401, "Auth requise")
     # Recupere l'email du user
     try:
-        row = db.conn.execute(
-            "SELECT email FROM users WHERE id = ?", (user_id,),
-        ).fetchone()
+        _factory_st = _get_session_factory()
+        async with _factory_st() as _session_st:
+            _result_st = await _session_st.execute(
+                _sa_text("SELECT email FROM users WHERE id = :uid"),
+                {"uid": user_id},
+            )
+            row = _result_st.first()
     except Exception:
         row = None
     email = (row[0] if row else "") or ""

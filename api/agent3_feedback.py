@@ -68,8 +68,38 @@ def ensure_feedback_table(db: Any) -> None:
 VoteType = Literal["up", "down"]
 
 
-def record_feedback(
-    db: Any,
+__all__ = [
+    "ensure_feedback_table",
+    # Async versions (migration PG, 2026-05-13)
+    "ensure_feedback_table_async",
+    "record_feedback_async",
+    "get_recent_feedback_async",
+    "get_feedback_stats_async",
+    "get_feedback_comments_for_prompt_async",
+    "format_feedback_context_async",
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def ensure_feedback_table_async() -> None:
+    """Version async de ensure_feedback_table — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(text(_FEEDBACK_DDL))
+            await session.execute(text(_FEEDBACK_INDEX_DDL))
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logger.debug(f"ensure_feedback_table_async failed: {e}")
+
+
+async def record_feedback_async(
     user_id: str,
     *,
     vote: str,
@@ -77,88 +107,121 @@ def record_feedback(
     comment: str | None = None,
     agent_response: str | None = None,
 ) -> dict[str, Any]:
-    """Enregistre un vote explicite.
+    """Version async de record_feedback — PG-compatible.
 
-    vote doit etre "up" ou "down". Comment et message_id sont optionnels.
+    Plus de parametre `db` : utilise get_session_factory() directement.
     """
+    from sqlalchemy import text
+    from api.database import get_session_factory
+
     if not user_id:
         return {"ok": False, "error": "no user_id"}
     if vote not in ("up", "down"):
         return {"ok": False, "error": f"invalid vote: {vote}"}
 
-    ensure_feedback_table(db)
+    await ensure_feedback_table_async()
 
     feedback_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    snapshot = (agent_response or "")[:4000]  # cap snapshot size
+    snapshot = (agent_response or "")[:4000]
     comment_clean = (comment or "")[:2000] if comment else None
 
-    try:
-        db.conn.execute(
-            "INSERT INTO agent3_feedback "
-            "(id, auth_user_id, message_id, vote, comment, agent_response, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (feedback_id, user_id, message_id, vote, comment_clean, snapshot, now),
-        )
-        db.conn.commit()
-    except Exception as e:
-        logger.warning(f"record_feedback insert failed: {e}")
-        return {"ok": False, "error": f"db_error: {type(e).__name__}"}
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(
+                text(
+                    "INSERT INTO agent3_feedback "
+                    "(id, auth_user_id, message_id, vote, comment, agent_response, created_at) "
+                    "VALUES (:id, :uid, :mid, :vote, :comment, :resp, :now)"
+                ),
+                {
+                    "id": feedback_id,
+                    "uid": user_id,
+                    "mid": message_id,
+                    "vote": vote,
+                    "comment": comment_clean,
+                    "resp": snapshot,
+                    "now": now,
+                },
+            )
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logger.warning(f"record_feedback_async insert failed: {e}")
+            return {"ok": False, "error": f"db_error: {type(e).__name__}"}
 
     return {"ok": True, "feedback_id": feedback_id, "created_at": now}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Read
-# ─────────────────────────────────────────────────────────────────────────────
-
-def get_recent_feedback(
-    db: Any, user_id: str, *, limit: int = 20,
+async def get_recent_feedback_async(
+    user_id: str, *, limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Derniers feedbacks du user."""
+    """Version async de get_recent_feedback — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
+
     if not user_id:
         return []
-    ensure_feedback_table(db)
+    await ensure_feedback_table_async()
     limit = max(1, min(int(limit), 200))
-    try:
-        rows = db.conn.execute(
-            "SELECT id, message_id, vote, comment, agent_response, created_at "
-            "FROM agent3_feedback WHERE auth_user_id = ? "
-            "ORDER BY created_at DESC LIMIT ?",
-            (user_id, limit),
-        ).fetchall()
-    except Exception as e:
-        logger.debug(f"get_recent_feedback failed: {e}")
-        return []
+
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT id, message_id, vote, comment, agent_response, created_at "
+                    "FROM agent3_feedback WHERE auth_user_id = :uid "
+                    "ORDER BY created_at DESC LIMIT :lim"
+                ),
+                {"uid": user_id, "lim": limit},
+            )
+            rows = result.mappings().all()
+        except Exception as e:
+            logger.debug(f"get_recent_feedback_async failed: {e}")
+            return []
     return [
         {
-            "id": r[0],
-            "message_id": r[1],
-            "vote": r[2],
-            "comment": r[3],
-            "agent_response": r[4],
-            "created_at": r[5],
+            "id": r["id"],
+            "message_id": r["message_id"],
+            "vote": r["vote"],
+            "comment": r["comment"],
+            "agent_response": r["agent_response"],
+            "created_at": r["created_at"],
         }
         for r in rows
     ]
 
 
-def get_feedback_stats(db: Any, user_id: str) -> dict[str, Any]:
-    """Aggregat : thumbs_up, thumbs_down, ratio, total."""
+async def get_feedback_stats_async(user_id: str) -> dict[str, Any]:
+    """Version async de get_feedback_stats — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
+
     if not user_id:
         return {"thumbs_up": 0, "thumbs_down": 0, "total": 0, "ratio": 0.0}
-    ensure_feedback_table(db)
-    try:
-        row = db.conn.execute(
-            "SELECT "
-            " SUM(CASE WHEN vote='up' THEN 1 ELSE 0 END), "
-            " SUM(CASE WHEN vote='down' THEN 1 ELSE 0 END), "
-            " COUNT(*) "
-            "FROM agent3_feedback WHERE auth_user_id = ?",
-            (user_id,),
-        ).fetchone()
-    except Exception as e:
-        logger.debug(f"get_feedback_stats failed: {e}")
+    await ensure_feedback_table_async()
+
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT "
+                    " SUM(CASE WHEN vote='up' THEN 1 ELSE 0 END) AS ups, "
+                    " SUM(CASE WHEN vote='down' THEN 1 ELSE 0 END) AS downs, "
+                    " COUNT(*) AS total "
+                    "FROM agent3_feedback WHERE auth_user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            row = result.first()
+        except Exception as e:
+            logger.debug(f"get_feedback_stats_async failed: {e}")
+            return {"thumbs_up": 0, "thumbs_down": 0, "total": 0, "ratio": 0.0}
+
+    if row is None:
         return {"thumbs_up": 0, "thumbs_down": 0, "total": 0, "ratio": 0.0}
     up, down, total = row[0] or 0, row[1] or 0, row[2] or 0
     ratio = (up / total) if total > 0 else 0.0
@@ -170,35 +233,41 @@ def get_feedback_stats(db: Any, user_id: str) -> dict[str, Any]:
     }
 
 
-def get_feedback_comments_for_prompt(
-    db: Any, user_id: str, *, limit: int = 5,
+async def get_feedback_comments_for_prompt_async(
+    user_id: str, *, limit: int = 5,
 ) -> list[str]:
-    """Derniers commentaires avec vote down (utile pour apprendre des erreurs)."""
+    """Version async de get_feedback_comments_for_prompt — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
+
     if not user_id:
         return []
-    ensure_feedback_table(db)
-    try:
-        rows = db.conn.execute(
-            "SELECT comment, agent_response FROM agent3_feedback "
-            "WHERE auth_user_id = ? AND vote = 'down' "
-            "AND comment IS NOT NULL AND LENGTH(comment) > 10 "
-            "ORDER BY created_at DESC LIMIT ?",
-            (user_id, max(1, min(int(limit), 20))),
-        ).fetchall()
-    except Exception as e:
-        logger.debug(f"get_feedback_comments_for_prompt failed: {e}")
-        return []
-    return [r[0] for r in rows if r[0]]
+    await ensure_feedback_table_async()
+
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT comment, agent_response FROM agent3_feedback "
+                    "WHERE auth_user_id = :uid AND vote = 'down' "
+                    "AND comment IS NOT NULL AND LENGTH(comment) > 10 "
+                    "ORDER BY created_at DESC LIMIT :lim"
+                ),
+                {"uid": user_id, "lim": max(1, min(int(limit), 20))},
+            )
+            rows = result.mappings().all()
+        except Exception as e:
+            logger.debug(f"get_feedback_comments_for_prompt_async failed: {e}")
+            return []
+    return [r["comment"] for r in rows if r["comment"]]
 
 
-def format_feedback_context(db: Any, user_id: str) -> str:
-    """Bloc a injecter dans le system prompt.
-
-    Retourne "" si pas assez de feedback pour etre utile.
-    """
+async def format_feedback_context_async(user_id: str) -> str:
+    """Version async de format_feedback_context — PG-compatible."""
     if not user_id:
         return ""
-    stats = get_feedback_stats(db, user_id)
+    stats = await get_feedback_stats_async(user_id)
     if stats["total"] < 3:
         return ""
 
@@ -209,7 +278,7 @@ def format_feedback_context(db: Any, user_id: str) -> str:
     )
 
     if stats["thumbs_down"] > 0:
-        negatives = get_feedback_comments_for_prompt(db, user_id, limit=3)
+        negatives = await get_feedback_comments_for_prompt_async(user_id, limit=3)
         if negatives:
             parts.append("- Corrections recentes a prendre en compte :")
             for c in negatives:
@@ -220,13 +289,3 @@ def format_feedback_context(db: Any, user_id: str) -> str:
         "Si ratio < 50%, redouble d'attention sur la precision et le format."
     )
     return "\n".join(parts)
-
-
-__all__ = [
-    "ensure_feedback_table",
-    "record_feedback",
-    "get_recent_feedback",
-    "get_feedback_stats",
-    "get_feedback_comments_for_prompt",
-    "format_feedback_context",
-]

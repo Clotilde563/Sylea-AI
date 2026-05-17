@@ -35,6 +35,7 @@ import AuthCallbackPage     from './pages/AuthCallbackPage'
 import QuotasPage           from './pages/QuotasPage'
 import AdminPage            from './pages/AdminPage'
 import WorkspacesPage       from './pages/WorkspacesPage'
+import { ProgressionDecisionsPage } from './pages/ProgressionDecisionsPage'
 import { ToastProvider }    from './components/Toast'
 
 // ── Application ───────────────────────────────────────────────────────────────
@@ -96,6 +97,7 @@ function AppContent() {
                     <Route path="/quotas"         element={<QuotasPage />} />
                     <Route path="/admin"          element={<AdminPage />} />
                     <Route path="/workspaces"     element={<WorkspacesPage />} />
+                    <Route path="/progression-decisions" element={<ProgressionDecisionsPage />} />
                     {/* Backward-compat: /api-keys → onglet "Tokens API B2B" de Intégrations */}
                     <Route path="/api-keys"       element={<Navigate to="/integrations?tab=tokens" replace />} />
                     <Route path="*"             element={<Navigate to="/" replace />} />

@@ -37,29 +37,33 @@ pytestmark = pytest.mark.skipif(
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
-def db():
-    """Base SQLite en memoire avec schema initialise."""
-    manager = DatabaseManager(db_path=Path(":memory:"))
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    manager._conn = conn
-    manager._initialiser_schema()
+def db(tmp_path, monkeypatch):
+    """DB SQLite partagee (sync + async) via fichier temp (migration PG)."""
+    import asyncio as _aio
+    from tests.conftest import make_shared_db, dispose_shared_db
+    manager = make_shared_db(tmp_path, monkeypatch)
     try:
-        conn.execute(
+        manager._conn.execute(
             "ALTER TABLE profil_utilisateur ADD COLUMN objectif_probabilite_calculee REAL DEFAULT 0.0"
         )
     except Exception:
         pass
-    conn.execute(
+    manager._conn.execute(
         "INSERT INTO users (id, email, hashed_password, provider, created_at) "
         "VALUES (?, ?, ?, ?, datetime('now'))",
         (TEST_USER_ID, "test-agent3@test.com", "fake_hash", "local"),
     )
-    conn.commit()
+    manager._conn.commit()
+    # Agent 3 est gate par plan team/enterprise. Bootstrap le user en team
+    # pour permettre l'acces aux endpoints /api/agent3/*.
+    try:
+        from api.agent3_quotas import ensure_quota_tables, set_user_plan_async
+        ensure_quota_tables(manager)
+        _aio.run(set_user_plan_async(TEST_USER_ID, "team"))
+    except Exception:
+        pass
     yield manager
-    manager.disconnect()
+    dispose_shared_db(manager)
 
 
 @pytest.fixture()

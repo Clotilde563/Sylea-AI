@@ -5,18 +5,22 @@ import { useNavigate } from 'react-router-dom'
 import { ProbabilityGauge } from '../components/ProbabilityGauge'
 import { SyleaLogo } from '../components/SyleaLogo'
 import ProfilePhotoAvatar from '../components/ProfilePhotoAvatar'
+import { PendingVerificationBanner } from '../components/PendingVerificationBanner'
+import { ObjectiveProgressMini } from '../components/ObjectiveProgressMini'
+import { usePlan } from '../hooks/usePlan'
 import { useStore } from '../store/useStore'
 import { useT } from '../i18n/LanguageContext'
 import { useDeviceContext } from '../contexts/DeviceContext'
 import { api } from '../api/client'
 import { formatJours, gaugePercent } from '../utils/duration'
-import type { ProbabiliteResult, SousObjectif, TachesQuotidiennes, TacheItem } from '../types'
+import type { ProbabiliteResult, SousObjectif, TachesQuotidiennes, TacheItem, Decision } from '../types'
 
 export function DashboardPage() {
   const t = useT()
   const { ctx: deviceCtx } = useDeviceContext()
   const navigate = useNavigate()
   const { profil, setProfil, probCalculee, setProbCalculee, sousObjectifs, setSousObjectifs, refreshSousObjectifs } = useStore()
+  const { isFree } = usePlan()
   const [loading, setLoading] = useState(false)
   const [calcResult, setCalcResult] = useState<ProbabiliteResult | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -27,6 +31,12 @@ export function DashboardPage() {
   const [loadingTaches, setLoadingTaches] = useState(false)
   const [loadingSO, setLoadingSO] = useState(false)
   const [showTasksModal, setShowTasksModal] = useState(false)
+  // Devient true apres le 1er fetch des sous-objectifs (qu'ils soient vides ou pas).
+  // Sert a distinguer "pas encore charge" vs "charge et vide" pour declencher
+  // l'auto-generation uniquement dans le 2e cas.
+  const [soInitialLoaded, setSoInitialLoaded] = useState(false)
+  // Historique des decisions pour le mini-graphique du hero (echelle MAX).
+  const [decisions, setDecisions] = useState<Decision[]>([])
 
   useEffect(() => {
     api.getProfil()
@@ -38,20 +48,37 @@ export function DashboardPage() {
     api.getPersonnalite()
       .then(res => setPersonnalite(res.phrase))
       .catch(() => {})
-    refreshSousObjectifs()
+    refreshSousObjectifs().finally(() => setSoInitialLoaded(true))
     api.checkTachesAujourdhui()
       .then(res => {
         setTachesExist(res.exists)
         if (res.taches) setTachesData(res.taches)
       })
       .catch(() => {})
+    // Decisions pour le mini-graphique de progression dans le hero.
+    api.getHistorique(500)
+      .then(setDecisions)
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
+    // Cas 1 : profil neuf (temps_initial=0) → declenche le calcul + generation SO
     if (profil && !probCalculee && profil.temps_initial_jours === 0 && profil.objectif) {
       handleCalcProb()
+      return
     }
-  }, [profil, probCalculee])
+    // Cas 2 : profil avec temps deja calcule mais SO manquants (etat casse,
+    // par ex. apres un reset_historique). On declenche le meme flow qui appelle
+    // genererSousObjectifs (idempotent : ne re-genere pas si des SO existent).
+    if (
+      profil && profil.objectif &&
+      profil.temps_initial_jours > 0 &&
+      soInitialLoaded && sousObjectifs.length === 0 &&
+      !loading && !loadingSO
+    ) {
+      handleCalcProb()
+    }
+  }, [profil, probCalculee, soInitialLoaded, sousObjectifs.length])
 
   const handleCalcProb = async () => {
     setLoading(true)
@@ -159,10 +186,14 @@ export function DashboardPage() {
 
   return (
     <div className="page animate-fade-in">
+      {/* Bandeau de verification due (decisions en attente de confirmation) */}
+      <PendingVerificationBanner />
       <div className="container page-content">
 
-        {/* En-tête chaleureux */}
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+        {/* En-tête chaleureux. position:relative pour permettre au mini-graphique
+            d'etre positionne en absolu (sinon sa hauteur de 170px imposait une
+            hauteur excessive au hero, creant un gros espace vide sous la bio). */}
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
             <ProfilePhotoAvatar
               photoUrl={profil.photo_url}
@@ -170,16 +201,35 @@ export function DashboardPage() {
               onUpdated={(url) => setProfil(p => p ? { ...p, photo_url: url } : p)}
             />
             <div>
-            <p style={{ color: 'var(--accent-violet-light)', fontSize: '0.82rem', letterSpacing: '0.06em', marginBottom: '0.35rem', opacity: 0.85 }}>{t('dashboard.bon_retour')}</p>
-            <h1 style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.3rem', background: 'linear-gradient(135deg, var(--accent-silver), var(--accent-violet-light))', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>{profil.nom}</h1>
+            <p className="eyebrow" style={{ marginBottom: 4 }}>{t('dashboard.bon_retour')}</p>
+            <h1 style={{
+              fontSize: 'var(--fs-3xl)', fontWeight: 700,
+              letterSpacing: 'var(--tracking-tight)',
+              color: 'var(--text-primary)',
+              marginBottom: 6, lineHeight: 1.1,
+            }}>{profil.nom}</h1>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span style={{ color: 'var(--accent-violet-light)' }}>{'\u25c6'}</span> {profil.profession}
-              <span style={{ color: 'var(--text-muted)', opacity: 0.4 }}>|</span>
-              <span style={{ color: 'var(--accent-gold)' }}>{'\u25c7'}</span> {profil.ville}
+              <span style={{ color: 'var(--text-secondary)' }}>{profil.profession}</span>
+              <span style={{ width: 3, height: 3, borderRadius: '50%', background: 'var(--text-muted)', opacity: 0.5 }} />
+              <span style={{ color: 'var(--text-secondary)' }}>{profil.ville}</span>
             </p>
             </div>
           </div>
+          {/* Logo Syléa seul dans le flux flex à droite. */}
           <SyleaLogo size={52} animated={false} />
+          {/* Mini-graphique de progression — positionne en ABSOLU pour ne pas
+              imposer sa hauteur (170px) au hero. Centre verticalement sur la
+              bio, et place a droite (juste a gauche du logo). pointer-events:
+              none pour ne pas bloquer les clics sur les elements en dessous. */}
+          <div style={{
+            position: 'absolute',
+            right: 'calc(52px + 2.5rem)',
+            top: '50%',
+            transform: 'translateY(-50%)',
+            pointerEvents: 'none',
+          }}>
+            <ObjectiveProgressMini profil={profil} decisions={decisions} />
+          </div>
         </div>
 
         {/* Compétences */}
@@ -231,17 +281,40 @@ export function DashboardPage() {
 
         {/* Jauge principale */}
         <div className="card animate-fade-in-scale"
-          style={{ background: 'linear-gradient(135deg, var(--bg-surface), #0b1525)', border: '1px solid var(--border)', marginBottom: '1.5rem', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '2rem', gap: '1rem' }}>
-          <div style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.12em', color: 'var(--accent-violet-light)', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          style={{ position: 'relative', background: 'var(--bg-surface)', border: '1px solid var(--border)', marginBottom: 'var(--space-6)', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '2.5rem 2rem', gap: 'var(--space-4)', overflow: 'hidden' }}>
+          <div aria-hidden style={{
+            position: 'absolute', top: 0, left: '50%', transform: 'translateX(-50%)',
+            width: '60%', height: 1,
+            background: 'linear-gradient(90deg, transparent, rgba(59,130,246,0.6), transparent)',
+            pointerEvents: 'none',
+          }} />
+          <div aria-hidden style={{
+            position: 'absolute', top: -120, left: '50%', transform: 'translateX(-50%)',
+            width: 480, height: 240,
+            background: 'radial-gradient(ellipse at center, rgba(59,130,246,0.12) 0%, transparent 70%)',
+            pointerEvents: 'none',
+          }} />
+          <div className="eyebrow" style={{ position: 'relative', zIndex: 1 }}>
             <span>{'\u25c8'}</span> Temps estimé
           </div>
-          <ProbabilityGauge value={gauge.pct} size={200} tempsLigne1={gauge.restant.ligne1} tempsLigne2={gauge.restant.ligne2} />
-          <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', letterSpacing: '0.06em', textAlign: 'center' }}>
-            {t('dashboard.pour_objectif')} — Temps initial : {gauge.initial.label}
+          <div style={{ position: 'relative', zIndex: 1 }}>
+            <ProbabilityGauge value={gauge.pct} size={200} tempsLigne1={gauge.restant.ligne1} tempsLigne2={gauge.restant.ligne2} />
+          </div>
+          <p style={{
+            fontSize: 'var(--fs-xs)', color: 'var(--text-muted)',
+            letterSpacing: 'var(--tracking-wide)', textAlign: 'center',
+            position: 'relative', zIndex: 1,
+          }}>
+            {t('dashboard.pour_objectif')} · Temps initial {gauge.initial.label}
           </p>
-          <div style={{ textAlign: 'center', maxWidth: '440px' }}>
-            <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', fontStyle: 'italic', lineHeight: '1.5', marginBottom: '0.75rem' }}>{objectifDesc}</p>
-            {profil.objectif?.categorie && <span className="badge badge-violet">{profil.objectif.categorie}</span>}
+          <div style={{ textAlign: 'center', maxWidth: 480, position: 'relative', zIndex: 1 }}>
+            <p style={{
+              fontSize: 'var(--fs-md)',
+              color: 'var(--text-secondary)',
+              lineHeight: 1.55, marginBottom: 'var(--space-3)',
+              fontWeight: 400,
+            }}>{objectifDesc}</p>
+            {profil.objectif?.categorie && <span className="badge badge-blue">{profil.objectif.categorie}</span>}
           </div>
           {loading && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--text-muted)' }}>
@@ -250,9 +323,10 @@ export function DashboardPage() {
             </div>
           )}
           {error && <p style={{ color: 'var(--danger)', fontSize: '0.875rem' }}>{'\u26a0'} {error}</p>}
-          <button className="btn btn-outline btn-sm" onClick={handleCalcProb} disabled={loading}>
-            {loading ? 'Calcul…' : t('dashboard.recalculer')}
-          </button>
+          {/* Bouton "Mettre a jour ma progression" masque : la progression est
+              maintenue automatiquement (sous-objectifs auto-generes au 1er
+              rendu si manquants ; impacts appliques via les confirmations
+              Oui/Non des pending_actions). */}
         </div>
 
         {/* Sous-objectifs séquentiels */}
@@ -408,6 +482,15 @@ export function DashboardPage() {
           <ActionCard emoji={'\u27e1'} title={t('dashboard.analyser_choix')} desc="Soumettez un dilemme et recevez une analyse IA pros/cons" onClick={() => navigate('/dilemme')} highlight />
           <ActionCard emoji={'\u25eb'} title={t('dashboard.statistiques')} desc="Visualisez vos décisions passées et votre courbe de progression" onClick={() => navigate('/statistiques')} />
           <ActionCard emoji={'\u25c9'} title={t('dashboard.enregistrer_evenement')} desc="Notifiez un événement et découvrez son impact sur votre objectif" onClick={() => navigate('/evenement')} />
+          {/* Tile "Que faire ?" : reservee aux abonnes Avance. */}
+          {isFree ? (
+            <ActionCard
+              emoji={'✦'}
+              title={t('dashboard.que_faire')}
+              desc={'🔒 Disponible avec Sylea Avancé — clique pour découvrir'}
+              onClick={() => navigate('/quotas')}
+            />
+          ) : (
           <ActionCard
             emoji={'\u2726'}
             title={t('dashboard.que_faire')}
@@ -428,6 +511,7 @@ export function DashboardPage() {
             disabled={loadingTaches || (tachesExist && !tachesEnCours)}
             loading={loadingTaches}
           />
+          )}
         </div>
       </div>
 

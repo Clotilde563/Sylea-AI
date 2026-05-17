@@ -107,7 +107,7 @@ class MemoryExtractor:
         extractor = MemoryExtractor(anthropic_client)
         facts = await extractor.extract(conversation_turns, existing_memories)
         for fact in facts:
-            _save_memory(db, user_id, fact.key, fact.value, fact.category)
+            await _save_memory_async(user_id, fact.key, fact.value, fact.category)
     """
 
     def __init__(

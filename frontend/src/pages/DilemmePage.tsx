@@ -320,12 +320,24 @@ export function DilemmePage() {
     <div className="page animate-fade-in">
       <div className="container page-content">
 
-        {/* En-tête */}
-        <div style={{ marginBottom: '2rem' }}>
-          <h2 style={{ color: 'var(--accent-silver)', marginBottom: '0.375rem' }}>
+        {/* En-tête — Linear style */}
+        <div style={{ marginBottom: 'var(--space-8)' }}>
+          <h1 style={{
+            fontSize: 'var(--fs-3xl)',
+            fontWeight: 700,
+            letterSpacing: 'var(--tracking-tight)',
+            color: 'var(--text-primary)',
+            marginBottom: 'var(--space-2)',
+            lineHeight: 1.15,
+          }}>
             {t('dilemme.analyser_choix')}
-          </h2>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+          </h1>
+          <p style={{
+            color: 'var(--text-muted)',
+            fontSize: 'var(--fs-md)',
+            lineHeight: 1.55,
+            maxWidth: 600,
+          }}>
             {t('dilemme.analyser_desc')}
           </p>
         </div>
@@ -568,7 +580,7 @@ export function DilemmePage() {
                       value={contextInput}
                       onChange={(e) => setContextInput(e.target.value)}
                       onKeyDown={(e) => { if (e.key === 'Enter') handleSendContext(contextInput) }}
-                      placeholder="Ta reponse..."
+                      placeholder={t('common.ta_reponse_placeholder')}
                       style={{ flex: 1 }}
                       disabled={contextLoading}
                     />

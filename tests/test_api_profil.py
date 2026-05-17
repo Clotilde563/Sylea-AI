@@ -13,35 +13,19 @@ from fastapi.testclient import TestClient
 from api.main import app
 from api.dependencies import get_db, get_agent
 from sylea.core.storage.database import DatabaseManager
+from tests.conftest import make_shared_db, dispose_shared_db
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture()
-def db():
-    """
-    Cree une base SQLite en memoire avec le schema initialise.
-
-    Utilise check_same_thread=False car le TestClient de Starlette
-    execute les requetes dans un thread different.
-    """
-    manager = DatabaseManager(db_path=Path(":memory:"))
-    # Override connect to allow cross-thread usage in tests
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    manager._conn = conn
-    manager._initialiser_schema()
-    # Migration manquante dans _initialiser_schema — colonne ajoutee par le prod DB
-    try:
-        conn.execute(
-            "ALTER TABLE profil_utilisateur ADD COLUMN objectif_probabilite_calculee REAL DEFAULT 0.0"
-        )
-    except Exception:
-        pass
-    yield manager
-    manager.disconnect()
+def db(tmp_path, monkeypatch):
+    """DB SQLite partagee (sync + async) via fichier temp.
+    Migration shared-DB : remplace `:memory:` pour permettre a
+    l'async session_factory de pointer sur la meme DB."""
+    mgr = make_shared_db(tmp_path, monkeypatch)
+    yield mgr
+    dispose_shared_db(mgr)
 
 
 @pytest.fixture()

@@ -132,18 +132,20 @@ def _format_body_for_llm(
     )
 
 
-def _resolve_credentials_status(
+async def _resolve_credentials_status(
     meta: ClawHubSkillMeta, db: Any, auth_user_id: str | None,
 ) -> list[dict]:
     """Pour chaque env requise par le skill, determine si la credential existe.
 
     Retourne list[{env_name, has, provider}]. Le provider est soit le slug du
     catalogue curé (ex: "stripe") soit "custom" (namespace clawhub_skill_<slug>).
+
+    Migration PG (2026-05-13) : version async, utilise has_credential_async.
     """
     if not meta.required_env or not auth_user_id or db is None:
         return []
     try:
-        from api.credentials import has_credential
+        from api.credentials import has_credential_async
         from api.providers_registry import get_provider, all_providers
     except Exception:
         return []
@@ -171,14 +173,14 @@ def _resolve_credentials_status(
             )
             if first_field:
                 try:
-                    has = has_credential(db, auth_user_id, matched, first_field)
+                    has = await has_credential_async(auth_user_id, matched, first_field)
                 except Exception:
                     has = False
         else:
             # Custom : namespace clawhub_skill_<slug>
             custom_slug = f"clawhub_skill_{meta.slug}"
             try:
-                has = has_credential(db, auth_user_id, custom_slug, env_name)
+                has = await has_credential_async(auth_user_id, custom_slug, env_name)
             except Exception:
                 has = False
         out.append({
@@ -256,7 +258,7 @@ async def dispatch_skill_invocation(
         }
 
     # Status des credentials requises par le skill (si db + user fournis).
-    creds_status = _resolve_credentials_status(meta, db, auth_user_id)
+    creds_status = await _resolve_credentials_status(meta, db, auth_user_id)
 
     formatted = _format_body_for_llm(meta, body, instruction, credentials_status=creds_status)
     return {

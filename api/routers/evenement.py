@@ -28,14 +28,18 @@ from api.schemas import (
 )
 from api.dependencies import get_profil_repo, get_decision_repo, get_optional_user, get_db
 from sylea.core.storage.database import DatabaseManager
-from api.context_helper import format_device_context, build_full_user_context
+from api.context_helper import format_device_context, build_full_user_context_async
 
 router = APIRouter(prefix="/api/evenement", tags=["evenement"])
 
 
 # -- Helpers ----------------------------------------------------------------
 
-def _decision_to_out(d: Decision, sous_objectif_impacte: str | None = None) -> DecisionOut:
+def _decision_to_out(
+    d: Decision,
+    sous_objectif_impacte: str | None = None,
+    sous_objectifs_impactes: list | None = None,
+) -> DecisionOut:
     opts = [
         OptionDilemmeOut(
             id=o.id,
@@ -68,6 +72,7 @@ def _decision_to_out(d: Decision, sous_objectif_impacte: str | None = None) -> D
         option_choisie_description=chosen.description if chosen else None,
         impact_net=impact_net,
         sous_objectif_impacte=sous_objectif_impacte,
+        sous_objectifs_impactes=sous_objectifs_impactes,
         temps_gagne_avant=d.temps_gagne_avant,
         temps_gagne_apres=d.temps_gagne_apres,
     )
@@ -296,26 +301,49 @@ async def analyser_evenement(
     if profil is None or not profil.objectif:
         raise HTTPException(status_code=400, detail="Profil ou objectif manquant.")
 
+    # Migration PG : lectures async via SQLAlchemy text() (compat SQLite + PG).
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+
     # Charger les infos collectées + messages agent pour enrichir le contexte
     collected_context = ""
+    rows: list[tuple] = []
     try:
-        rows = db.conn.execute(
-            "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 20",
-            (user_id or "",),
-        ).fetchall()
-        if rows:
-            collected_context = "CONTEXTE ADDITIONNEL COLLECTE PAR L'AGENT :\n" + "\n".join(
-                f"  - {r[0]}: {r[1]}" for r in rows
+        _factory = _gsf()
+        async with _factory() as _session:
+            _result = await _session.execute(
+                _sa_text(
+                    "SELECT field, value FROM agent_collected_info "
+                    "WHERE user_id = :uid "
+                    "ORDER BY collected_at DESC LIMIT 20"
+                ),
+                {"uid": user_id or ""},
             )
+            rows = [(r["field"], r["value"]) for r in _result.mappings().all()]
     except Exception:
-        pass
+        rows = []
+    if rows:
+        collected_context = "CONTEXTE ADDITIONNEL COLLECTE PAR L'AGENT :\n" + "\n".join(
+            f"  - {r[0]}: {r[1]}" for r in rows
+        )
     # Chercher dans les messages agent les infos pertinentes à l'événement
+    msg_rows: list[tuple] = []
     try:
-        msg_rows = db.conn.execute(
-            "SELECT role, content FROM agent_messages WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT 30",
-            (user_id or "",),
-        ).fetchall()
-        if msg_rows:
+        _factory = _gsf()
+        async with _factory() as _session:
+            _result = await _session.execute(
+                _sa_text(
+                    "SELECT role, content FROM agent_messages "
+                    "WHERE auth_user_id = :uid "
+                    "ORDER BY created_at DESC LIMIT 30"
+                ),
+                {"uid": user_id or ""},
+            )
+            msg_rows = [(r["role"], r["content"]) for r in _result.mappings().all()]
+    except Exception:
+        msg_rows = []
+    if msg_rows:
+        try:
             desc_lower = data.description.lower()
             relevant_msgs = []
             for r in msg_rows:
@@ -329,10 +357,10 @@ async def analyser_evenement(
                     f"  - {m}" for m in relevant_msgs[:5]
                 )
                 collected_context += "\n\nIMPORTANT : Utilise ces informations pour personnaliser ton analyse."
-    except Exception:
-        pass
+        except Exception:
+            pass
 
-    full_ctx = build_full_user_context(db, user_id, profil)
+    full_ctx = await build_full_user_context_async(db, user_id, profil)
     try:
         result = await _analyser_evenement_claude(
             description=data.description,
@@ -367,11 +395,48 @@ async def confirmer_evenement(
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
+    # Quota quotidien d'actions IA (free: 10/j, pro/avance: 30/j, team: illimite).
+    # Migration PG (2026-05-13) : utilise les versions async des quota helpers.
+    if user_id:
+        try:
+            from api.daily_action_limit import check_daily_action_quota_async
+            from api.agent3_quotas import get_user_plan_async
+            try:
+                plan_info = await get_user_plan_async(user_id)
+                plan_name = plan_info.get('name', 'free')
+            except Exception:
+                plan_name = 'free'
+            ok, count, limit = await check_daily_action_quota_async(
+                profil.id, user_id, plan_name,
+            )
+            if not ok:
+                raise HTTPException(
+                    status_code=429,
+                    detail=(
+                        f"Quota quotidien atteint ({count}/{limit} actions aujourd'hui). "
+                        f"{'Passe a Avance pour 30 actions/jour.' if plan_name == 'free' else 'Reessaie demain.'}"
+                    ),
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            # Echec silencieux du check : on ne bloque pas l'utilisateur si
+            # le module quota a un probleme. La securite stricte = 'free'.
+            pass
+
     # Anti-doublon: meme evenement deja enregistre
-    existing = profil_repo._db.conn.execute(
-        "SELECT id FROM decisions WHERE user_id = ? AND question = ?",
-        (profil.id, f"[Evenement] {data.description}"),
-    ).fetchone()
+    # Migration PG (2026-05-12) : SELECT via SQLAlchemy text() async.
+    from sqlalchemy import text as _sql_text
+    from api.database import get_session_factory as _gsf
+    _factory = _gsf()
+    async with _factory() as _session:
+        _result = await _session.execute(
+            _sql_text(
+                "SELECT id FROM decisions WHERE user_id = :uid AND question = :q"
+            ),
+            {"uid": profil.id, "q": f"[Evenement] {data.description}"},
+        )
+        existing = _result.mappings().first()
     if existing:
         raise HTTPException(status_code=409, detail="Cet evenement a deja ete enregistre.")
 
@@ -422,82 +487,97 @@ async def confirmer_evenement(
     profil.marquer_modification()
     profil_repo.sauvegarder(profil)
 
-    # Identifier et mettre a jour le sous-objectif pertinent via IA
+    # Identifier et mettre a jour le sous-objectif pertinent via IA.
+    # Migration PG (2026-05-12) : SELECT sous_objectifs + apply_impact_invariant_safe
+    # + snapshot avant/apres dans UNE seule transaction async (atomique).
     so_titre_impacte = None
+    cascade_items: list = []  # liste des SOs effectivement modifies (cible + cascade)
     try:
-        db = profil_repo._db
-        # Charger TOUS les SO (y compris completes) pour le calcul proportionnel
-        all_so_all = db.conn.execute(
-            "SELECT id, titre, progression, ordre, temps_estime FROM sous_objectifs WHERE user_id = ? ORDER BY ordre",
-            (profil.id,),
-        ).fetchall()
-        all_so = [so for so in all_so_all if so["progression"] < 100]
-        if all_so:
-            so_cible = await _identifier_so_pertinent(data.description, all_so)
-            if so_cible is None:
-                so_cible = all_so[0]  # fallback: premier par ordre
-            # Invariant: sum(SO_restant) = objectif_restant
-            # Use proportional SO time: (te / sum_te_ALL) * temps_initial
-            total_te_all = sum(max(30, so["temps_estime"] or 180) for so in all_so_all)
-            te = max(30, so_cible["temps_estime"] if so_cible["temps_estime"] else 180)
-            so_initial_jours = (te / total_te_all) * profil.temps_initial_jours if total_te_all > 0 else te
-            impact_so = (impact_jours / so_initial_jours) * 100 if so_initial_jours > 0 else 0
-            new_prog = so_cible["progression"] + impact_so
+        from sqlalchemy import text as _sql_text2
+        from api.database import get_session_factory as _gsf2
+        from api.so_invariant import apply_impact_invariant_safe_async
 
-            # Plafonner entre 0 et 100
-            if new_prog < 0:
-                new_prog = 0
+        _factory2 = _gsf2()
+        target_id_final = None
+        applied_delta_pct = 0.0
 
-            # Si le SO dépasse 100%, redistribuer l'excédent sur les autres SO
-            if new_prog >= 100:
-                overflow = new_prog - 100
-                new_prog = 100
-                db.conn.execute(
-                    "UPDATE sous_objectifs SET progression = 100 WHERE id = ?",
-                    (so_cible["id"],),
+        async with _factory2() as _session2:
+            try:
+                # 1. SELECT sous_objectifs (avant cascade)
+                _so_result = await _session2.execute(
+                    _sql_text2(
+                        "SELECT id, titre, progression, ordre, temps_estime "
+                        "FROM sous_objectifs WHERE user_id = :uid ORDER BY ordre"
+                    ),
+                    {"uid": profil.id},
                 )
-                # Redistribuer l'overflow sur les SO restants (non complétés)
-                remaining_so = [s for s in all_so if s["id"] != so_cible["id"] and s["progression"] < 100]
-                while overflow > 0.01 and remaining_so:
-                    share = overflow / len(remaining_so)
-                    next_remaining = []
-                    for s in remaining_so:
-                        current = db.conn.execute(
-                            "SELECT progression FROM sous_objectifs WHERE id = ?",
-                            (s["id"],),
-                        ).fetchone()
-                        cur_prog = current["progression"] if current else s["progression"]
-                        new_p = cur_prog + share
-                        if new_p >= 100:
-                            overflow_part = new_p - 100
-                            db.conn.execute(
-                                "UPDATE sous_objectifs SET progression = 100 WHERE id = ?",
-                                (s["id"],),
-                            )
-                            overflow = overflow_part
-                        else:
-                            db.conn.execute(
-                                "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
-                                (new_p, s["id"]),
-                            )
-                            next_remaining.append(s)
-                            overflow = 0
-                    remaining_so = next_remaining
-                    if not remaining_so:
-                        break
-            else:
-                new_prog = max(0, new_prog)
-                db.conn.execute(
-                    "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
-                    (new_prog, so_cible["id"]),
-                )
-            db.conn.commit()
-            so_titre_impacte = so_cible["titre"]
-            # Persister le lien SO dans la décision
-            decision.sous_objectif_id = so_cible["id"]
-            decision.impact_sous_objectif = impact_so
+                all_so_all = list(_so_result.mappings().all())
+                all_so = [so for so in all_so_all if (so["progression"] or 0) < 100]
+                if all_so:
+                    so_cible = await _identifier_so_pertinent(data.description, all_so)
+                    if so_cible is None:
+                        so_cible = all_so[0]
+
+                    # Snapshot AVANT
+                    prog_before: dict[str, tuple[str, float]] = {
+                        so["id"]: (so["titre"], float(so["progression"] or 0.0))
+                        for so in all_so_all
+                    }
+
+                    # 2. Cascade invariant-safe (async)
+                    target_id_used, applied_delta_pct = await apply_impact_invariant_safe_async(
+                        _session2, profil.id, so_cible["id"], impact_jours,
+                        profil.temps_initial_jours,
+                    )
+                    so_titre_impacte = so_cible["titre"]
+                    target_id_final = target_id_used or so_cible["id"]
+
+                    # 3. Snapshot APRES (re-lit dans la meme transaction)
+                    _after_result = await _session2.execute(
+                        _sql_text2(
+                            "SELECT id, progression FROM sous_objectifs WHERE user_id = :uid"
+                        ),
+                        {"uid": profil.id},
+                    )
+                    prog_after = {
+                        r["id"]: float(r["progression"] or 0.0)
+                        for r in _after_result.mappings().all()
+                    }
+
+                    # Construire la liste des SOs reellement impactes
+                    for sid, (titre, p_before) in prog_before.items():
+                        p_after = prog_after.get(sid, p_before)
+                        delta = p_after - p_before
+                        if abs(delta) < 0.05:
+                            continue
+                        cascade_items.append({
+                            "so_id": sid,
+                            "titre": titre,
+                            "progression_avant": round(p_before, 2),
+                            "progression_apres": round(p_after, 2),
+                            "delta_pct": round(delta, 2),
+                            "est_cible": sid == target_id_final,
+                            "est_complete": p_after >= 99.99,
+                        })
+                    cascade_items.sort(key=lambda i: (not i["est_cible"], -abs(i["delta_pct"])))
+
+                await _session2.commit()
+            except Exception:
+                await _session2.rollback()
+                raise
+
+        # Persister le lien SO + delta applique sur la decision (hors transaction
+        # async — DecisionRepository sync). Garanti que la cascade est commit
+        # avant la mise a jour de la decision.
+        if target_id_final:
+            decision.sous_objectif_id = target_id_final
+            decision.impact_sous_objectif = applied_delta_pct
             decision_repo.sauvegarder(decision)
     except Exception:
         pass
 
-    return _decision_to_out(decision, sous_objectif_impacte=so_titre_impacte)
+    return _decision_to_out(
+        decision,
+        sous_objectif_impacte=so_titre_impacte,
+        sous_objectifs_impactes=cascade_items if cascade_items else None,
+    )

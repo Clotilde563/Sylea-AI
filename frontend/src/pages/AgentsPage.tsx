@@ -12,6 +12,7 @@ const AGENT2_ENABLED = true
 // VoiceCall is only used by Agent 2 — import kept but component only rendered when AGENT2_ENABLED is true
 import VoiceCall from '../components/VoiceCall'
 import FeedbackButton from '../components/FeedbackButton'
+import { ProposalCard } from '../components/ProposalCard'
 
 // Agent 3 Plan Mode / Permissions / Cost UI (Claude-Code-inspired, ethically reimplemented)
 import {
@@ -69,6 +70,17 @@ interface AgentMessage {
   audioUrl?: string  // blob URL for user recorded audio (legacy, ephemeral)
   audioData?: string  // base64 encoded audio (persisted server-side)
   actions?: Array<{ type: string; data: Record<string, string> }>  // parsed actions from backend
+  proposal?: {
+    id: string
+    agent_label: string
+    type: string
+    description: string
+    impact_jours: number
+    resume: string
+    rationale: string
+    target_so_hint: string
+    statut: 'pending' | 'confirmed' | 'rejected'
+  } | null
 }
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -684,6 +696,15 @@ export default function AgentsPage() {
   const { toast } = useToast()
   const { ctx: deviceCtx } = useDeviceContext()
   const API = import.meta.env.VITE_API_URL || ''
+  // Plan utilisateur (free / pro / team) — utilise pour gater Agent 2 (Avance+)
+  // et Agent 3 (Team+). Chargee au montage. null = pas encore charge.
+  const [userPlan, setUserPlan] = useState<string | null>(null)
+  useEffect(() => {
+    api.getPlan()
+      .then(d => setUserPlan(d.plan.name))
+      .catch(() => setUserPlan('free'))  // Defaut safe : assume free
+  }, [])
+  const isFreePlan = userPlan === 'free'
   const [active, setActive] = useState(loadActive)
   const [showActivateModal, setShowActivateModal] = useState(false)
   const [showDeactivateModal, setShowDeactivateModal] = useState(false)
@@ -867,6 +888,9 @@ export default function AgentsPage() {
         timestamp: new Date().toISOString(),
         type: agentResponseType,
         audioData: res.audioData || undefined,
+        proposal: (res.proposal && (res.proposal as any).id)
+          ? { ...(res.proposal as any), statut: 'pending' }
+          : null,
       }
       setMessages(prev => [...prev, agentMsg])
     } catch {
@@ -1486,6 +1510,9 @@ export default function AgentsPage() {
         timestamp: new Date().toISOString(), type: agentResponseType,
         audioData: res.audioData || undefined,
         actions: res.actions || undefined,
+        proposal: (res.proposal && (res.proposal as any).id)
+          ? { ...(res.proposal as any), statut: 'pending' }
+          : null,
       }])
     } catch {
       setStreamSteps2(prev => prev.map(s => s.status === 'running' ? { ...s, status: 'error' } : s))
@@ -6066,6 +6093,40 @@ export default function AgentsPage() {
                         )}
                       </div>
                     ))}
+                    {/* Proposal card : événement/décision majeure détectée par
+                        Agent 2, en attente de confirmation utilisateur. */}
+                    {msg.role === 'agent' && msg.proposal && (
+                      <ProposalCard
+                        proposal={msg.proposal}
+                        onConfirm={async () => {
+                          try {
+                            const res = await api.confirmAgentProposal(msg.proposal!.id)
+                            setMessages2(prev => prev.map((m, i) =>
+                              i === idx
+                                ? { ...m, proposal: m.proposal ? { ...m.proposal, statut: 'confirmed' } : null }
+                                : m
+                            ))
+                            setActionToast(
+                              `Enregistre. ${res.sous_objectif_impacte ? 'Impact sur : ' + res.sous_objectif_impacte : ''}`.trim()
+                            )
+                            setTimeout(() => setActionToast(null), 3500)
+                          } catch {
+                            setActionToast('Erreur lors de la confirmation')
+                            setTimeout(() => setActionToast(null), 2500)
+                          }
+                        }}
+                        onReject={async () => {
+                          try {
+                            await api.rejectAgentProposal(msg.proposal!.id)
+                            setMessages2(prev => prev.map((m, i) =>
+                              i === idx
+                                ? { ...m, proposal: m.proposal ? { ...m.proposal, statut: 'rejected' } : null }
+                                : m
+                            ))
+                          } catch {}
+                        }}
+                      />
+                    )}
                   </div>
                 </div>
               )
@@ -6456,6 +6517,40 @@ export default function AgentsPage() {
                         )}
                       </div>
                     </div>
+                    {/* Proposal card : événement/décision majeure détectée par
+                        l'agent, en attente de confirmation utilisateur. */}
+                    {msg.role === 'agent' && msg.proposal && (
+                      <ProposalCard
+                        proposal={msg.proposal}
+                        onConfirm={async () => {
+                          try {
+                            const res = await api.confirmAgentProposal(msg.proposal!.id)
+                            setMessages(prev => prev.map((m, i) =>
+                              i === idx
+                                ? { ...m, proposal: m.proposal ? { ...m.proposal, statut: 'confirmed' } : null }
+                                : m
+                            ))
+                            setActionToast(
+                              `Enregistre. ${res.sous_objectif_impacte ? 'Impact sur : ' + res.sous_objectif_impacte : ''}`.trim()
+                            )
+                            setTimeout(() => setActionToast(null), 3500)
+                          } catch (e) {
+                            setActionToast('Erreur lors de la confirmation')
+                            setTimeout(() => setActionToast(null), 2500)
+                          }
+                        }}
+                        onReject={async () => {
+                          try {
+                            await api.rejectAgentProposal(msg.proposal!.id)
+                            setMessages(prev => prev.map((m, i) =>
+                              i === idx
+                                ? { ...m, proposal: m.proposal ? { ...m.proposal, statut: 'rejected' } : null }
+                                : m
+                            ))
+                          } catch {}
+                        }}
+                      />
+                    )}
                     {/* QCM supprimé — réponses trop imprécises */}
                   </div>
                 )}
@@ -7002,6 +7097,30 @@ export default function AgentsPage() {
                   Desactiver cet agent
                 </button>
               </>
+            ) : isFreePlan ? (
+              // Gating Free : Agent 2 reserve aux plans Avance+. On affiche
+              // un bouton paywall qui pointe vers /quotas plutot que le
+              // bouton d'activation.
+              <button
+                onClick={() => { window.location.href = '/quotas' }}
+                style={{
+                  padding: '0.55rem 1.4rem', borderRadius: 'var(--radius-md)',
+                  border: '1px solid rgba(239,68,68,0.4)', cursor: 'pointer',
+                  fontWeight: 600, fontSize: '0.82rem',
+                  background: 'rgba(239,68,68,0.08)',
+                  color: '#f87171', transition: 'all 0.2s', whiteSpace: 'nowrap',
+                  display: 'inline-flex', alignItems: 'center', gap: '0.35rem',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.15)' }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.08)' }}
+                title="Agent Sylea 2 est inclus dans l'abonnement Avance"
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                  <rect x="3" y="11" width="18" height="11" rx="2" />
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                </svg>
+                Plan Avance requis
+              </button>
             ) : (
               <button
                 onClick={() => setShowActivateModal2(true)}
@@ -7202,17 +7321,20 @@ export default function AgentsPage() {
             box-shadow: 0 0 0 2px rgba(37,99,235,0.15), 0 0 0 4px rgba(212,160,23,0.08) !important;
           }
         `}</style>
-        <div className={active3 ? 'agent3-card-active' : ''} style={{
+        {/* Agent 3 verrouille — pas dispo pour free ni pour avance (a venir).
+            On force l'etat "grise" avec opacity reduite et tout interaction
+            (boutons, click) desactivee. */}
+        <div style={{
           display: 'flex', alignItems: 'center', gap: '1rem',
-          background: active3
-            ? 'linear-gradient(135deg, rgba(37,99,235,0.08), rgba(212,160,23,0.03), var(--bg-surface))'
-            : 'var(--bg-surface)',
-          border: active3 ? '1px solid rgba(37,99,235,0.3)' : '1px solid var(--border)',
+          background: 'var(--bg-surface)',
+          border: '1px solid rgba(255,255,255,0.06)',
           borderRadius: 'var(--radius-lg)',
           padding: '1rem 1.25rem',
-          boxShadow: active3 ? '0 2px 20px rgba(37,99,235,0.1)' : '0 1px 8px rgba(0,0,0,0.15)',
+          boxShadow: '0 1px 8px rgba(0,0,0,0.15)',
           transition: 'all 0.3s',
           marginBottom: '0.75rem',
+          opacity: 0.45,
+          pointerEvents: 'none',
         }}>
           {/* Logo — blue+gold shimmering */}
           <div style={{ flexShrink: 0 }}>
@@ -7271,15 +7393,7 @@ export default function AgentsPage() {
               }}>
                 Agent Sylea 3
               </h3>
-              {/* OpenClaw status dot */}
-              {active3 && (
-                <span title={openclawConnected ? 'OpenClaw connecte' : 'OpenClaw deconnecte'} style={{
-                  width: 7, height: 7, borderRadius: '50%',
-                  background: openclawConnected ? '#4ade80' : '#ef4444',
-                  display: 'inline-block', flexShrink: 0,
-                  boxShadow: openclawConnected ? '0 0 6px rgba(74,222,128,0.5)' : '0 0 6px rgba(239,68,68,0.5)',
-                }} />
-              )}
+              {/* OpenClaw status dot masque tant qu'Agent 3 est "a venir" */}
             </div>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '0 0 0.25rem', lineHeight: 1.3 }}>
               Agent d'elite
@@ -7287,108 +7401,39 @@ export default function AgentsPage() {
             <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
               Execution de taches complexes, recherche approfondie, analyses detaillees, multi-tache.
             </p>
-            {active3 && (
-              <p style={{ fontSize: '0.68rem', color: 'var(--text-muted)', margin: '0.2rem 0 0', fontStyle: 'italic', opacity: 0.7 }}>
-                {lastInteraction3}
-              </p>
-            )}
           </div>
 
           {/* Status + buttons right */}
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.4rem', flexShrink: 0 }}>
-            {/* Status badge */}
-            {active3 ? (
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
-                padding: '0.2rem 0.6rem', borderRadius: '999px', fontSize: '0.65rem',
-                fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
-                background: 'rgba(74,222,128,0.1)', border: '1px solid rgba(74,222,128,0.3)',
-                color: '#4ade80', whiteSpace: 'nowrap',
-              }}>
-                <span style={{
-                  width: 6, height: 6, borderRadius: '50%', background: '#4ade80',
-                  animation: 'agent-pulse-dot 2s ease-in-out infinite',
-                }} />
-                ACTIF
-              </span>
-            ) : (
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
-                padding: '0.2rem 0.6rem', borderRadius: '999px', fontSize: '0.65rem',
-                fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
-                background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)',
-                color: 'var(--text-muted)', whiteSpace: 'nowrap',
-              }}>
-                INACTIF
-              </span>
-            )}
+            {/* Status badge : "A VENIR" force tant qu'Agent 3 n'est pas
+                officiellement disponible (pas pour free ni avance) */}
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+              padding: '0.2rem 0.6rem', borderRadius: '999px', fontSize: '0.65rem',
+              fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
+              background: 'rgba(212,160,23,0.08)',
+              border: '1px solid rgba(212,160,23,0.25)',
+              color: '#d4a017', whiteSpace: 'nowrap',
+            }}>
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+              A VENIR
+            </span>
 
-            {/* Action buttons */}
-            {active3 ? (
-              <>
-                <div style={{ display: 'flex', gap: '0.4rem' }}>
-                  <button
-                    className="agent3-btn-shimmer"
-                    onClick={openChat3}
-                    style={{
-                      padding: '0.55rem 1rem', borderRadius: 'var(--radius-md)',
-                      border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '0.82rem',
-                      color: '#fff', transition: 'all 0.2s', whiteSpace: 'nowrap',
-                      boxShadow: '0 2px 10px rgba(212,160,23,0.3)',
-                    }}
-                    onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-1px)'}
-                    onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}
-                  >
-                    Discuter
-                  </button>
-                  <button
-                    onClick={() => setInCall3(true)}
-                    className="agent3-btn-shimmer"
-                    style={{
-                      padding: '0.55rem 0.8rem', borderRadius: 'var(--radius-md)',
-                      border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '0.82rem',
-                      color: '#fff', transition: 'all 0.2s', whiteSpace: 'nowrap',
-                      boxShadow: '0 2px 10px rgba(212,160,23,0.3)',
-                      display: 'flex', alignItems: 'center', gap: '0.3rem',
-                    }}
-                    onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-1px)'}
-                    onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2z" />
-                    </svg>
-                    Appeler
-                  </button>
-                </div>
-                <button
-                  onClick={() => setShowDeactivateModal3(true)}
-                  className="agent3-small-btn agent3-text-glow"
-                  style={{
-                    borderRadius: 'var(--radius-md)', cursor: 'pointer',
-                    fontSize: '0.78rem', fontWeight: 600,
-                    padding: '0.4rem 1rem',
-                    transition: 'all 0.15s', whiteSpace: 'nowrap',
-                  }}
-                >
-                  Desactiver cet agent
-                </button>
-              </>
-            ) : (
-              <button
-                className="agent3-btn-shimmer"
-                onClick={() => setShowActivateModal3(true)}
-                style={{
-                  padding: '0.55rem 1.4rem', borderRadius: 'var(--radius-md)',
-                  border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '0.85rem',
-                  color: '#fff', transition: 'all 0.2s', whiteSpace: 'nowrap',
-                  boxShadow: '0 2px 10px rgba(212,160,23,0.3)',
-                }}
-                onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-1px)'}
-                onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}
-              >
-                Activer cet agent
-              </button>
-            )}
+            {/* Bouton remplace par un texte "Disponible bientot" (Agent 3 a venir,
+                pas dispo pour free ni avance). */}
+            <span style={{
+              padding: '0.4rem 0.9rem', borderRadius: 'var(--radius-md)',
+              fontSize: '0.75rem', fontWeight: 600,
+              color: 'var(--text-muted)',
+              background: 'rgba(255,255,255,0.04)',
+              border: '1px dashed rgba(255,255,255,0.12)',
+              whiteSpace: 'nowrap',
+            }}>
+              Disponible bientôt
+            </span>
           </div>
         </div>
 

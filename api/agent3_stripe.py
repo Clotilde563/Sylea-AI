@@ -122,8 +122,8 @@ async def create_checkout_session(
     ensure_stripe_columns(db)
     success_url, cancel_url = _default_urls()
 
-    # Recupere ou cree un customer Stripe pour ce user
-    customer_id = _get_or_create_customer(stripe, db, user_id, email)
+    # Migration PG (2026-05-13) : utiliser la version async
+    customer_id = await _get_or_create_customer_async(stripe, user_id, email)
     if not customer_id:
         return {"ok": False, "error": "Erreur creation customer Stripe"}
 
@@ -151,14 +151,28 @@ async def create_checkout_session(
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
 
-def _get_or_create_customer(stripe: Any, db: Any, user_id: str, email: str) -> str | None:
-    """Recupere le stripe_customer_id s'il existe, sinon cree + sauve."""
+async def _get_or_create_customer_async(
+    stripe: Any, user_id: str, email: str,
+) -> str | None:
+    """Version async — PG-compatible.
+
+    Recupere le stripe_customer_id s'il existe, sinon cree via Stripe API
+    + sauve dans user_plans (upsert portable).
+    """
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
     try:
-        row = db.conn.execute(
-            "SELECT stripe_customer_id FROM user_plans WHERE user_id = ?", (user_id,),
-        ).fetchone()
-        if row and row[0]:
-            return row[0]
+        async with factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT stripe_customer_id FROM user_plans WHERE user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            row = result.first()
+            if row and row[0]:
+                return row[0]
     except Exception:
         pass
 
@@ -171,27 +185,37 @@ def _get_or_create_customer(stripe: Any, db: Any, user_id: str, email: str) -> s
         logger.warning(f"stripe customer create failed: {e}")
         return None
 
-    # Sauve le customer_id
     try:
         now = datetime.now(timezone.utc).isoformat()
-        existing = db.conn.execute(
-            "SELECT user_id FROM user_plans WHERE user_id = ?", (user_id,),
-        ).fetchone()
-        if existing:
-            db.conn.execute(
-                "UPDATE user_plans SET stripe_customer_id = ? WHERE user_id = ?",
-                (customer.id, user_id),
-            )
-        else:
-            db.conn.execute(
-                "INSERT INTO user_plans "
-                "(user_id, plan_name, stripe_customer_id, started_at, updated_at) "
-                "VALUES (?, 'free', ?, ?, ?)",
-                (user_id, customer.id, now, now),
-            )
-        db.conn.commit()
+        async with factory() as session:
+            try:
+                result = await session.execute(
+                    text("SELECT user_id FROM user_plans WHERE user_id = :uid"),
+                    {"uid": user_id},
+                )
+                if result.first():
+                    await session.execute(
+                        text(
+                            "UPDATE user_plans SET stripe_customer_id = :cid "
+                            "WHERE user_id = :uid"
+                        ),
+                        {"cid": customer.id, "uid": user_id},
+                    )
+                else:
+                    await session.execute(
+                        text(
+                            "INSERT INTO user_plans "
+                            "(user_id, plan_name, stripe_customer_id, started_at, updated_at) "
+                            "VALUES (:uid, 'free', :cid, :now, :now)"
+                        ),
+                        {"uid": user_id, "cid": customer.id, "now": now},
+                    )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
     except Exception as e:
-        logger.debug(f"save customer_id failed: {e}")
+        logger.debug(f"save customer_id async failed: {e}")
     return customer.id
 
 
@@ -200,7 +224,10 @@ def _get_or_create_customer(stripe: Any, db: Any, user_id: str, email: str) -> s
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def create_portal_session(db: Any, user_id: str) -> dict[str, Any]:
-    """Cree un lien vers le Stripe Customer Portal pour gerer l'abo."""
+    """Cree un lien vers le Stripe Customer Portal pour gerer l'abo.
+
+    Migration PG (2026-05-13) : SELECT via SQLAlchemy text() async.
+    """
     if not is_configured():
         return {"ok": False, "error": "Stripe non configure"}
     stripe = _get_stripe()
@@ -208,10 +235,18 @@ async def create_portal_session(db: Any, user_id: str) -> dict[str, Any]:
         return {"ok": False, "error": "stripe lib manquante"}
 
     ensure_stripe_columns(db)
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
     try:
-        row = db.conn.execute(
-            "SELECT stripe_customer_id FROM user_plans WHERE user_id = ?", (user_id,),
-        ).fetchone()
+        async with factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT stripe_customer_id FROM user_plans WHERE user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            row = result.first()
     except Exception as e:
         return {"ok": False, "error": str(e)}
     if not row or not row[0]:
@@ -258,8 +293,17 @@ def handle_webhook(
         logger.warning(f"webhook signature invalid: {e}")
         return {"ok": False, "error": f"invalid signature: {type(e).__name__}"}
 
-    event_type = event.get("type", "")
-    data_obj = event.get("data", {}).get("object", {})
+    # NOTE : stripe.Webhook.construct_event() retourne un stripe.Event
+    # (StripeObject) qui n'expose PAS la methode dict .get(). Il faut utiliser
+    # l'acces par attribut OU par cle directe.
+    try:
+        event_type = event["type"] if hasattr(event, "__getitem__") else getattr(event, "type", "")
+    except (KeyError, AttributeError):
+        event_type = ""
+    try:
+        data_obj = event["data"]["object"] if hasattr(event, "__getitem__") else getattr(getattr(event, "data", {}), "object", {})
+    except (KeyError, AttributeError):
+        data_obj = {}
 
     try:
         if event_type == "checkout.session.completed":
@@ -276,7 +320,13 @@ def handle_webhook(
 
 
 def _handle_checkout_completed(db: Any, session: dict) -> dict[str, Any]:
-    """Premier paiement reussi : upgrade le plan."""
+    """Premier paiement reussi : upgrade le plan.
+
+    Migration PG (2026-05-13) : utilise asyncio.run pour appeler set_user_plan_async
+    + UPDATE subscription_id en async. handle_webhook reste sync (webhook
+    Stripe verifie la signature sync) mais delegue les DB writes a l'async.
+    """
+    import asyncio as _asyncio
     metadata = session.get("metadata", {}) or {}
     user_id = metadata.get("sylea_user_id")
     plan = metadata.get("sylea_plan")
@@ -284,25 +334,41 @@ def _handle_checkout_completed(db: Any, session: dict) -> dict[str, Any]:
     if not user_id or not plan:
         return {"ok": False, "error": "metadata manquante"}
 
-    from api.agent3_quotas import set_user_plan
-    set_user_plan(db, user_id, plan)
+    from api.agent3_quotas import set_user_plan_async
 
-    # Sauve le subscription_id
-    if subscription_id:
-        try:
-            db.conn.execute(
-                "UPDATE user_plans SET stripe_subscription_id = ? WHERE user_id = ?",
-                (subscription_id, user_id),
-            )
-            db.conn.commit()
-        except Exception:
-            pass
+    async def _do_writes():
+        await set_user_plan_async(user_id, plan)
+        if subscription_id:
+            from sqlalchemy import text
+            from api.database import get_session_factory
+            factory = get_session_factory()
+            async with factory() as sess:
+                try:
+                    await sess.execute(
+                        text(
+                            "UPDATE user_plans SET stripe_subscription_id = :sid "
+                            "WHERE user_id = :uid"
+                        ),
+                        {"sid": subscription_id, "uid": user_id},
+                    )
+                    await sess.commit()
+                except Exception:
+                    await sess.rollback()
+
+    try:
+        _asyncio.run(_do_writes())
+    except Exception as e:
+        logger.warning(f"checkout_completed writes failed: {e}")
 
     return {"ok": True, "event_type": "checkout.completed", "action": f"upgraded to {plan}"}
 
 
 def _handle_subscription_updated(db: Any, sub: dict) -> dict[str, Any]:
-    """Changement d'abo : update plan si pertinent."""
+    """Changement d'abo : update plan si pertinent.
+
+    Migration PG : utilise set_user_plan_async via asyncio.run.
+    """
+    import asyncio as _asyncio
     metadata = sub.get("metadata", {}) or {}
     user_id = metadata.get("sylea_user_id")
     plan = metadata.get("sylea_plan")
@@ -310,29 +376,41 @@ def _handle_subscription_updated(db: Any, sub: dict) -> dict[str, Any]:
     if not user_id:
         return {"ok": True, "event_type": "subscription.updated", "action": "no user_id"}
 
-    from api.agent3_quotas import set_user_plan
+    from api.agent3_quotas import set_user_plan_async
 
-    # Si status != active -> degrade free
     if status not in ("active", "trialing"):
-        set_user_plan(db, user_id, "free")
+        try:
+            _asyncio.run(set_user_plan_async(user_id, "free"))
+        except Exception:
+            pass
         return {"ok": True, "event_type": "subscription.updated", "action": "downgraded to free"}
 
     if plan:
-        set_user_plan(db, user_id, plan)
+        try:
+            _asyncio.run(set_user_plan_async(user_id, plan))
+        except Exception:
+            pass
         return {"ok": True, "event_type": "subscription.updated", "action": f"synced to {plan}"}
 
     return {"ok": True, "event_type": "subscription.updated", "action": "noop"}
 
 
 def _handle_subscription_deleted(db: Any, sub: dict) -> dict[str, Any]:
-    """Annulation : downgrade free."""
+    """Annulation : downgrade free.
+
+    Migration PG : utilise set_user_plan_async via asyncio.run.
+    """
+    import asyncio as _asyncio
     metadata = sub.get("metadata", {}) or {}
     user_id = metadata.get("sylea_user_id")
     if not user_id:
         return {"ok": True, "event_type": "subscription.deleted", "action": "no user_id"}
 
-    from api.agent3_quotas import set_user_plan
-    set_user_plan(db, user_id, "free")
+    from api.agent3_quotas import set_user_plan_async
+    try:
+        _asyncio.run(set_user_plan_async(user_id, "free"))
+    except Exception:
+        pass
     return {"ok": True, "event_type": "subscription.deleted", "action": "downgraded to free"}
 
 

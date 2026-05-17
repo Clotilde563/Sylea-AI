@@ -90,15 +90,27 @@ export function StatistiquesPage() {
     <div className="page animate-fade-in">
       <div className="container page-content">
 
-        {/* ── En-tête ── */}
-        <div style={{ marginBottom: '2rem' }}>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', marginBottom: '0.25rem' }}>
+        {/* ── En-tête — Linear style ── */}
+        <div style={{ marginBottom: 'var(--space-8)' }}>
+          <p className="eyebrow" style={{ marginBottom: 'var(--space-2)' }}>
             {t('stats.dashboard_avance')}
           </p>
-          <h1 style={{ fontSize: '1.75rem', color: 'var(--accent-silver)', marginBottom: '0.25rem' }}>
+          <h1 style={{
+            fontSize: 'var(--fs-3xl)',
+            fontWeight: 700,
+            letterSpacing: 'var(--tracking-tight)',
+            color: 'var(--text-primary)',
+            marginBottom: 'var(--space-2)',
+            lineHeight: 1.15,
+          }}>
             {t('stats.titre')}
           </h1>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem' }}>
+          <p style={{
+            color: 'var(--text-muted)',
+            fontSize: 'var(--fs-md)',
+            lineHeight: 1.55,
+            maxWidth: 600,
+          }}>
             {t('stats.evolution_proba')}
           </p>
         </div>

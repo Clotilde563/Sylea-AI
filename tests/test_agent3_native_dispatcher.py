@@ -19,13 +19,29 @@ import pytest
 
 from api.agent3_native_dispatcher import Agent3ActionDispatcher
 from sylea.core.storage.database import DatabaseManager
+from tests.conftest import make_shared_db, dispose_shared_db
 
 
 @pytest.fixture
-def db():
-    d = DatabaseManager(db_path=Path(":memory:"))
-    d.connect()
-    return d
+def db(tmp_path, monkeypatch):
+    """DB SQLite partagee (sync + async) via fichier temp.
+    Migration shared-DB : remplace `:memory:` pour permettre a l'async
+    session_factory de pointer sur la meme DB."""
+    import asyncio as _aio
+    # Le dispatcher utilise _get_fresh_db() qui appelle DatabaseManager()
+    # sans path → lit DATABASE_PATH. On le force vers le tmp pour eviter
+    # les ecritures dans data/sylea.db pendant les tests.
+    db_path = tmp_path / "test_sylea.db"
+    monkeypatch.setenv("DATABASE_PATH", str(db_path))
+    d = make_shared_db(tmp_path, monkeypatch)
+    # Bootstrap les tables agent3 (cron, memory, files, etc.)
+    try:
+        from api.routers.agent3_openclaw import _ensure_agent3_tables_async
+        _aio.run(_ensure_agent3_tables_async())
+    except Exception:
+        pass
+    yield d
+    dispose_shared_db(d)
 
 
 @pytest.fixture
@@ -42,6 +58,8 @@ class TestSupportedSet:
     def test_supported_is_exact(self):
         assert Agent3ActionDispatcher.SUPPORTED == {
             "SEARCH", "X_SEARCH", "WEB_FETCH",
+            # Phase 14I : navigation + capture
+            "BROWSER", "SCREENSHOT",
             "MEMORY", "MEMORY_SEARCH",
             # Phase 7 : RAG + sandbox Python + deep research
             "SEMANTIC_SEARCH", "PYTHON_EXEC", "DEEP_RESEARCH",
@@ -51,9 +69,11 @@ class TestSupportedSet:
             "FILE_READ", "CALENDAR_LIST", "GMAIL_READ",
             # Destructives (gated by AgenticLoop confirmation flow)
             "FILE_CREATE", "EMAIL", "GMAIL_SEND", "CALENDAR_EVENT", "DRIVE_SAVE",
-            "CRON", "COMPUTER_USE",
+            "CRON", "REMINDER", "COMPUTER_USE",
+            # Phase 14L : generation media native
+            "IMAGE_GEN", "TTS_GEN",
             # Meta
-            "SPAWN_AGENT",
+            "SPAWN_AGENT", "OPENCLAW_SESSION",
             # Planification (in-memory)
             "TODO_WRITE",
             # Phase 4 : meta-tools ClawHub (auto-extension de l'agent)
@@ -64,13 +84,13 @@ class TestSupportedSet:
 @pytest.mark.asyncio
 class TestNotImplemented:
     async def test_unknown_action_returns_error(self, dispatcher):
-        # SCREENSHOT n'est pas (encore) cable dans le dispatcher native.
-        r = await dispatcher.execute("SCREENSHOT", {"url": "https://x.com"})
+        # Action inconnue → dispatcher renvoie une erreur (sans raise).
+        r = await dispatcher.execute("FOO_NOT_AN_ACTION", {"url": "https://x.com"})
         assert r["is_error"] is True
         assert "pas encore cable" in r["content"]
 
     async def test_not_implemented_lists_supported(self, dispatcher):
-        r = await dispatcher.execute("SCREENSHOT", {"url": "https://x.com"})
+        r = await dispatcher.execute("FOO_NOT_AN_ACTION", {"url": "https://x.com"})
         assert r["is_error"] is True
         # doit mentionner les actions supportees pour que le LLM puisse pivoter
         assert "search" in r["content"].lower()
@@ -373,11 +393,19 @@ class TestCron:
         assert "hydratation" in r["content"].lower()
         assert r["raw"]["cron_id"]
         assert r["raw"]["cron_expr"] == "0 */2 * * *"
-        # Verifie que la ligne est bien en base
-        row = dispatcher.db.conn.execute(
-            "SELECT label, instruction, cron_expr FROM agent3_cron WHERE id = ?",
-            (r["raw"]["cron_id"],),
-        ).fetchone()
+        # Verifie via session async (partage le fichier SQLite avec sync).
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        factory = _gsf()
+        async with factory() as session:
+            result = await session.execute(
+                _sa_text(
+                    "SELECT label, instruction, cron_expr FROM agent3_cron "
+                    "WHERE id = :id"
+                ),
+                {"id": r["raw"]["cron_id"]},
+            )
+            row = result.first()
         assert row is not None
         assert row[0] == "Hydratation"
 

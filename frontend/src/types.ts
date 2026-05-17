@@ -1,5 +1,18 @@
 // Types TypeScript miroir des schémas Pydantic de l'API Syléa.AI
 
+export interface AgentProposal {
+  id: string
+  agent_label: string         // 'agent1' | 'agent2'
+  type: string                // 'evenement' | 'decision_majeure' | 'info_profil_critique'
+  description: string
+  impact_jours: number
+  resume: string
+  rationale: string
+  target_so_hint: string
+  statut: string              // 'pending' | 'confirmed' | 'rejected'
+  created_at: string
+}
+
 export interface DeviceContext {
   heure: number
   minute: number

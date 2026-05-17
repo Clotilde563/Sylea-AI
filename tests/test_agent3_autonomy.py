@@ -94,16 +94,19 @@ class TestRequiresConfirmation:
 # ── Default preferences ──────────────────────────────────────────────────────
 
 class TestDefaultPrefs:
-    def test_default_confirm_destructive_is_true(self):
+    def test_default_confirm_destructive_is_true(self, tmp_path, monkeypatch):
         """Par defaut, l'agent doit demander confirmation (securite avant autonomie)."""
-        from pathlib import Path as _Path
-        from sylea.core.storage.database import DatabaseManager
-        from api.routers.agent3_openclaw import _get_user_preferences
+        import asyncio
+        from tests.conftest import make_shared_db, dispose_shared_db
+        from api.routers.agent3_openclaw import _get_user_preferences_async
 
-        db = DatabaseManager(db_path=_Path(":memory:"))
-        # User inexistant -> prefs par defaut
-        prefs = _get_user_preferences(db, "nouveau_user_test_autonomy")
-        assert prefs.get("confirm_destructive") is True
+        d = make_shared_db(tmp_path, monkeypatch)
+        try:
+            # User inexistant -> prefs par defaut
+            prefs = asyncio.run(_get_user_preferences_async("nouveau_user_test_autonomy"))
+            assert prefs.get("confirm_destructive") is True
+        finally:
+            dispose_shared_db(d)
 
 
 # ── COMPUTER_USE dans les required fields ────────────────────────────────────

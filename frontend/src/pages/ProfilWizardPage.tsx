@@ -30,6 +30,41 @@ function scoreCol(s: number, invert = false): string {
   return 'var(--success)'
 }
 
+// Couleurs et libelles par categorie de question.
+// `key` est l'identite stable utilisee pour deduper / matcher (plusieurs cats
+// raw differentes peuvent partager la meme key, ex: `competences` + `experience`).
+function categoryStyle(cat: string): { bg: string; color: string; border: string; label: string; key: string } {
+  const c = (cat || '').toLowerCase()
+  if (c.includes('budget') || c.includes('finance') || c.includes('argent'))
+    return { bg: 'rgba(245,158,11,0.15)', color: '#fbbf24', border: 'rgba(245,158,11,0.3)', label: 'Budget', key: 'budget' }
+  if (c.includes('temps') || c.includes('disponi'))
+    return { bg: 'rgba(124,58,237,0.15)', color: '#a78bfa', border: 'rgba(124,58,237,0.3)', label: 'Temps', key: 'temps' }
+  if (c.includes('comp') || c.includes('skill') || c.includes('experience'))
+    return { bg: 'rgba(34,197,94,0.15)', color: '#4ade80', border: 'rgba(34,197,94,0.3)', label: 'Compétences', key: 'competences' }
+  if (c.includes('contrainte') || c.includes('obstacle') || c.includes('block'))
+    return { bg: 'rgba(239,68,68,0.15)', color: '#f87171', border: 'rgba(239,68,68,0.3)', label: 'Contraintes', key: 'contraintes' }
+  if (c.includes('motiv') || c.includes('pourquoi'))
+    return { bg: 'rgba(236,72,153,0.15)', color: '#f472b6', border: 'rgba(236,72,153,0.3)', label: 'Motivation', key: 'motivation' }
+  if (c.includes('reseau') || c.includes('relation') || c.includes('entou'))
+    return { bg: 'rgba(59,130,246,0.15)', color: '#60a5fa', border: 'rgba(59,130,246,0.3)', label: 'Réseau', key: 'reseau' }
+  if (c.includes('ressource') || c.includes('outil') || c.includes('mater'))
+    return { bg: 'rgba(20,184,166,0.15)', color: '#2dd4bf', border: 'rgba(20,184,166,0.3)', label: 'Ressources', key: 'ressources' }
+  if (c.includes('plan') || c.includes('strat') || c.includes('etape'))
+    return { bg: 'rgba(168,85,247,0.15)', color: '#c084fc', border: 'rgba(168,85,247,0.3)', label: 'Stratégie', key: 'strategie' }
+  if (c.includes('environ'))
+    return { bg: 'rgba(20,184,166,0.15)', color: '#2dd4bf', border: 'rgba(20,184,166,0.3)', label: 'Environnement', key: 'environnement' }
+  if (c.includes('sante') || c.includes('santé') || c.includes('health'))
+    return { bg: 'rgba(244,63,94,0.15)', color: '#fb7185', border: 'rgba(244,63,94,0.3)', label: 'Santé', key: 'sante' }
+  // Default : utilise le raw cat comme key (chaque raw distinct = bucket distinct)
+  const fallbackLabel = cat ? cat.charAt(0).toUpperCase() + cat.slice(1).toLowerCase() : 'Contexte'
+  return { bg: 'rgba(148,163,184,0.15)', color: '#94a3b8', border: 'rgba(148,163,184,0.3)', label: fallbackLabel, key: c || 'general' }
+}
+
+// Helper : retourne la key stable d'une categorie pour deduper / matcher
+function catKey(rawCat: string | null | undefined): string {
+  return categoryStyle((rawCat || '').toLowerCase()).key
+}
+
 // ── Composant principal ────────────────────────────────────────────────────
 
 export function ProfilWizardPage() {
@@ -77,12 +112,28 @@ export function ProfilWizardPage() {
   const objFin     = isCreate ? null : (profil?.objectif_financier ?? null)
 
   // ── Questions ──────────────────────────────────────────────────────────────
+  // Refonte UX : nombre VARIABLE 3-15 + metadata (category, why_it_matters,
+  // expected_format) + validation coherence par IA + animations gamifiees.
+  type QuestionMeta = {
+    question: string
+    category: string
+    why_it_matters: string
+    expected_format: string
+  }
   const [questionsGenerees,   setQuestionsGenerees]   = useState<string[]>([])
+  const [questionsMeta,       setQuestionsMeta]       = useState<QuestionMeta[]>([])
   const [generatingQuestions, setGeneratingQuestions] = useState(false)
   const [reponses,            setReponses]            = useState<Record<number, string>>({})
   const [questionsReadOnly,   setQuestionsReadOnly]   = useState(false)
   // Index de la question dont la saisie vocale est active (-1 = aucune)
   const [activeVoiceIdx, setActiveVoiceIdx] = useState<number>(-1)
+  // Coherence validation
+  const [validatingCoherence, setValidatingCoherence] = useState(false)
+  const [coherenceIssues,     setCoherenceIssues]     = useState<Array<{ question_idx: number; issue: string; suggestion: string }>>([])
+  // Hints "Why it matters" expansibles
+  const [expandedHints,       setExpandedHints]       = useState<Set<number>>(new Set())
+  // Index de la categorie courante dans le flow par chapitres (0 = premiere)
+  const [currentCategoryIdx,  setCurrentCategoryIdx]  = useState(0)
 
   // ── Bien-être — scores ────────────────────────────────────────────────────
   const [sante,   setSante]   = useState(() => isCreate ? 7 : (profil?.niveau_sante   ?? 7))
@@ -220,45 +271,154 @@ export function ProfilWizardPage() {
             }
           })
           setQuestionsGenerees(existingQuestions)
+          setQuestionsMeta([])
           setReponses(existingReponses)
+          setCoherenceIssues([])
+          setCurrentCategoryIdx(0)
           setStep('questions')
         } else {
-          // Pas de contexte personnalisé → générer les questions (modifiables)
+          // Pas de contexte personnalisé → générer les questions enrichies (modifiables)
           setQuestionsReadOnly(false)
           setGeneratingQuestions(true)
           try {
-            const questions = await api.genererQuestions(objDesc.trim(), deviceCtx ?? undefined)
-            setQuestionsGenerees(questions)
+            const enriched = await api.genererQuestionsEnriched(objDesc.trim(), deviceCtx ?? undefined)
+            setQuestionsMeta(enriched)
+            setQuestionsGenerees(enriched.map(q => q.question))
             setReponses({})
+            setCoherenceIssues([])
+            setCurrentCategoryIdx(0)
           } catch {
             setQuestionsGenerees([])
+            setQuestionsMeta([])
           }
           setGeneratingQuestions(false)
           setStep('questions')
         }
       } else {
-        // Objectif modifié ou nouveau profil : générer de nouvelles questions
+        // Objectif modifié ou nouveau profil : générer de nouvelles questions enrichies
         setQuestionsReadOnly(false)
         setGeneratingQuestions(true)
         try {
-          const questions = await api.genererQuestions(objDesc.trim(), deviceCtx ?? undefined)
-          setQuestionsGenerees(questions)
-          setReponses({})  // Reset des réponses pour les nouvelles questions
+          const enriched = await api.genererQuestionsEnriched(objDesc.trim(), deviceCtx ?? undefined)
+          setQuestionsMeta(enriched)
+          setQuestionsGenerees(enriched.map(q => q.question))
+          setReponses({})
+          setCoherenceIssues([])
         } catch {
           setQuestionsGenerees([])
+          setQuestionsMeta([])
         }
         setGeneratingQuestions(false)
         setStep('questions')
       }
     } else if (step === 'questions') {
       setError(null)
-      setStep('bien-etre')
+      // En lecture seule (objectif inchange), pas de validation coherence
+      if (questionsReadOnly) {
+        setStep('bien-etre')
+        return
+      }
+
+      // ── Flow par chapitres : navigation entre categories ───────────────────
+      // Calcul de la liste ordonnee unique de categories (ordre d'apparition).
+      // On dedupe par KEY canonique (categoryStyle), pas par raw string : sinon
+      // `competences` + `experience` apparaissent comme 2 buckets distincts
+      // alors qu'ils ont le meme libelle visuel.
+      const orderedCats: string[] = []
+      const seenCats = new Set<string>()
+      for (const meta of questionsMeta) {
+        const k = catKey(meta?.category)
+        if (!seenCats.has(k)) { seenCats.add(k); orderedCats.push(k) }
+      }
+
+      // Si on a un flow multi-categories ET qu'on n'est PAS sur la derniere
+      // → simple navigation interne (pas de validation coherence encore).
+      if (orderedCats.length > 1 && currentCategoryIdx < orderedCats.length - 1) {
+        // Verifier qu'au moins une question de la categorie courante a une reponse
+        const currentKey = orderedCats[currentCategoryIdx]
+        const idxInCat = questionsMeta
+          .map((m, i) => ({ i, k: catKey(m?.category) }))
+          .filter(x => x.k === currentKey)
+          .map(x => x.i)
+        const filledInCat = idxInCat.filter(i => (reponses[i] ?? '').trim().length > 0).length
+        if (filledInCat === 0) {
+          setError(t('profil.repondre_au_moins_une_cat') ||
+            'Repondez a au moins une question de cette categorie pour continuer.')
+          return
+        }
+        setCurrentCategoryIdx(currentCategoryIdx + 1)
+        // Scroll en haut de la card
+        setTimeout(() => {
+          window.scrollTo({ top: 0, behavior: 'smooth' })
+        }, 50)
+        return
+      }
+
+      // Derniere categorie (ou pas de meta = pas de flow par chapitres) :
+      // validation coherence + transition vers bien-etre.
+      const reponses_array = questionsGenerees.map((_, i) => (reponses[i] ?? '').trim())
+      const filled = reponses_array.filter(r => r.length > 0).length
+      if (filled === 0) {
+        setError(t('profil.repondre_au_moins_une') || 'Repondez au moins a une question pour continuer.')
+        return
+      }
+      // Validation coherence par IA
+      setValidatingCoherence(true)
+      setCoherenceIssues([])
+      try {
+        const result = await api.validerCoherence(objDesc.trim(), questionsGenerees, reponses_array)
+        if (!result.coherent && result.issues.length > 0) {
+          setCoherenceIssues(result.issues)
+          setError(
+            t('profil.coherence_a_corriger') ||
+            `${result.issues.length} reponse(s) a corriger : verifiez les questions surlignees en rouge ci-dessous.`,
+          )
+          setValidatingCoherence(false)
+          // Si on est en mode multi-categories, retourner sur la categorie de
+          // la premiere question problematique.
+          if (orderedCats.length > 1) {
+            const firstIssueIdx = result.issues[0].question_idx
+            const issueKey = catKey(questionsMeta[firstIssueIdx]?.category)
+            const targetCatIdx = orderedCats.indexOf(issueKey)
+            if (targetCatIdx >= 0) setCurrentCategoryIdx(targetCatIdx)
+          }
+          // Scroll vers la premiere question problematique
+          setTimeout(() => {
+            const firstIssueIdx = result.issues[0].question_idx
+            const el = document.getElementById(`question-${firstIssueIdx}`)
+            el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          }, 200)
+          return
+        }
+        // Tout coherent → on passe
+        setStep('bien-etre')
+      } catch {
+        // En cas d'erreur reseau/IA : on laisse passer (mode degrade)
+        setStep('bien-etre')
+      } finally {
+        setValidatingCoherence(false)
+      }
     }
   }
 
   const goPrev = () => {
     setError(null)
-    if (step === 'questions')      setStep('identite')
+    if (step === 'questions') {
+      // Si on est dans un flow par chapitres et pas sur le 1er, reculer d'une categorie.
+      // Sinon, retour a l'etape identite.
+      const orderedCats: string[] = []
+      const seenCats = new Set<string>()
+      for (const meta of questionsMeta) {
+        const k = catKey(meta?.category)
+        if (!seenCats.has(k)) { seenCats.add(k); orderedCats.push(k) }
+      }
+      if (orderedCats.length > 1 && currentCategoryIdx > 0) {
+        setCurrentCategoryIdx(currentCategoryIdx - 1)
+        setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 50)
+        return
+      }
+      setStep('identite')
+    }
     else if (step === 'bien-etre') setStep('questions')
   }
 
@@ -388,12 +548,24 @@ export function ProfilWizardPage() {
           {t('common.retour_dashboard').replace('← ', '')}
         </button>
 
-        {/* En-tête */}
-        <div style={{ marginBottom: '2rem' }}>
-          <h2 style={{ color: 'var(--accent-silver)', marginBottom: '0.375rem' }}>
+        {/* En-tête — Linear style hero */}
+        <div style={{ marginBottom: 'var(--space-8)' }}>
+          <h1 style={{
+            fontSize: 'var(--fs-3xl)',
+            fontWeight: 700,
+            letterSpacing: 'var(--tracking-tight)',
+            color: 'var(--text-primary)',
+            marginBottom: 'var(--space-2)',
+            lineHeight: 1.15,
+          }}>
             {profil ? t('profil.modifier_profil') : t('profil.creer_profil')}
-          </h2>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+          </h1>
+          <p style={{
+            color: 'var(--text-muted)',
+            fontSize: 'var(--fs-md)',
+            lineHeight: 1.55,
+            maxWidth: 600,
+          }}>
             {t('profil.analyse_description')}
           </p>
         </div>
@@ -407,24 +579,31 @@ export function ProfilWizardPage() {
               <div key={s.key} style={{ display: 'flex', alignItems: 'flex-start', flex: i < STEPS.length - 1 ? 1 : 'none' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.375rem' }}>
                   <div style={{
-                    width: '2rem', height: '2rem',
+                    width: 28, height: 28,
                     borderRadius: '50%',
-                    background: done ? 'var(--success)' : active ? 'var(--accent-violet)' : 'var(--bg-elevated)',
-                    border: `2px solid ${done ? 'var(--success)' : active ? 'var(--accent-violet)' : 'var(--border)'}`,
+                    background: done
+                      ? 'var(--success)'
+                      : active
+                        ? 'var(--sylea-gradient)'
+                        : 'var(--bg-elevated)',
+                    border: `1px solid ${done ? 'var(--success)' : active ? 'transparent' : 'var(--border)'}`,
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: '0.8rem', fontWeight: 700,
+                    fontSize: 'var(--fs-xs)', fontWeight: 600,
                     color: done || active ? 'white' : 'var(--text-muted)',
-                    transition: 'all 0.3s',
+                    transition: 'all var(--duration-base) var(--ease-out)',
                     flexShrink: 0,
+                    boxShadow: active ? 'var(--shadow-blue-glow)' : 'none',
                   }}>
                     {done ? '✓' : s.n}
                   </div>
                   <span style={{
-                    fontSize: '0.68rem',
-                    color: active ? 'var(--accent-violet-light)' : 'var(--text-muted)',
-                    letterSpacing: '0.06em',
+                    fontSize: 'var(--fs-xs)',
+                    fontWeight: active ? 600 : 500,
+                    color: active ? 'var(--text-primary)' : 'var(--text-muted)',
+                    letterSpacing: 'var(--tracking-wide)',
                     whiteSpace: 'nowrap',
                     textTransform: 'uppercase',
+                    transition: 'color var(--duration-fast) var(--ease-out)',
                   }}>
                     {s.label}
                   </span>
@@ -577,66 +756,390 @@ export function ProfilWizardPage() {
           </div>
         )}
 
-        {/* ═══ ÉTAPE 2 — QUESTIONS ═════════════════════════════════════════════ */}
-        {step === 'questions' && (
+        {/* ═══ ÉTAPE 2 — QUESTIONS PERSONNALISÉES (UX par chapitres) ═════════ */}
+        {step === 'questions' && (() => {
+          // Calcul progression GLOBALE : nombre de reponses non vides / total
+          const totalQuestions = questionsGenerees.length
+          const answeredAll = questionsGenerees.filter((_, i) => (reponses[i] ?? '').trim().length > 0).length
+          const progressPctAll = totalQuestions > 0 ? Math.round((answeredAll / totalQuestions) * 100) : 0
+          const allAnswered = totalQuestions > 0 && answeredAll === totalQuestions
+          const issuesByIdx = new Map(coherenceIssues.map(iss => [iss.question_idx, iss]))
+
+          // Calcul des categories ordonnees (par KEY canonique pour deduper).
+          const orderedCats: string[] = []
+          const seenCats = new Set<string>()
+          for (const meta of questionsMeta) {
+            const k = catKey(meta?.category)
+            if (!seenCats.has(k)) { seenCats.add(k); orderedCats.push(k) }
+          }
+
+          // Mode flow par chapitres (multi-categories ET pas readonly).
+          // En readonly OU sans meta : tout afficher d'un coup.
+          const useChapters = !questionsReadOnly && orderedCats.length > 1
+          const currentKey = useChapters ? orderedCats[currentCategoryIdx] : null
+          const isLastCat = useChapters && currentCategoryIdx === orderedCats.length - 1
+
+          // Indices des questions a afficher dans le rendu courant
+          const visibleIndices = useChapters
+            ? questionsMeta
+                .map((m, i) => ({ i, k: catKey(m?.category) }))
+                .filter(x => x.k === currentKey)
+                .map(x => x.i)
+            : questionsGenerees.map((_, i) => i)
+
+          // Progression par categorie (pour la barre + sentiment de progression)
+          const answeredInCat = visibleIndices.filter(i => (reponses[i] ?? '').trim().length > 0).length
+          const totalInCat = visibleIndices.length
+          const progressPctCat = totalInCat > 0 ? Math.round((answeredInCat / totalInCat) * 100) : 0
+          const catFullyAnswered = totalInCat > 0 && answeredInCat === totalInCat
+
+          // Une categorie est "completee" quand au moins 1 reponse non vide
+          const catCompleted = (key: string): boolean => {
+            const idxs = questionsMeta
+              .map((m, i) => ({ i, k: catKey(m?.category) }))
+              .filter(x => x.k === key)
+              .map(x => x.i)
+            return idxs.some(i => (reponses[i] ?? '').trim().length > 0)
+          }
+
+          return (
           <div className="card animate-fade-in-scale">
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
 
+              {/* Entête + chapitre courant + progression */}
               <div>
-                <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-violet-light)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.5rem' }}>
-                  ◈ {t('profil.questions_objectif')}
-                </p>
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', lineHeight: '1.5' }}>
-                  {questionsReadOnly
-                    ? t('profil.questions_readonly')
-                    : t('profil.questions_desc')}
-                </p>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.5rem', gap: '1rem', flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--accent-violet-light)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.5rem' }}>
+                      ◈ {useChapters && currentKey ? categoryStyle(currentKey).label : t('profil.questions_objectif')}
+                    </p>
+                    <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', lineHeight: '1.5', margin: 0 }}>
+                      {questionsReadOnly
+                        ? t('profil.questions_readonly')
+                        : useChapters
+                          ? (t('profil.chapitre_desc') || `Chapitre ${currentCategoryIdx + 1} sur ${orderedCats.length} — répondez aux questions de cette section avant de passer à la suivante.`)
+                          : t('profil.questions_desc')}
+                    </p>
+                  </div>
+                  {!questionsReadOnly && totalQuestions > 0 && (
+                    <div style={{
+                      display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
+                      gap: '0.25rem', flexShrink: 0,
+                    }}>
+                      <span style={{
+                        fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em',
+                      }}>
+                        {t('profil.progression') || 'Progression'}
+                      </span>
+                      <span style={{
+                        fontFamily: 'var(--font-mono)', fontSize: '1.25rem', fontWeight: 700,
+                        color: allAnswered ? 'var(--success)' : 'var(--accent-violet-light)',
+                        transition: 'color 0.3s',
+                      }}>
+                        {answeredAll}<span style={{ opacity: 0.4, fontSize: '0.95rem' }}>/{totalQuestions}</span>
+                      </span>
+                    </div>
+                  )}
+                </div>
+
                 {questionsReadOnly && (
                   <div style={{
                     display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
                     padding: '0.3rem 0.75rem', borderRadius: '999px', fontSize: '0.7rem', fontWeight: 600,
                     background: 'rgba(59,130,246,0.1)', color: '#60a5fa', border: '1px solid rgba(59,130,246,0.2)',
-                    marginTop: '0.25rem',
+                    marginTop: '0.5rem',
                   }}>
                     <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><rect x={3} y={11} width={18} height={11} rx={2}/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                     {t('profil.lecture_seule')}
                   </div>
                 )}
+
+                {/* Stepper de chapitres (categories) */}
+                {useChapters && (
+                  <div style={{
+                    marginTop: '0.875rem',
+                    display: 'flex', alignItems: 'center', gap: '0.375rem',
+                    flexWrap: 'wrap',
+                  }}>
+                    {orderedCats.map((key, idx) => {
+                      const s = categoryStyle(key)
+                      const isActive = idx === currentCategoryIdx
+                      const isDone = idx < currentCategoryIdx && catCompleted(key)
+                      const isPast = idx < currentCategoryIdx
+                      const clickable = isPast || isActive
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => {
+                            if (!clickable) return
+                            setError(null)
+                            setCurrentCategoryIdx(idx)
+                          }}
+                          disabled={!clickable}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: '0.35rem',
+                            padding: '0.35rem 0.7rem', borderRadius: '999px',
+                            fontSize: '0.7rem', fontWeight: 600,
+                            background: isActive ? s.bg : 'transparent',
+                            color: isActive ? s.color : isDone ? '#4ade80' : 'var(--text-muted)',
+                            border: `1px solid ${isActive ? s.border : isDone ? 'rgba(34,197,94,0.3)' : 'var(--border)'}`,
+                            cursor: clickable ? 'pointer' : 'not-allowed',
+                            opacity: clickable ? 1 : 0.55,
+                            textTransform: 'uppercase', letterSpacing: '0.04em',
+                            transition: 'all 0.2s',
+                          }}
+                        >
+                          {isDone ? (
+                            <svg width={11} height={11} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}>
+                              <polyline points="20 6 9 17 4 12"/>
+                            </svg>
+                          ) : (
+                            <span style={{
+                              width: 16, height: 16, borderRadius: '50%',
+                              background: isActive ? s.color : 'transparent',
+                              border: `1px solid ${isActive ? s.color : 'var(--border)'}`,
+                              color: isActive ? '#000' : 'var(--text-muted)',
+                              fontSize: '0.6rem', fontWeight: 700,
+                              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                            }}>
+                              {idx + 1}
+                            </span>
+                          )}
+                          {s.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+
+                {/* Barre de progression (categorie courante en chapitres, sinon globale) */}
+                {!questionsReadOnly && totalQuestions > 0 && (
+                  <div style={{
+                    marginTop: '0.875rem',
+                    width: '100%', height: '8px',
+                    background: 'rgba(148,163,184,0.15)',
+                    borderRadius: '999px',
+                    overflow: 'hidden',
+                    position: 'relative',
+                  }}>
+                    <div style={{
+                      width: `${useChapters ? progressPctCat : progressPctAll}%`, height: '100%',
+                      background: (useChapters ? catFullyAnswered : allAnswered)
+                        ? 'linear-gradient(90deg, var(--success), #34d399)'
+                        : 'linear-gradient(90deg, var(--accent-violet), var(--accent-violet-light))',
+                      borderRadius: '999px',
+                      transition: 'width 0.5s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s',
+                      boxShadow: (useChapters ? catFullyAnswered : allAnswered) ? '0 0 12px rgba(34,197,94,0.5)' : 'none',
+                    }} />
+                  </div>
+                )}
               </div>
 
-              {questionsGenerees.length === 0 ? (
+              {/* Banniere coherence */}
+              {coherenceIssues.length > 0 && (
+                <div style={{
+                  padding: '0.875rem 1rem',
+                  background: 'rgba(239,68,68,0.08)',
+                  border: '1px solid rgba(239,68,68,0.3)',
+                  borderRadius: '0.625rem',
+                  display: 'flex', alignItems: 'flex-start', gap: '0.625rem',
+                }}>
+                  <span style={{ fontSize: '1.1rem', flexShrink: 0 }}>⚠</span>
+                  <div style={{ flex: 1 }}>
+                    <p style={{ fontSize: '0.85rem', fontWeight: 600, color: '#f87171', margin: 0, marginBottom: '0.25rem' }}>
+                      {t('profil.coherence_titre') || `${coherenceIssues.length} reponse(s) a corriger`}
+                    </p>
+                    <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
+                      {t('profil.coherence_desc') || 'L\'IA a detecte des incoherences entre votre objectif et certaines reponses. Corrigez les questions surlignees pour continuer.'}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {totalQuestions === 0 ? (
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', fontStyle: 'italic', textAlign: 'center', padding: '1.5rem 0' }}>
                   {t('profil.aucune_question')}
                 </p>
               ) : (
-                questionsGenerees.map((q, i) => {
+                visibleIndices.map((i, displayPos) => {
+                  const q = questionsGenerees[i]
+                  void displayPos
                   const isListening = activeVoiceIdx === i
+                  const meta = questionsMeta[i]
+                  const filled = (reponses[i] ?? '').trim().length > 0
+                  const issue = issuesByIdx.get(i)
+                  const hasIssue = Boolean(issue)
+                  const expanded = expandedHints.has(i)
+
+                  const cardBorder = hasIssue
+                    ? '1px solid rgba(239,68,68,0.45)'
+                    : filled
+                      ? '1px solid rgba(34,197,94,0.3)'
+                      : '1px solid var(--border)'
+                  const cardBg = hasIssue
+                    ? 'rgba(239,68,68,0.04)'
+                    : filled
+                      ? 'rgba(34,197,94,0.03)'
+                      : 'transparent'
+
                   return (
-                    <div className="input-group" key={i}>
-                      <label className="input-label" style={{
-                        color: 'var(--text-secondary)', display: 'flex', gap: '0.625rem', alignItems: 'flex-start',
-                      }}>
+                    <div
+                      id={`question-${i}`}
+                      key={i}
+                      style={{
+                        padding: '0.875rem 1rem',
+                        border: cardBorder,
+                        background: cardBg,
+                        borderRadius: '0.625rem',
+                        transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                      }}
+                    >
+                      {/* En-tete : badge categorie + numero + checkmark */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem', flexWrap: 'wrap' }}>
                         <span style={{
                           color: 'var(--accent-gold)', fontFamily: 'var(--font-mono)',
-                          fontSize: '0.75rem', flexShrink: 0, paddingTop: '0.1rem',
+                          fontSize: '0.7rem', flexShrink: 0,
                         }}>
                           {(i + 1).toString().padStart(2, '0')}
                         </span>
-                        <span>{q}</span>
-                      </label>
-                      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.375rem', alignItems: 'flex-start' }}>
+                        {meta && meta.category && (() => {
+                          const s = categoryStyle(meta.category)
+                          return (
+                            <span style={{
+                              display: 'inline-flex', alignItems: 'center',
+                              padding: '0.2rem 0.55rem', borderRadius: '999px',
+                              fontSize: '0.65rem', fontWeight: 600,
+                              background: s.bg, color: s.color, border: `1px solid ${s.border}`,
+                              textTransform: 'uppercase', letterSpacing: '0.04em',
+                            }}>
+                              {s.label}
+                            </span>
+                          )
+                        })()}
+                        {filled && !hasIssue && (
+                          <span
+                            className="animate-fade-in-scale"
+                            style={{
+                              display: 'inline-flex', alignItems: 'center', gap: '0.25rem',
+                              padding: '0.2rem 0.5rem', borderRadius: '999px',
+                              fontSize: '0.65rem', fontWeight: 600,
+                              background: 'rgba(34,197,94,0.15)', color: '#4ade80',
+                              border: '1px solid rgba(34,197,94,0.3)',
+                            }}
+                          >
+                            <svg width={10} height={10} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}>
+                              <polyline points="20 6 9 17 4 12"/>
+                            </svg>
+                            OK
+                          </span>
+                        )}
+                        {hasIssue && (
+                          <span style={{
+                            display: 'inline-flex', alignItems: 'center', gap: '0.25rem',
+                            padding: '0.2rem 0.5rem', borderRadius: '999px',
+                            fontSize: '0.65rem', fontWeight: 600,
+                            background: 'rgba(239,68,68,0.15)', color: '#f87171',
+                            border: '1px solid rgba(239,68,68,0.3)',
+                          }}>
+                            ⚠ A corriger
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Question */}
+                      <p style={{
+                        color: 'var(--text-secondary)',
+                        fontSize: '0.9rem',
+                        lineHeight: 1.5,
+                        margin: 0,
+                        marginBottom: meta?.why_it_matters ? '0.375rem' : '0.625rem',
+                        fontWeight: 500,
+                      }}>
+                        {q}
+                      </p>
+
+                      {/* Pourquoi cette question (expansible) */}
+                      {meta?.why_it_matters && !questionsReadOnly && (
+                        <div style={{ marginBottom: '0.625rem' }}>
+                          <button
+                            type="button"
+                            onClick={() => setExpandedHints(prev => {
+                              const next = new Set(prev)
+                              if (next.has(i)) next.delete(i)
+                              else next.add(i)
+                              return next
+                            })}
+                            style={{
+                              background: 'transparent', border: 'none',
+                              padding: 0, color: 'var(--accent-violet-light)',
+                              fontSize: '0.72rem', cursor: 'pointer',
+                              display: 'inline-flex', alignItems: 'center', gap: '0.25rem',
+                              fontWeight: 500,
+                              opacity: 0.85,
+                              transition: 'opacity 0.15s',
+                            }}
+                            onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+                            onMouseLeave={e => (e.currentTarget.style.opacity = '0.85')}
+                          >
+                            <svg
+                              width={11} height={11} viewBox="0 0 24 24"
+                              fill="none" stroke="currentColor" strokeWidth={2}
+                              style={{ transition: 'transform 0.2s', transform: expanded ? 'rotate(90deg)' : 'rotate(0)' }}
+                            >
+                              <polyline points="9 18 15 12 9 6"/>
+                            </svg>
+                            {t('profil.pourquoi_question') || 'Pourquoi cette question ?'}
+                          </button>
+                          {expanded && (
+                            <div className="animate-fade-in" style={{
+                              marginTop: '0.4rem',
+                              padding: '0.625rem 0.75rem',
+                              background: 'rgba(124,58,237,0.06)',
+                              border: '1px solid rgba(124,58,237,0.2)',
+                              borderRadius: '0.5rem',
+                              fontSize: '0.78rem', color: 'var(--text-muted)',
+                              lineHeight: 1.55,
+                            }}>
+                              {meta.why_it_matters}
+                              {meta.expected_format && (
+                                <p style={{
+                                  margin: 0, marginTop: '0.4rem',
+                                  fontStyle: 'italic', opacity: 0.85,
+                                  fontSize: '0.74rem',
+                                }}>
+                                  💡 <strong>{t('profil.exemple_format') || 'Exemple de format'}:</strong> {meta.expected_format}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Champ reponse */}
+                      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
                         <textarea
                           className="input"
                           rows={2}
                           value={reponses[i] ?? ''}
-                          onChange={e => { if (!questionsReadOnly) setReponses(prev => ({ ...prev, [i]: e.target.value })) }}
+                          onChange={e => {
+                            if (questionsReadOnly) return
+                            setReponses(prev => ({ ...prev, [i]: e.target.value }))
+                            // Reset issue pour cette question des qu'on edite
+                            if (hasIssue) {
+                              setCoherenceIssues(prev => prev.filter(iss => iss.question_idx !== i))
+                            }
+                          }}
                           readOnly={questionsReadOnly}
-                          placeholder={t('profil.votre_reponse')}
+                          placeholder={meta?.expected_format && !questionsReadOnly
+                            ? meta.expected_format
+                            : t('profil.votre_reponse')}
                           style={{
                             flex: 1, resize: questionsReadOnly ? 'none' : 'vertical',
                             opacity: questionsReadOnly ? 0.7 : 1,
                             cursor: questionsReadOnly ? 'default' : undefined,
                             background: questionsReadOnly ? 'rgba(255,255,255,0.02)' : undefined,
+                            borderColor: hasIssue ? 'rgba(239,68,68,0.4)' : undefined,
                           }}
                         />
                         {!questionsReadOnly && (
@@ -647,16 +1150,13 @@ export function ProfilWizardPage() {
                           title={isListening ? t('profil.ecoute_cours') : t('profil.repondre_voix')}
                           style={{
                             flexShrink: 0,
-                            width: '36px',
-                            height: '36px',
+                            width: '36px', height: '36px',
                             borderRadius: '8px',
                             border: `1px solid ${isListening ? 'var(--accent-violet)' : 'var(--border)'}`,
                             background: isListening ? 'rgba(124,58,237,0.2)' : 'var(--bg-elevated)',
                             color: isListening ? 'var(--accent-violet-light)' : 'var(--text-muted)',
                             cursor: activeVoiceIdx !== -1 && !isListening ? 'not-allowed' : 'pointer',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
                             fontSize: '1rem',
                             opacity: activeVoiceIdx !== -1 && !isListening ? 0.4 : 1,
                             transition: 'all 0.2s',
@@ -667,14 +1167,13 @@ export function ProfilWizardPage() {
                         </button>
                         )}
                       </div>
+
                       {isListening && (
                         <p style={{
                           fontSize: '0.75rem',
                           color: 'var(--accent-violet-light)',
                           marginTop: '0.25rem',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '0.375rem',
+                          display: 'flex', alignItems: 'center', gap: '0.375rem',
                         }}>
                           <span style={{
                             width: '6px', height: '6px', borderRadius: '50%',
@@ -684,6 +1183,27 @@ export function ProfilWizardPage() {
                           }} />
                           {t('profil.ecoute_cours')}
                         </p>
+                      )}
+
+                      {/* Issue de coherence : message + suggestion IA */}
+                      {hasIssue && issue && (
+                        <div className="animate-fade-in" style={{
+                          marginTop: '0.625rem',
+                          padding: '0.625rem 0.75rem',
+                          background: 'rgba(239,68,68,0.08)',
+                          border: '1px solid rgba(239,68,68,0.25)',
+                          borderRadius: '0.5rem',
+                          fontSize: '0.78rem', lineHeight: 1.55,
+                        }}>
+                          <p style={{ margin: 0, color: '#f87171', fontWeight: 600 }}>
+                            ⚠ {issue.issue}
+                          </p>
+                          {issue.suggestion && (
+                            <p style={{ margin: 0, marginTop: '0.3rem', color: 'var(--text-muted)' }}>
+                              💡 <strong>{t('profil.suggestion') || 'Suggestion'}:</strong> {issue.suggestion}
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
                   )
@@ -696,13 +1216,31 @@ export function ProfilWizardPage() {
                 </p>
               )}
 
+              {error && <p style={{ color: 'var(--danger)', fontSize: '0.875rem', margin: 0 }}>⚠ {error}</p>}
+
               <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.5rem' }}>
-                <button className="btn btn-outline" onClick={goPrev}>{t('common.precedent')}</button>
-                <button className="btn btn-primary" onClick={goNext}>{t('common.suivant')}</button>
+                <button className="btn btn-outline" onClick={goPrev} disabled={validatingCoherence}>{t('common.precedent')}</button>
+                <button className="btn btn-primary" onClick={goNext} disabled={validatingCoherence}>
+                  {validatingCoherence ? (
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '0.625rem' }}>
+                      <span style={{
+                        width: '14px', height: '14px', borderRadius: '50%',
+                        border: '2px solid rgba(255,255,255,0.3)', borderTop: '2px solid white',
+                        animation: 'spin 0.7s linear infinite', display: 'inline-block',
+                      }} />
+                      {t('profil.verification_coherence') || 'Verification...'}
+                    </span>
+                  ) : useChapters && !isLastCat
+                      ? (t('profil.chapitre_suivant') || `Chapitre suivant : ${categoryStyle(orderedCats[currentCategoryIdx + 1]).label} →`)
+                      : useChapters && isLastCat
+                        ? (t('profil.terminer_questions') || 'Continuer →')
+                        : t('common.suivant')}
+                </button>
               </div>
             </div>
           </div>
-        )}
+          )
+        })()}
 
         {/* ═══ ÉTAPE 3 — BIEN-ÊTRE ═════════════════════════════════════════════ */}
         {step === 'bien-etre' && (

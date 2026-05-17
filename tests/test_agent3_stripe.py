@@ -15,10 +15,18 @@ from sylea.core.storage.database import DatabaseManager
 
 
 @pytest.fixture
-def db():
-    d = DatabaseManager(db_path=Path(":memory:"))
-    d.connect()
-    return d
+def db(tmp_path, monkeypatch):
+    """Shared-DB (sync + async) — migration PG."""
+    from tests.conftest import make_shared_db, dispose_shared_db
+    d = make_shared_db(tmp_path, monkeypatch)
+    # Bootstrap quota tables (user_plans, user_quota_usage)
+    try:
+        from api.agent3_quotas import ensure_quota_tables
+        ensure_quota_tables(d)
+    except Exception:
+        pass
+    yield d
+    dispose_shared_db(d)
 
 
 class TestStripeConfig:
@@ -88,9 +96,10 @@ class TestWebhookHandler:
         )
         db.conn.commit()
 
-        from api.agent3_quotas import get_user_plan
+        import asyncio
+        from api.agent3_quotas import get_user_plan_async
         # Avant : free
-        assert get_user_plan(db, "u_stripe")["name"] == "free"
+        assert asyncio.run(get_user_plan_async("u_stripe"))["name"] == "free"
 
         # Mock l'event
         fake_event = {
@@ -111,15 +120,16 @@ class TestWebhookHandler:
             assert r["ok"] is True
 
         # Apres : pro
-        assert get_user_plan(db, "u_stripe")["name"] == "pro"
+        assert asyncio.run(get_user_plan_async("u_stripe"))["name"] == "pro"
 
     def test_subscription_deleted_downgrades(self, db, monkeypatch):
         monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_x")
         monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
 
-        from api.agent3_quotas import set_user_plan, get_user_plan
-        set_user_plan(db, "u_canc", "pro")
-        assert get_user_plan(db, "u_canc")["name"] == "pro"
+        import asyncio
+        from api.agent3_quotas import set_user_plan_async, get_user_plan_async
+        asyncio.run(set_user_plan_async("u_canc", "pro"))
+        assert asyncio.run(get_user_plan_async("u_canc"))["name"] == "pro"
 
         fake_event = {
             "type": "customer.subscription.deleted",
@@ -134,7 +144,7 @@ class TestWebhookHandler:
             r = handle_webhook(db, b"{}", "t=x,v1=y")
             assert r["ok"] is True
 
-        assert get_user_plan(db, "u_canc")["name"] == "free"
+        assert asyncio.run(get_user_plan_async("u_canc"))["name"] == "free"
 
     def test_invalid_signature_rejected(self, db, monkeypatch):
         monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_x")

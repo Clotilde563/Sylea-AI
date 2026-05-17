@@ -57,11 +57,40 @@ async def get_optional_user(request: Request) -> str | None:
     This allows endpoints to work both with and without authentication:
     - With auth: filters data by auth_user_id (multi-user web mode)
     - Without auth: loads first profil (CLI / single-user mode)
+
+    SECURITE : on distingue 3 cas
+      - Pas de header Authorization → None (anonyme legitime, ex: CLI mode)
+      - Header avec token valide   → user_id decode
+      - Header avec token invalide → HTTPException 401 (au lieu de None
+        silencieux qui faisait passer pour anonyme un token forge/expire)
     """
+    from fastapi import HTTPException
     auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        return decode_token(auth[7:])
-    return None
+    if not auth:
+        return None
+    if not auth.startswith("Bearer "):
+        # Header present mais format invalide → 401 explicite
+        raise HTTPException(
+            status_code=401,
+            detail="Authorization header doit etre au format 'Bearer <token>'",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = auth[7:].strip()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Token manquant apres 'Bearer '",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user_id = decode_token(token)
+    if user_id is None:
+        # Token present mais invalide/expire → 401 (ne PAS retourner None)
+        raise HTTPException(
+            status_code=401,
+            detail="Token invalide ou expire",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user_id
 
 
 def get_agent():

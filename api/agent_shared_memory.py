@@ -15,10 +15,10 @@ Architecture :
 
 Usage :
     from api.agent_shared_memory import (
-        save_memory, load_memories, format_memories,
+        save_memory_async, load_memories_async, format_memories,
     )
-    save_memory(db, user_id, "ville", "Lyon", category="profil")
-    memories = load_memories(db, user_id, limit=50)
+    await save_memory_async(user_id, "ville", "Lyon", category="profil")
+    memories = await load_memories_async(user_id, limit=50)
     block = format_memories(memories)
     system_prompt = block + "\\n\\n" + core_prompt
 """
@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger("sylea.shared_memory")
@@ -58,131 +58,6 @@ def ensure_memory_table(db: Any) -> None:
         db.conn.commit()
     except Exception as e:
         logger.debug(f"ensure_memory_table failed: {e}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CRUD
-# ─────────────────────────────────────────────────────────────────────────────
-
-def save_memory(db: Any, user_id: str, key: str, value: str, category: str = "general") -> None:
-    """Sauvegarde un fait en memoire (upsert sur user_id+key)."""
-    if not user_id or not key:
-        return
-    ensure_memory_table(db)
-    now = datetime.now(timezone.utc).isoformat()
-    existing = db.conn.execute(
-        "SELECT id FROM agent3_memory WHERE auth_user_id = ? AND key = ?",
-        (user_id, key),
-    ).fetchone()
-    if existing:
-        db.conn.execute(
-            "UPDATE agent3_memory SET value = ?, updated_at = ? WHERE id = ?",
-            (value, now, existing[0]),
-        )
-    else:
-        db.conn.execute(
-            "INSERT INTO agent3_memory (id, auth_user_id, key, value, category, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), user_id, key, value, category, now, now),
-        )
-    db.conn.commit()
-
-
-def load_memories(db: Any, user_id: str, limit: int = 50) -> list[dict]:
-    """Charge les souvenirs recents pour ce user (tous agents confondus)."""
-    if not user_id:
-        return []
-    ensure_memory_table(db)
-    try:
-        rows = db.conn.execute(
-            "SELECT key, value, category, updated_at FROM agent3_memory "
-            "WHERE auth_user_id = ? ORDER BY updated_at DESC LIMIT ?",
-            (user_id, max(1, min(int(limit), 500))),
-        ).fetchall()
-        return [
-            {"key": r[0], "value": r[1], "category": r[2], "updated_at": r[3]}
-            for r in rows
-        ]
-    except Exception as e:
-        logger.debug(f"load_memories failed: {e}")
-        return []
-
-
-def delete_memory(db: Any, user_id: str, key: str) -> bool:
-    """Supprime un fait specifique."""
-    if not user_id or not key:
-        return False
-    try:
-        db.conn.execute(
-            "DELETE FROM agent3_memory WHERE auth_user_id = ? AND key = ?",
-            (user_id, key),
-        )
-        db.conn.commit()
-        return True
-    except Exception:
-        return False
-
-
-def cleanup_old_memories(db: Any, user_id: str, days: int = 90) -> int:
-    """Supprime les memoires de faible valeur > X jours.
-
-    Preserve les memoires liees aux decisions a fort impact (>= 30j).
-    """
-    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-    try:
-        # Chercher mots-cles des decisions a fort impact (a preserver)
-        try:
-            high_impact_rows = db.conn.execute(
-                "SELECT question FROM decisions WHERE user_id IN "
-                "(SELECT id FROM profil_utilisateur WHERE auth_user_id = ?) "
-                "AND ABS(COALESCE(impact_temporel_jours, 0)) >= 30",
-                (user_id,),
-            ).fetchall()
-            preserve_keywords = set()
-            for row in high_impact_rows:
-                for word in row[0].lower().split():
-                    if len(word) > 3:
-                        preserve_keywords.add(word)
-        except Exception:
-            preserve_keywords = set()
-
-        old_rows = db.conn.execute(
-            "SELECT key, value FROM agent3_memory WHERE auth_user_id = ? AND created_at < ?",
-            (user_id, cutoff),
-        ).fetchall()
-        deleted = 0
-        for key, value in old_rows:
-            text = f"{key} {value}".lower()
-            if not any(kw in text for kw in preserve_keywords):
-                db.conn.execute(
-                    "DELETE FROM agent3_memory WHERE auth_user_id = ? AND key = ?",
-                    (user_id, key),
-                )
-                deleted += 1
-        if deleted:
-            db.conn.commit()
-        return deleted
-    except Exception:
-        return 0
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Recherche
-# ─────────────────────────────────────────────────────────────────────────────
-
-def search_memories(db: Any, user_id: str, query: str, top_k: int = 10) -> list:
-    """Recherche TF-IDF dans les souvenirs (fallback mots-cles)."""
-    try:
-        from api.agent3_memory_extractor import semantic_search
-    except Exception:
-        return []
-    all_memories = load_memories(db, user_id, limit=500)
-    if not all_memories:
-        return []
-    try:
-        return semantic_search(query, all_memories, top_k=top_k)
-    except Exception:
-        return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -262,7 +137,7 @@ async def auto_extract_from_turns(
     except Exception:
         return []
 
-    existing = load_memories(db, user_id, limit=80)
+    existing = await load_memories_async(user_id, limit=80)
     extractor = MemoryExtractor(client)
     try:
         facts = await extractor.extract(turns, existing_memories=existing)
@@ -273,7 +148,7 @@ async def auto_extract_from_turns(
     saved = []
     for f in facts:
         try:
-            save_memory(db, user_id, f.key, f.value, category=f.category)
+            await save_memory_async(user_id, f.key, f.value, category=f.category)
             saved.append(f)
         except Exception:
             continue
@@ -284,13 +159,115 @@ async def auto_extract_from_turns(
     return saved
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def save_memory_async(
+    user_id: str, key: str, value: str, category: str = "general",
+) -> None:
+    """Version async de save_memory — PG-compatible (upsert portable)."""
+    if not user_id or not key:
+        return
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    now = datetime.now(timezone.utc).isoformat()
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            # Upsert : SELECT puis UPDATE/INSERT (portable)
+            result = await session.execute(
+                text(
+                    "SELECT id FROM agent3_memory "
+                    "WHERE auth_user_id = :uid AND key = :key"
+                ),
+                {"uid": user_id, "key": key},
+            )
+            existing = result.first()
+            if existing:
+                await session.execute(
+                    text(
+                        "UPDATE agent3_memory SET value = :val, updated_at = :now "
+                        "WHERE id = :id"
+                    ),
+                    {"val": value, "now": now, "id": existing[0]},
+                )
+            else:
+                await session.execute(
+                    text(
+                        "INSERT INTO agent3_memory "
+                        "(id, auth_user_id, key, value, category, created_at, updated_at) "
+                        "VALUES (:id, :uid, :key, :val, :cat, :now, :now)"
+                    ),
+                    {
+                        "id": str(uuid.uuid4()), "uid": user_id, "key": key,
+                        "val": value, "cat": category, "now": now,
+                    },
+                )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def load_memories_async(user_id: str, limit: int = 50) -> list[dict]:
+    """Version async de load_memories — PG-compatible."""
+    if not user_id:
+        return []
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT key, value, category, updated_at FROM agent3_memory "
+                    "WHERE auth_user_id = :uid ORDER BY updated_at DESC LIMIT :lim"
+                ),
+                {"uid": user_id, "lim": max(1, min(int(limit), 500))},
+            )
+            rows = result.mappings().all()
+        return [
+            {"key": r["key"], "value": r["value"], "category": r["category"],
+             "updated_at": r["updated_at"]}
+            for r in rows
+        ]
+    except Exception as e:
+        logger.debug(f"load_memories_async failed: {e}")
+        return []
+
+
+async def delete_memory_async(user_id: str, key: str) -> bool:
+    """Version async — PG-compatible."""
+    if not user_id or not key:
+        return False
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            try:
+                await session.execute(
+                    text(
+                        "DELETE FROM agent3_memory "
+                        "WHERE auth_user_id = :uid AND key = :key"
+                    ),
+                    {"uid": user_id, "key": key},
+                )
+                await session.commit()
+                return True
+            except Exception:
+                await session.rollback()
+                return False
+    except Exception:
+        return False
+
+
 __all__ = [
     "ensure_memory_table",
-    "save_memory",
-    "load_memories",
-    "delete_memory",
-    "cleanup_old_memories",
-    "search_memories",
+    "save_memory_async",
+    "load_memories_async",
+    "delete_memory_async",
     "format_memories",
     "auto_extract_from_turns",
 ]

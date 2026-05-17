@@ -18,10 +18,23 @@
 
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
+import { useAuthStore } from '../auth/authStore'
+import { usePlan } from '../hooks/usePlan'
 
 // LocalStorage key : marqueur "j'ai deja telecharge le desktop une fois".
 // Pas une verite absolue, mais permet de changer le ton du message.
-const DESKTOP_SEEN_KEY = 'sylea_desktop_seen'
+//
+// IMPORTANT : la cle est SCOPEE PAR COMPTE (email). Sinon, sur un meme
+// navigateur partage entre plusieurs comptes Google, le marqueur du compte
+// A "fuiterait" sur le compte B → la banniere afficherait "Ton app est en
+// pause" (😴) sur un compte qui n'a jamais installe le desktop.
+const DESKTOP_SEEN_KEY_PREFIX = 'sylea_desktop_seen'
+
+function desktopSeenKey(email: string | null | undefined): string {
+  // Sans email (jamais connecte), on n'utilise pas de marqueur persistant.
+  // On retourne une cle "anonymous" qui ne sera jamais ecrite.
+  return email ? `${DESKTOP_SEEN_KEY_PREFIX}:${email}` : `${DESKTOP_SEEN_KEY_PREFIX}:anonymous`
+}
 
 // URL de telechargement du desktop. Pour le MVP on renvoie vers une page
 // d'aide avec les liens. A terme -> GitHub Releases ou CDN Syléa.
@@ -30,10 +43,24 @@ const DOWNLOAD_URL = '/help#telecharger-desktop'
 type Status = 'loading' | 'connected' | 'disconnected'
 
 export function DesktopStatusBanner() {
+  const userEmail = useAuthStore((s) => s.user?.email)
+  const { isFree, loading: planLoading } = usePlan()
   const [status, setStatus] = useState<Status>('loading')
   const [hasSeenDesktop, setHasSeenDesktop] = useState<boolean>(
-    () => typeof window !== 'undefined' && !!localStorage.getItem(DESKTOP_SEEN_KEY)
+    () => typeof window !== 'undefined' && !!localStorage.getItem(desktopSeenKey(userEmail))
   )
+
+  // Re-evalue le marqueur si l'utilisateur change (logout/login d'un autre compte
+  // sans recharger la page). Sinon le compte B verrait l'etat "deja vu" du compte A.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    // Migration : supprime l'ancienne cle non-scopee qui aurait pu causer la
+    // confusion entre comptes. On le fait une seule fois (idempotent).
+    if (localStorage.getItem(DESKTOP_SEEN_KEY_PREFIX) !== null) {
+      localStorage.removeItem(DESKTOP_SEEN_KEY_PREFIX)
+    }
+    setHasSeenDesktop(!!localStorage.getItem(desktopSeenKey(userEmail)))
+  }, [userEmail])
   const [justConnected, setJustConnected] = useState(false)
   const [dismissed, setDismissed] = useState(false)
 
@@ -51,8 +78,10 @@ export function DesktopStatusBanner() {
             setTimeout(() => setJustConnected(false), 4000)
           }
           setStatus('connected')
-          if (!hasSeenDesktop) {
-            localStorage.setItem(DESKTOP_SEEN_KEY, '1')
+          if (!hasSeenDesktop && userEmail) {
+            // On ne pose le marqueur QUE si on a un email (compte authentifie).
+            // Sans email, ne pas polluer le localStorage avec une cle "anonymous".
+            localStorage.setItem(desktopSeenKey(userEmail), '1')
             setHasSeenDesktop(true)
           }
         } else {
@@ -71,11 +100,17 @@ export function DesktopStatusBanner() {
       cancelled = true
       clearInterval(interval)
     }
-  }, [hasSeenDesktop, status])
+  }, [hasSeenDesktop, status, userEmail])
 
   // Etat neutre / loading : rien (ne pas flasher au chargement)
   if (status === 'loading') return null
   if (dismissed) return null
+  // Sylea Desktop est reserve aux abonnes Avance. Pour les Free, on cache
+  // le bandeau (pas de pousse a installer si la fonctionnalite leur est
+  // de toute facon inaccessible). On attend que le plan soit charge pour
+  // ne pas flasher le bandeau a la 1re render.
+  if (planLoading) return null
+  if (isFree) return null
 
   // ── ETAT CONNECTE : bandeau vert fin, discret ────────────────────────────
   if (status === 'connected') {

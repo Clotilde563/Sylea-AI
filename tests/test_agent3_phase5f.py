@@ -29,10 +29,12 @@ from sylea.core.storage.database import DatabaseManager
 
 
 @pytest.fixture
-def db():
-    d = DatabaseManager(db_path=Path(":memory:"))
-    d.connect()
-    return d
+def db(tmp_path, monkeypatch):
+    """Shared-DB (sync + async) — migration PG."""
+    from tests.conftest import make_shared_db, dispose_shared_db
+    d = make_shared_db(tmp_path, monkeypatch)
+    yield d
+    dispose_shared_db(d)
 
 
 @pytest.fixture
@@ -190,9 +192,9 @@ class TestDispatcherCostCap:
 
     async def test_user_pref_overrides_default(self, db):
         # Configure un cap custom de 0.01$ pour ce user via preferences
-        from api.routers.agent3_openclaw import _ensure_agent3_tables, _save_user_preferences
-        _ensure_agent3_tables(db)
-        _save_user_preferences(db, "tight_user", {
+        from api.routers.agent3_openclaw import _ensure_agent3_tables_async, _save_user_preferences_async
+        await _ensure_agent3_tables_async()
+        await _save_user_preferences_async("tight_user", {
             "external_cost_cap_usd_per_day": 0.01,
         })
         dispatcher_tight = Agent3ActionDispatcher(
