@@ -824,6 +824,9 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Deep-link : permet a sylea://auth/callback?token=... d'arriver dans
+        // l'app (utilise par Sign in with Apple via navigateur systeme).
+        .plugin(tauri_plugin_deep_link::init())
         .plugin({
             // macos_launcher est gate par cfg(target_os = "macos")
             #[cfg(target_os = "macos")]
@@ -868,6 +871,28 @@ fn main() {
             if let Err(e) = app.global_shortcut().register(toggle_shortcut_setup) {
                 eprintln!("Global shortcut register failed: {}", e);
             }
+
+            // Deep-link handler : sylea://auth/callback?token=...&...
+            // Sur macOS, Apple Sign-In dans le navigateur systeme aboutit a
+            // sylea://auth/callback?token=<JWT> qu'on emet vers la UI JS.
+            use tauri_plugin_deep_link::DeepLinkExt;
+            let app_handle_for_dl = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    let url_str = url.to_string();
+                    // On NE log JAMAIS le token, mais on log le scheme + path
+                    eprintln!("[deep-link] received: {} {}", url.scheme(), url.path());
+                    // Emit vers la UI pour traitement
+                    let _ = app_handle_for_dl.emit("deep-link:received", url_str);
+                    // Focus la fenetre principale pour que l'utilisateur voie
+                    // le resultat (au lieu de rester sur le navigateur)
+                    if let Some(w) = app_handle_for_dl.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+            });
+
             // If launched with --minimized (autostart), hide window at boot
             let args: Vec<String> = std::env::args().collect();
             if args.iter().any(|a| a == "--minimized") {

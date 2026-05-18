@@ -164,6 +164,36 @@ function App() {
   // depuis le bouton sidebar (Agent 2 only).
   const [ecouteActiveOpen, setEcouteActiveOpen] = useState(false)
 
+  // Sign in with Apple — deep-link callback handler.
+  // Quand l'utilisateur clique "Continuer avec Apple" depuis le desktop, on
+  // ouvre le navigateur systeme vers sylea.ai. Apres auth, le backend
+  // redirige vers sylea://auth/callback?token=<JWT>. macOS/Windows reconnait
+  // le scheme et lance Sylea Agent qui emet l'event 'deep-link:received'.
+  useEffect(() => {
+    const unsub = listen<string>('deep-link:received', (event) => {
+      try {
+        const url = new URL(event.payload)
+        if (url.protocol !== 'sylea:') return
+        // Chemin /auth/callback : extrait le token JWT, stocke localStorage
+        // et notifie le web (qui se reconnecte automatiquement via WS).
+        if (url.pathname === '/auth/callback' || url.hostname === 'auth') {
+          const token = url.searchParams.get('token')
+          if (token) {
+            localStorage.setItem('sylea_auth_token', token)
+            // Le web app sera notifie via storage event au refresh
+            // Notification UI minimale pour confirmer
+            console.log('[deep-link] Apple Sign-In token reçu, longueur:', token.length)
+          }
+        }
+      } catch (e) {
+        console.warn('[deep-link] URL invalide:', e)
+      }
+    })
+    return () => {
+      unsub.then((fn) => fn()).catch(() => {})
+    }
+  }, [])
+
   // Sprint 2.1 — Splash screen au premier mount (1.4s). Une seule fois par
   // session, pas re-affiche apres login/logout.
   const [splashDone, setSplashDone] = useState(false)

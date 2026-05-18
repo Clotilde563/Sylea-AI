@@ -69,8 +69,9 @@ _EXEMPT_PATH_PREFIXES: tuple[str, ...] = (
     "/api/auth/forgot-password",
     "/api/auth/reset-password",
     "/api/auth/verify-code",
-    "/api/auth/oauth/",       # OAuth Google/GitHub callbacks
+    "/api/auth/oauth/",       # OAuth Google/GitHub/Apple callbacks
     "/api/auth/callback",
+    "/api/auth/oauth/apple/callback",  # Apple form_post explicit exempt
     # Webhooks Stripe — signature dédiée, pas de CSRF
     "/api/stripe/webhook",
     # WebSocket handshake — token JWT en query string

@@ -402,6 +402,30 @@ export const api = {
       body: JSON.stringify({ code, redirect_uri: redirectUri }),
     }),
 
+  // Apple Sign-In
+  authAppleUrl: (redirectUri?: string, state: string = 'login'): Promise<{ url: string; state: string }> => {
+    const params = new URLSearchParams()
+    if (redirectUri) params.set('redirect_uri', redirectUri)
+    params.set('state', state)
+    return request(`/auth/oauth/apple/url?${params.toString()}`)
+  },
+
+  authOAuthApple: (
+    code: string,
+    redirectUri: string,
+    options?: { firstName?: string; lastName?: string; idToken?: string },
+  ): Promise<{ access_token: string }> =>
+    request('/auth/oauth/apple', {
+      method: 'POST',
+      body: JSON.stringify({
+        code,
+        redirect_uri: redirectUri,
+        first_name: options?.firstName,
+        last_name: options?.lastName,
+        id_token: options?.idToken,
+      }),
+    }),
+
   // ── Agent assistant (Agent Sylea 2) ──────────────────────────────────
 
   agent2Chat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string; proposal?: AgentProposal | null }> =>

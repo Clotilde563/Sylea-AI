@@ -319,6 +319,7 @@ export default function LoginPage() {
   const { login, register, verifyCode, error, clearError } = useAuthStore()
   const googleLogin = useAuthStore((s) => s.googleLogin)
   const githubLogin = useAuthStore((s) => s.githubLogin)
+  const appleLogin = useAuthStore((s) => s.appleLogin)
   const navigate = useNavigate()
 
   // Inject CSS animations
@@ -469,7 +470,15 @@ export default function LoginPage() {
         setSubmitting(false)
       }
     } else if (provider === 'apple') {
-      setLocalError('La connexion Apple sera bientot disponible.')
+      try {
+        setSubmitting(true)
+        await appleLogin()
+      } catch {
+        setLocalError(
+          "Erreur connexion Apple. Vérifiez que le serveur est démarré et qu'APPLE_CLIENT_ID est configuré.",
+        )
+        setSubmitting(false)
+      }
     } else {
       setLocalError(`Connexion ${provider} bientot disponible.`)
     }
@@ -544,6 +553,20 @@ export default function LoginPage() {
                 <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
               </svg>
               Continuer avec GitHub
+            </button>
+
+            {/* Apple Sign-In button */}
+            <button
+              className="login-btn-oauth"
+              style={styles.oauthBtnApple}
+              onClick={() => handleOAuth('apple')}
+              disabled={submitting}
+              aria-label="Continuer avec Apple"
+            >
+              <svg width="18" height="20" viewBox="0 0 18 20" fill="white" aria-hidden="true">
+                <path d="M17.0518 6.94336C16.9292 7.03906 14.5947 8.39062 14.5947 11.4082C14.5947 14.8984 17.5439 16.0742 17.6309 16.1064C17.6191 16.1797 17.1748 17.7012 16.1318 19.249C15.2236 20.6094 14.2734 21.9658 12.8262 21.9658C11.4023 21.9658 10.9111 21.0264 9.2832 21.0264C7.6709 21.0264 7.1064 21.998 5.7891 21.998C4.4717 21.998 3.5527 20.7393 2.5176 19.1973C1.2998 17.3672 0.314453 14.541 0.314453 11.8584C0.314453 7.55078 2.9961 5.26562 5.6357 5.26562C7.0244 5.26562 8.1797 6.16602 9.0479 6.16602C9.876 6.16602 11.166 5.2168 12.7363 5.2168C13.3252 5.2168 15.4307 5.27734 17.0518 6.94336ZM11.9971 3.51953C12.6562 2.74609 13.1182 1.66602 13.1182 0.585938C13.1182 0.4375 13.1064 0.286133 13.0791 0.166992C12.0078 0.205078 10.7344 0.880859 9.9707 1.77734C9.3633 2.47266 8.7969 3.55273 8.7969 4.64746C8.7969 4.81055 8.8242 4.97266 8.8359 5.02832C8.9072 5.04102 9.0205 5.05469 9.1338 5.05469C10.0928 5.05469 11.2998 4.40137 11.9971 3.51953Z" />
+              </svg>
+              Continuer avec Apple
             </button>
 
             {/* Divider */}
@@ -822,6 +845,23 @@ const styles: Record<string, React.CSSProperties> = {
     width: '100%',
     padding: '0.875rem 1.5rem',
     background: '#24292f',
+    color: 'white',
+    border: '1px solid rgba(255,255,255,0.15)',
+    borderRadius: '12px',
+    fontSize: '0.95rem',
+    fontWeight: 600,
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+    fontFamily: 'inherit',
+  },
+  oauthBtnApple: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '0.75rem',
+    width: '100%',
+    padding: '0.875rem 1.5rem',
+    background: '#000000',
     color: 'white',
     border: '1px solid rgba(255,255,255,0.15)',
     borderRadius: '12px',

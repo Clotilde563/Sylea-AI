@@ -7,7 +7,7 @@ import { api, API_BASE } from '../api/client'
 interface AuthUser {
   id: string
   email: string
-  provider: 'local' | 'google' | 'github'
+  provider: 'local' | 'google' | 'github' | 'apple'
 }
 
 interface AuthState {
@@ -23,6 +23,11 @@ interface AuthState {
   handleGoogleCallback: (code: string) => Promise<void>
   githubLogin: () => Promise<void>
   handleGithubCallback: (code: string) => Promise<void>
+  appleLogin: () => Promise<void>
+  handleAppleCallback: (
+    code: string,
+    options?: { firstName?: string; lastName?: string; idToken?: string },
+  ) => Promise<void>
   logout: () => void
   loadToken: () => void
   clearError: () => void
@@ -162,6 +167,47 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({ token, user, loading: false, error: null })
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Erreur callback Google'
+      set({ loading: false, error: msg })
+      throw e
+    }
+  },
+
+  appleLogin: async () => {
+    set({ loading: true, error: null })
+    try {
+      const redirectUri = `${window.location.origin}/auth/callback`
+      const { url } = await api.authAppleUrl(redirectUri)
+      window.location.href = url
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Erreur Apple Sign-In'
+      set({ loading: false, error: msg })
+    }
+  },
+
+  handleAppleCallback: async (
+    code: string,
+    options?: { firstName?: string; lastName?: string; idToken?: string },
+  ) => {
+    set({ loading: true, error: null })
+    try {
+      const redirectUri = `${window.location.origin}/auth/callback`
+      const data = await api.authOAuthApple(code, redirectUri, options)
+      const token = data.access_token
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      }
+      const meResp = await fetch(`${API_BASE}/api/auth/me`, { headers })
+      const user = meResp.ok
+        ? await meResp.json()
+        : { id: '', email: '', provider: 'apple' }
+
+      localStorage.setItem(AUTH_TOKEN_KEY, token)
+      localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user))
+      set({ token, user, loading: false, error: null })
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Erreur callback Apple'
       set({ loading: false, error: msg })
       throw e
     }

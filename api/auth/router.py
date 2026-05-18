@@ -11,10 +11,11 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from api.auth.models import RegisterIn, LoginIn, TokenOut, UserOut, OAuthIn
+from api.auth.models import RegisterIn, LoginIn, TokenOut, UserOut, OAuthIn, AppleOAuthIn
 from api.auth.security import hash_password, verify_password, create_access_token
 from api.dependencies import get_db
 
@@ -603,6 +604,184 @@ async def oauth_github(data: OAuthIn, db=Depends(get_db)):
 
     jwt_token = create_access_token(user["id"])
     return TokenOut(access_token=jwt_token)
+
+
+# ── OAuth Apple ───────────────────────────────────────────────────────────────
+
+@router.get("/oauth/apple/url")
+async def oauth_apple_url(redirect_uri: str = "", state: str = ""):
+    """Génère l'URL d'autorisation Apple. Le frontend redirige l'utilisateur dessus.
+
+    Note : Apple impose `response_mode=form_post` quand scope inclut name/email,
+    donc le redirect_uri DOIT pointer vers une URL backend qui accepte POST.
+    """
+    from api.auth.apple_oauth import build_authorize_url, get_apple_oauth_config
+
+    cfg = get_apple_oauth_config()
+    if not cfg["configured"]:
+        raise HTTPException(status_code=501, detail="Apple OAuth non configuré")
+
+    if not redirect_uri:
+        redirect_uri = os.environ.get("APPLE_REDIRECT_URI", "")
+    if not redirect_uri:
+        raise HTTPException(status_code=400, detail="redirect_uri requis")
+
+    # Génère un state anti-CSRF si non fourni
+    if not state:
+        state = uuid.uuid4().hex
+
+    url = build_authorize_url(redirect_uri=redirect_uri, state=state)
+    return {"url": url, "state": state}
+
+
+@router.post("/oauth/apple", response_model=TokenOut)
+async def oauth_apple(data: AppleOAuthIn, db=Depends(get_db)):
+    """Échange un code Apple contre un JWT Syléa.
+
+    Deux modes d'appel selon le canal :
+      - Web (Sign in with Apple JS) : le frontend reçoit le code et nous le
+        relaie, on échange contre id_token côté serveur (sécurisé : la clé
+        privée Apple reste server-side).
+      - Native (mobile / desktop natif) : la lib native renvoie déjà l'id_token
+        validé Apple ; on peut le passer directement via `id_token` pour éviter
+        l'aller-retour /auth/token (ce code reste accepté quand même).
+
+    Au PREMIER login, Apple ne renvoie le nom de l'utilisateur QUE dans le form
+    POST initial (pas dans l'id_token). Le frontend doit nous le transmettre
+    via `first_name` / `last_name` à ce moment-là.
+    """
+    from api.auth.apple_oauth import (
+        AppleUser,
+        exchange_code,
+        get_apple_oauth_config,
+        verify_id_token,
+    )
+
+    cfg = get_apple_oauth_config()
+    if not cfg["configured"]:
+        raise HTTPException(status_code=501, detail="Apple OAuth non configuré")
+
+    # Mode 1 : id_token déjà fourni (native flow) → vérification directe
+    if data.id_token:
+        try:
+            apple_user: AppleUser = await verify_id_token(data.id_token)
+        except ValueError as e:
+            raise HTTPException(status_code=401, detail=f"id_token Apple invalide : {e}")
+    else:
+        # Mode 2 : code → exchange → id_token → verify (web flow)
+        if not data.code:
+            raise HTTPException(status_code=400, detail="code ou id_token requis")
+        redirect_uri = data.redirect_uri or os.environ.get("APPLE_REDIRECT_URI", "")
+        if not redirect_uri:
+            raise HTTPException(status_code=400, detail="redirect_uri requis")
+        try:
+            tokens = await exchange_code(data.code, redirect_uri=redirect_uri)
+            apple_user = await verify_id_token(tokens.id_token)
+        except (ValueError, RuntimeError) as e:
+            # On NE log JAMAIS le code (one-time) ni les tokens
+            raise HTTPException(status_code=401, detail=f"Échec auth Apple : {e}")
+
+    apple_id = apple_user.sub
+    # Email obligatoire pour créer un compte. Si Apple ne nous le donne pas
+    # (cas relais privé révoqué), on génère un placeholder stable.
+    email = apple_user.email or f"apple-{apple_id}@privaterelay.appleid.com"
+
+    # 1) Compte Apple déjà lié ?
+    user = await _get_user_by_provider_async("apple", apple_id)
+    if user:
+        jwt_token = create_access_token(user["id"])
+        return TokenOut(access_token=jwt_token)
+
+    # 2) Sinon : email déjà connu en local ? On lie le compte.
+    existing = await _get_user_by_email_async(email)
+    if existing:
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        _factory = _gsf()
+        async with _factory() as _session:
+            try:
+                await _session.execute(
+                    _sa_text(
+                        "UPDATE users SET provider = 'apple', "
+                        "provider_id = :aid WHERE id = :uid"
+                    ),
+                    {"aid": apple_id, "uid": existing["id"]},
+                )
+                await _session.commit()
+            except Exception:
+                await _session.rollback()
+        user = existing
+    else:
+        # 3) Création d'un nouveau compte.
+        user = await _create_user_async(
+            email, provider="apple", provider_id=apple_id,
+        )
+
+    jwt_token = create_access_token(user["id"])
+    return TokenOut(access_token=jwt_token)
+
+
+@router.post("/oauth/apple/callback")
+async def oauth_apple_form_post_callback(
+    request: Request,
+    code: str = Form(...),
+    state: str = Form(""),
+    id_token: str | None = Form(None),
+    user: str | None = Form(None),  # JSON string : {"name":{"firstName":"...","lastName":"..."},"email":"..."}
+    error: str | None = Form(None),
+):
+    """Endpoint POST appelé par Apple (form_post mode) après authentification.
+
+    Apple impose `response_mode=form_post` quand scope inclut name/email.
+    Le browser de l'utilisateur fait donc un POST vers ce endpoint avec le
+    code, l'id_token et les données utilisateur en form-encoded.
+
+    On convertit en redirection 302 GET vers /auth/callback côté frontend
+    avec les query params attendus par AuthCallbackPage (state="apple_login",
+    code=..., first_name=..., last_name=...).
+    """
+    import json
+    import urllib.parse
+
+    frontend_base = os.environ.get("FRONTEND_BASE_URL", "http://localhost:5173").rstrip("/")
+
+    if error:
+        # Apple renvoie une erreur (ex. user_cancelled_authorize)
+        params = urllib.parse.urlencode({
+            "error": error,
+            "state": state or "apple_login",
+        })
+        return RedirectResponse(url=f"{frontend_base}/auth/callback?{params}", status_code=303)
+
+    # Parse les infos utilisateur (envoyées uniquement au PREMIER login)
+    first_name = ""
+    last_name = ""
+    if user:
+        try:
+            user_data = json.loads(user)
+            name = user_data.get("name", {}) if isinstance(user_data, dict) else {}
+            first_name = name.get("firstName", "") or ""
+            last_name = name.get("lastName", "") or ""
+        except Exception:
+            pass  # Apple peut envoyer du JSON malformé exceptionnellement
+
+    # Force state à apple_login pour que le frontend route correctement
+    forwarded_state = state if state.startswith("apple_") else "apple_login"
+
+    params = {
+        "code": code,
+        "state": forwarded_state,
+    }
+    if first_name:
+        params["first_name"] = first_name
+    if last_name:
+        params["last_name"] = last_name
+    if id_token:
+        # Optionnel : permet au frontend de vérifier le JWT sans réappel API
+        params["id_token"] = id_token
+
+    query = urllib.parse.urlencode(params)
+    return RedirectResponse(url=f"{frontend_base}/auth/callback?{query}", status_code=303)
 
 
 # ── Me (current user info) ────────────────────────────────────────────────────
