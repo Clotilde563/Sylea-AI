@@ -43,3 +43,17 @@ stripe>=10.0.0
 # fakeredis : mock in-process pour tests sans Redis server
 redis>=5.0.0
 fakeredis>=2.20.0
+
+# ─── Tier 1 observabilite / sso / feature flags (2026-05-18) ─────────────────
+# PyYAML : feature flags backend Local (config/feature_flags.yaml)
+PyYAML>=6.0
+
+# Dependances OPTIONNELLES (decommenter selon le besoin prod) :
+# sentry-sdk[fastapi]>=2.0      # error tracking + APM (init via SENTRY_DSN)
+# growthbook>=1.0                # feature flags backend prod (SaaS ou self-host)
+# python3-saml>=1.16             # SSO SAML 2.0 (Okta / Azure AD / Google W.)
+# hvac>=2.0                      # secrets backend HashiCorp Vault
+# boto3>=1.34                    # secrets backend AWS Secrets Manager
+# google-cloud-secret-manager>=2.0  # secrets backend GCP Secret Manager
+# opentelemetry-distro>=0.45     # tracing distribue (Datadog / Honeycomb)
+# opentelemetry-instrumentation-fastapi>=0.45

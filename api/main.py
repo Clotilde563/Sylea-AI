@@ -39,6 +39,13 @@ try:
 except ImportError:
     pass
 
+# ── Structured logging + Sentry (avant les autres imports) ───────────────────
+from api.logging_setup import configure_logging, RequestContextMiddleware
+configure_logging()
+
+from api.error_tracking import init_sentry
+init_sentry()
+
 from api.dependencies import get_optional_user
 from api.routers import profil, dilemme, historique, evenement, bilan, objectifs, service_client
 from api.routers.agent_companion import router as agent_companion_router
@@ -164,6 +171,9 @@ from api.ip_rate_limiter import IPRateLimitMiddleware
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(IPRateLimitMiddleware)
+# RequestContextMiddleware en DERNIER ajout = exécuté EN PREMIER (LIFO).
+# Génère le request_id avant tout le reste pour qu'il soit dans tous les logs.
+app.add_middleware(RequestContextMiddleware)
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 
@@ -221,6 +231,27 @@ def health_security():
             ),
         },
         "secrets": list_active_backend_info(),
+    }
+
+
+@app.get("/api/health/observability", tags=["system"])
+def health_observability():
+    """Diagnostic logging + Sentry + feature flags + LLM router."""
+    from api.error_tracking import get_config as sentry_config
+    from api.feature_flags import list_features
+    from api.llm_router import get_router_config
+
+    return {
+        "logging": {
+            "level": os.environ.get("SYLEA_LOG_LEVEL", "INFO"),
+            "format": os.environ.get("SYLEA_LOG_FORMAT", "auto"),
+        },
+        "sentry": sentry_config(),
+        "feature_flags": {
+            "backend": os.environ.get("SYLEA_FF_BACKEND", "local"),
+            "count": len(list_features()),
+        },
+        "llm_router": get_router_config(),
     }
 
 

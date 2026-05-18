@@ -1,0 +1,78 @@
+# Feature flags Syléa.AI — fichier versionné en repo.
+#
+# Format :
+#   features:
+#     <flag_name>:
+#       description: <texte libre>
+#       default: <on|off|control|treatment_a|...>
+#       rules:
+#         - user_id_in: [...]        # whitelist d'IDs précis
+#           user_tier_in: [...]      # ["advanced", "enterprise"]
+#           country_in: [...]        # ISO 3166-1 alpha-2
+#           start_at: <unix_ts>      # activation programmée
+#           end_at: <unix_ts>        # désactivation programmée
+#           rollout_pct: 0-100       # % d'utilisateurs ciblés
+#           variant: <on|...>
+#
+# La première règle qui matche gagne. Si aucune ne matche : default.
+
+features:
+  # ─── Canary releases ─────────────────────────────────────────────────────
+  new_dilemma_engine:
+    description: "Nouveau moteur d'analyse de dilemmes (V2 — plus rapide, meilleure qualité)"
+    default: "off"
+    rules:
+      # 1) Whitelist beta-testers internes
+      - user_id_in: []  # remplir avec les IDs internes en prod
+        variant: "on"
+      # 2) Tous les Enterprise (canary à eux)
+      - user_tier_in: ["enterprise"]
+        variant: "on"
+      # 3) Rollout 5% du reste
+      - rollout_pct: 5
+        variant: "on"
+
+  prompt_caching_anthropic:
+    description: "Active le prompt caching Anthropic (économie 40-60%)"
+    default: "on"  # safe — déjà testé
+
+  # ─── A/B testing ─────────────────────────────────────────────────────────
+  onboarding_flow:
+    description: "Variante du parcours d'onboarding profil"
+    default: "control"
+    rules:
+      # 50/50 split sur les nouveaux utilisateurs
+      - rollout_pct: 50
+        variant: "treatment_a"
+
+  # ─── Kill switches (à activer sur incident) ──────────────────────────────
+  agent2_skills_disabled:
+    description: "Kill switch Agent 2 — désactiver toutes les actions de skills"
+    default: "off"
+
+  semantic_memory_disabled:
+    description: "Kill switch — désactiver la mémoire sémantique"
+    default: "off"
+
+  # ─── Time-based ──────────────────────────────────────────────────────────
+  new_pricing_v2:
+    description: "Affiche les nouveaux tarifs (lancement 2026-06-01)"
+    default: "off"
+    rules:
+      - start_at: 1748736000  # 2026-06-01 00:00 UTC
+        variant: "on"
+
+  # ─── Tier-gated features ─────────────────────────────────────────────────
+  advanced_statistics:
+    description: "Page Statistiques avancées (graphiques cumulés)"
+    default: "off"
+    rules:
+      - user_tier_in: ["advanced", "enterprise"]
+        variant: "on"
+
+  enterprise_audit_log:
+    description: "Export audit log au format CSV (Enterprise only)"
+    default: "off"
+    rules:
+      - user_tier_in: ["enterprise"]
+        variant: "on"
