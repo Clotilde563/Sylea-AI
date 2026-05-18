@@ -124,11 +124,11 @@ export default function TermsPage() {
         <p>
           Le Service propose, à titre principal, les fonctionnalités suivantes : (i) un moteur déterministe de calcul de
           probabilité de réussite d'un objectif de vie déclaré ; (ii) des analyses générées par intelligence artificielle
-          (modèles Claude d'Anthropic, GPT d'OpenAI ou équivalents) portant sur des dilemmes, événements et choix ;
-          (iii) trois agents conversationnels intelligents (Agent Syléa 1 — Compagnon, Agent Syléa 2 — Assistant exécutant,
-          Agent Syléa 3 — Agent autonome avancé) ; (iv) des outils d'analyse statistique et de suivi temporel des objectifs ;
-          (v) des fonctionnalités collaboratives (workspaces partagés, mentorat, défis communautaires) ; (vi) des
-          intégrations tierces optionnelles (Google Calendar, Gmail, Drive, GitHub, Notion, Slack, etc.).
+          (modèles Claude d'Anthropic) portant sur des dilemmes, événements et choix de vie ; (iii) deux agents
+          conversationnels textuels (Agent Syléa 1 — Compagnon, Agent Syléa 2 — Assistant) ; (iv) des outils d'analyse
+          statistique et de suivi temporel des objectifs ; (v) des fonctionnalités collaboratives (espaces partagés,
+          mentorat communautaire) ; (vi) des intégrations tierces optionnelles (Google Calendar, Gmail, Drive, GitHub et
+          autres au fur et à mesure de leur déploiement).
         </p>
         <p>
           Syléa se réserve la possibilité, à tout moment et sans préavis, de modifier, suspendre, supprimer ou ajouter

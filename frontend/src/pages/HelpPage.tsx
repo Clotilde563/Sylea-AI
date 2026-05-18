@@ -111,13 +111,13 @@ function ContactForm() {
       <div className="input-group">
         <label className="input-label" htmlFor="help-msg">Message</label>
         <textarea id="help-msg" className="input" rows={4}
-          placeholder="Decrivez votre question ou probleme..."
+          placeholder="Décrivez votre question ou problème..."
           value={message} onChange={e => setMessage(e.target.value)} required
           style={{ resize: 'vertical', minHeight: 80, fontFamily: 'var(--font-sans)' }} />
       </div>
       <button type="submit" className="btn btn-primary" disabled={sent}
         style={{ alignSelf: 'flex-start', padding: '0.55rem 1.5rem' }}>
-        {sent ? 'Message envoye !' : 'Envoyer'}
+        {sent ? 'Message envoyé !' : 'Envoyer'}
       </button>
     </form>
   )
@@ -139,11 +139,59 @@ export default function HelpPage() {
           Aide et ressources
         </h1>
         <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
-          Tout ce que vous devez savoir pour utiliser Sylea.AI
+          Tout ce que vous devez savoir pour utiliser Syléa.AI
         </p>
       </div>
 
-      {/* ── Telecharger Syléa Desktop (cible de l'ancre #telecharger-desktop) ── */}
+      {/* ── Bandeau Support détaillé ───────────────────────────────────── */}
+      <section style={{
+        background: 'linear-gradient(135deg, rgba(139,92,246,0.10), rgba(99,102,241,0.10))',
+        border: '1px solid rgba(139,92,246,0.30)',
+        borderRadius: 14,
+        padding: '1rem 1.25rem',
+        marginBottom: '2rem',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: '1rem',
+        flexWrap: 'wrap',
+      }}>
+        <div style={{ flex: 1, minWidth: 220 }}>
+          <div style={{
+            fontSize: '0.92rem',
+            fontWeight: 600,
+            color: 'var(--text-primary)',
+            marginBottom: '0.25rem',
+          }}>
+            Besoin d'aide détaillée ?
+          </div>
+          <div style={{
+            fontSize: '0.76rem',
+            color: 'var(--text-secondary)',
+            lineHeight: 1.5,
+          }}>
+            Consultez notre centre de support complet avec plus de 20 problèmes
+            fréquents et leurs solutions étape par étape.
+          </div>
+        </div>
+        <Link
+          to="/support"
+          style={{
+            background: 'var(--accent-violet)',
+            color: '#fff',
+            padding: '0.55rem 1.1rem',
+            borderRadius: 8,
+            textDecoration: 'none',
+            fontSize: '0.82rem',
+            fontWeight: 600,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          Ouvrir le centre de support →
+        </Link>
+      </section>
+
+      {/* ── Télécharger Syléa Desktop (cible de l'ancre #telecharger-desktop) ── */}
       <section id="telecharger-desktop" style={{
         background: 'linear-gradient(135deg, rgba(6,182,212,0.08), rgba(139,92,246,0.08))',
         border: '1px solid rgba(99,102,241,0.28)',
@@ -169,11 +217,11 @@ export default function HelpPage() {
           lineHeight: 1.6,
           margin: '0 0 1rem',
         }}>
-          L'app desktop est ce qui permet a Syléa d'agir concretement :
-          ecrire tes emails, planifier ton agenda, creer des pages Notion.
-          Tes donnees restent sur ton ordinateur — Syléa les utilise mais ne
+          L'application desktop est ce qui permet à Syléa d'agir concrètement :
+          écrire vos emails, planifier votre agenda, créer des pages Notion.
+          Vos données restent sur votre ordinateur — Syléa les utilise mais ne
           les envoie nulle part. Installation en 2 minutes, sans commande
-          a taper.
+          à taper.
         </p>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
           <a
@@ -220,7 +268,7 @@ export default function HelpPage() {
             <span style={{ fontSize: '1.5rem' }}>&#x1F34F;</span>
             <span>Mac / Linux</span>
             <span style={{ fontSize: '0.7rem', fontWeight: 400 }}>
-              bientot
+              bientôt
             </span>
           </a>
         </div>
@@ -229,77 +277,77 @@ export default function HelpPage() {
           color: 'var(--text-muted)',
           lineHeight: 1.5,
         }}>
-          &#x1F511; <b>Apres installation :</b> lance l'app, laisse le wizard
-          installer OpenClaw (1-2 minutes), choisis tes skills (calendrier,
-          email...), puis clique sur &laquo; Ouvrir Syléa sur le web &raquo;.
-          Tu verras apparaitre un point vert en haut du site &mdash; c'est
-          gagne.
+          &#x1F511; <b>Après installation :</b> lancez l'application, laissez le wizard
+          installer OpenClaw (1-2 minutes), choisissez vos skills (calendrier,
+          email...), puis cliquez sur &laquo; Ouvrir Syléa sur le web &raquo;.
+          Vous verrez apparaître un point vert en haut du site &mdash; c'est
+          gagné.
         </div>
       </section>
 
       {/* ── Premiers pas ────────────────────────────────────────────── */}
       <CategorySection icon="&#x1F4F1;" title="Premiers pas">
-        <Accordion title="Comment creer un profil" defaultOpen>
+        <Accordion title="Comment créer un profil" defaultOpen>
           <ol style={{ paddingLeft: '1.25rem', margin: '0.25rem 0' }}>
-            <li>Depuis le tableau de bord, cliquez sur "Creer mon profil" dans le menu deroulant</li>
-            <li>Remplissez l'etape 1 (Identite) : nom, age, profession, ville, objectif de vie</li>
-            <li>Repondez aux questions personnalisees generees par l'IA (etape 2)</li>
-            <li>Completez vos scores de bien-etre et votre emploi du temps (etape 3)</li>
-            <li>Cliquez sur "Creer mon profil" pour finaliser</li>
+            <li>Depuis le tableau de bord, cliquez sur «&nbsp;Créer mon profil&nbsp;» dans le menu déroulant</li>
+            <li>Remplissez l'étape 1 (Identité) : nom, âge, profession, ville, objectif de vie</li>
+            <li>Répondez aux questions personnalisées générées par l'IA (étape 2)</li>
+            <li>Complétez vos scores de bien-être et votre emploi du temps (étape 3)</li>
+            <li>Cliquez sur «&nbsp;Créer mon profil&nbsp;» pour finaliser</li>
           </ol>
         </Accordion>
         <Accordion title="Comment analyser un choix">
           <ol style={{ paddingLeft: '1.25rem', margin: '0.25rem 0' }}>
-            <li>Cliquez sur "Analyser un choix" dans la barre de navigation</li>
-            <li>Selectionnez l'impact temporel de votre decision (1 jour, 1 semaine, etc.)</li>
-            <li>Entrez vos differentes options (minimum 2, maximum 5)</li>
-            <li>Cliquez sur "Analyser avec Sylea.AI"</li>
-            <li>Consultez le verdict : avantages, inconvenients et recommandation pour chaque option</li>
-            <li>Choisissez une option pour mettre a jour votre probabilite</li>
+            <li>Cliquez sur «&nbsp;Analyser un choix&nbsp;» dans la barre de navigation</li>
+            <li>Sélectionnez l'impact temporel de votre décision (1 jour, 1 semaine, etc.)</li>
+            <li>Entrez vos différentes options (minimum 2, maximum 5)</li>
+            <li>Cliquez sur «&nbsp;Analyser avec Syléa.AI&nbsp;»</li>
+            <li>Consultez le verdict : avantages, inconvénients et recommandation pour chaque option</li>
+            <li>Choisissez une option pour mettre à jour votre probabilité</li>
           </ol>
         </Accordion>
-        <Accordion title="Comment enregistrer un evenement">
+        <Accordion title="Comment enregistrer un événement">
           <ol style={{ paddingLeft: '1.25rem', margin: '0.25rem 0' }}>
-            <li>Depuis le tableau de bord, cliquez sur "Enregistrer un evenement"</li>
-            <li>Decrivez l'evenement (vous pouvez aussi utiliser la saisie vocale)</li>
+            <li>Depuis le tableau de bord, cliquez sur «&nbsp;Enregistrer un événement&nbsp;»</li>
+            <li>Décrivez l'événement au clavier</li>
             <li>L'IA analysera automatiquement l'impact sur votre objectif</li>
-            <li>Confirmez l'evenement pour mettre a jour votre probabilite</li>
+            <li>Confirmez l'événement pour mettre à jour votre probabilité</li>
           </ol>
         </Accordion>
         <Accordion title="Comment utiliser le bilan quotidien">
           <ol style={{ paddingLeft: '1.25rem', margin: '0.25rem 0' }}>
-            <li>Cliquez sur "Bilan du jour" depuis le tableau de bord</li>
-            <li>Renseignez vos scores de bien-etre (sante, stress, energie, bonheur)</li>
-            <li>Ajustez votre repartition du temps quotidien</li>
-            <li>Optionnel : decrivez votre journee et l'IA remplira les scores automatiquement</li>
+            <li>Cliquez sur «&nbsp;Bilan du jour&nbsp;» depuis le tableau de bord</li>
+            <li>Renseignez vos scores de bien-être (santé, stress, énergie, bonheur)</li>
+            <li>Ajustez votre répartition du temps quotidien</li>
+            <li>Optionnel : décrivez votre journée et l'IA remplira les scores automatiquement</li>
             <li>Enregistrez votre bilan (un seul par jour)</li>
           </ol>
         </Accordion>
       </CategorySection>
 
-      {/* ── Fonctionnalites ─────────────────────────────────────────── */}
-      <CategorySection icon="&#x1F4CA;" title="Fonctionnalites">
-        <Accordion title="Comprendre la probabilite de reussite">
+      {/* ── Fonctionnalités ─────────────────────────────────────────── */}
+      <CategorySection icon="&#x1F4CA;" title="Fonctionnalités">
+        <Accordion title="Comprendre la probabilité de réussite">
           <p>
-            La probabilite de reussite est calculee par un moteur deterministe combine a une analyse IA.
-            Elle prend en compte votre profil, vos competences, votre bien-etre, le temps restant
-            avant votre deadline et l'historique de vos decisions. Chaque decision ou evenement
-            peut faire varier cette probabilite.
+            La probabilité de réussite est calculée par un moteur déterministe combiné à une analyse IA.
+            Elle prend en compte votre profil, vos compétences, votre bien-être, le temps restant
+            avant votre deadline et l'historique de vos décisions. Chaque décision ou événement
+            peut faire varier cette probabilité.
           </p>
         </Accordion>
         <Accordion title="Les sous-objectifs et leur progression">
           <p>
-            Sylea.AI genere automatiquement 4 sous-objectifs strategiques lies a votre objectif de vie.
-            Leur progression est sequentielle : completez le premier avant de passer au suivant.
-            Le sous-objectif actif est marque "a prioriser". La duree estimee de chaque sous-objectif
-            est proportionnelle a la duree totale de votre objectif.
+            Syléa.AI génère automatiquement 4 sous-objectifs stratégiques liés à votre objectif de vie.
+            Leur progression est séquentielle : complétez le premier avant de passer au suivant.
+            Le sous-objectif actif est marqué «&nbsp;à prioriser&nbsp;». La durée estimée de chaque sous-objectif
+            est proportionnelle à la durée totale de votre objectif.
           </p>
         </Accordion>
-        <Accordion title='Le plan d&apos;action "Que faire"'>
+        <Accordion title='Le plan d&apos;action « Que faire »'>
           <p>
-            Cliquez sur "Que faire ?" depuis le tableau de bord pour generer un plan d'action quotidien.
-            L'IA propose des taches concretes liees a votre objectif, accompagnees de ressources
-            (videos, formations, articles). Completer une tache augmente votre probabilite et
+            Cliquez sur «&nbsp;Que faire ?&nbsp;» depuis le tableau de bord pour générer un plan d'action quotidien.
+            L'IA propose des tâches concrètes liées à votre objectif, accompagnées de ressources
+            (vidéos, formations, articles). Compléter une tâche augmente votre probabilité et
             fait progresser vos sous-objectifs.
           </p>
         </Accordion>
@@ -308,66 +356,72 @@ export default function HelpPage() {
             La page Statistiques propose deux graphiques principaux :
           </p>
           <ul style={{ paddingLeft: '1.25rem', margin: '0.25rem 0' }}>
-            <li><strong>Courbe theorique</strong> : evolution de la probabilite en fonction du temps restant</li>
-            <li><strong>Progression reelle</strong> : historique de vos decisions et leur impact cumule</li>
+            <li><strong>Courbe théorique</strong> : évolution de la probabilité en fonction du temps restant</li>
+            <li><strong>Progression réelle</strong> : historique de vos décisions et leur impact cumulé</li>
           </ul>
           <p>
-            Des cartes de statistiques affichent le nombre de decisions, le gain de probabilite total,
-            le temps economise et le temps restant estime.
+            Des cartes de statistiques affichent le nombre de décisions, le gain de probabilité total,
+            le temps économisé et le temps restant estimé.
           </p>
         </Accordion>
       </CategorySection>
 
-      {/* ── Agent Sylea 1 ───────────────────────────────────────────── */}
-      <CategorySection icon="&#x1F916;" title="Agent Sylea 1">
-        <Accordion title="Comment activer l'agent">
+      {/* ── Agents Syléa ───────────────────────────────────────────── */}
+      <CategorySection icon="&#x1F916;" title="Agents Syléa">
+        <Accordion title="Agent Syléa 1 — Compagnon">
           <p>
-            Rendez-vous sur "Mes agents Sylea" dans la barre de navigation. Cliquez sur
-            "Activer cet agent" et confirmez. Une fois actif, l'agent vous contactera
-            regulierement pour prendre de vos nouvelles.
+            L'Agent Syléa 1 est un compagnon conversationnel textuel. Il prend
+            régulièrement de vos nouvelles, retient le contexte de vos échanges
+            et enrichit vos analyses futures. Activez-le depuis la page
+            «&nbsp;Mes agents Syléa&nbsp;» dans la barre de navigation.
           </p>
         </Accordion>
-        <Accordion title="Les messages vocaux">
+        <Accordion title="Agent Syléa 2 — Assistant">
           <p>
-            Maintenez le bouton microphone pour enregistrer un message vocal. L'agent
-            comprend le francais et peut repondre par synthese vocale. Les messages vocaux
-            sont transcrits automatiquement.
+            L'Agent Syléa 2 est un assistant exécutant qui peut effectuer des
+            actions concrètes via les skills installés sur votre application
+            desktop (envoyer un email, créer un événement, prendre des notes,
+            etc.). Chaque action exécutée nécessite votre validation explicite.
           </p>
         </Accordion>
-        <Accordion title="Les appels vocaux">
+        <Accordion title="Comment activer un agent">
           <p>
-            L'agent peut initier des appels vocaux pour des conversations plus naturelles.
-            Vous pouvez repondre par la voix et l'agent adaptera ses reponses en temps reel.
+            Rendez-vous sur «&nbsp;Mes agents Syléa&nbsp;» dans la barre de navigation.
+            Cliquez sur «&nbsp;Activer cet agent&nbsp;» et confirmez. Une fois actif,
+            l'agent vous contactera régulièrement par message texte pour
+            prendre de vos nouvelles.
           </p>
         </Accordion>
         <Accordion title="Les messages proactifs">
           <p>
-            L'agent prend de vos nouvelles tous les 3 jours environ. Il sauvegarde automatiquement
-            les informations partagees pour enrichir vos analyses futures. Vous recevez une
-            notification (point rouge) quand un nouveau message est disponible.
+            L'agent prend de vos nouvelles tous les 3 jours environ par message
+            écrit. Il sauvegarde automatiquement les informations partagées
+            pour enrichir vos analyses futures. Vous recevez une notification
+            (point rouge) quand un nouveau message est disponible.
           </p>
         </Accordion>
       </CategorySection>
 
-      {/* ── Parametres ──────────────────────────────────────────────── */}
-      <CategorySection icon="&#x2699;&#xFE0F;" title="Parametres">
+      {/* ── Paramètres ──────────────────────────────────────────────── */}
+      <CategorySection icon="&#x2699;&#xFE0F;" title="Paramètres">
         <Accordion title="Changer la langue">
           <p>
-            Allez dans Parametres {">"} Langue. 13 langues sont disponibles. La langue
-            selectionnee s'applique a l'ensemble de l'interface.
+            Allez dans Paramètres {">"} Langue. Plusieurs langues sont disponibles.
+            La langue sélectionnée s'applique à l'ensemble de l'interface.
           </p>
         </Accordion>
-        <Accordion title="Modifier la securite">
+        <Accordion title="Modifier la sécurité">
           <p>
-            Dans Parametres {">"} Securite, vous pouvez ajouter un mot de passe ou un schema
-            de verrouillage pour proteger l'acces a votre application. Vous pouvez egalement
+            Dans Paramètres {">"} Sécurité, vous pouvez ajouter un mot de passe ou un schéma
+            de verrouillage pour protéger l'accès à votre application. Vous pouvez également
             supprimer le verrouillage existant.
           </p>
         </Accordion>
         <Accordion title="Modifier mon profil">
           <p>
-            Depuis le menu deroulant, cliquez sur "Modifier mon profil". Attention : modifier
-            votre objectif de vie reinitialise tout votre historique (decisions, sous-objectifs, taches).
+            Depuis le menu déroulant, cliquez sur «&nbsp;Modifier mon profil&nbsp;». Attention :
+            modifier votre objectif de vie réinitialise tout votre historique (décisions,
+            sous-objectifs, tâches).
           </p>
         </Accordion>
       </CategorySection>
@@ -376,40 +430,44 @@ export default function HelpPage() {
       <CategorySection icon="&#x2753;" title="FAQ">
         <Accordion title="L'application est-elle gratuite ?">
           <p>
-            Oui, Sylea.AI est gratuite dans sa version web avec l'Agent 1 inclus.
-            Des fonctionnalites avancees pourront etre proposees dans des versions futures.
+            Oui, Syléa.AI est gratuite dans sa version web avec l'Agent 1 inclus.
+            Des fonctionnalités avancées pourront être proposées dans des versions futures.
           </p>
         </Accordion>
-        <Accordion title="Mes donnees sont-elles securisees ?">
+        <Accordion title="Mes données sont-elles sécurisées ?">
           <p>
-            Vos donnees sont chiffrees et stockees de maniere securisee. Nous respectons
-            le RGPD et vous avez un droit d'acces, de rectification et de suppression
-            de vos donnees a tout moment. Consultez notre{' '}
+            Vos données sont chiffrées et stockées de manière sécurisée. Nous respectons
+            le RGPD et vous avez un droit d'accès, de rectification et de suppression
+            de vos données à tout moment. Consultez notre{' '}
             <Link to="/privacy" style={{ color: 'var(--accent-violet-light)' }}>
-              Politique de confidentialite
+              Politique de confidentialité
             </Link>{' '}
-            pour plus de details.
+            pour plus de détails.
           </p>
         </Accordion>
         <Accordion title="Comment supprimer mon compte ?">
           <p>
-            Pour supprimer votre compte et toutes vos donnees, contactez-nous par email
-            a sylea.ai.assistance@gmail.com ou via le formulaire de contact ci-dessous. La suppression
-            sera effective dans un delai de 30 jours.
+            Pour supprimer votre compte et toutes vos données, contactez-nous par email
+            à sylea.ai.assistance@gmail.com ou via le formulaire de contact ci-dessous. La suppression
+            sera effective dans un délai de 30 jours.
           </p>
         </Accordion>
-        <Accordion title="L'IA est-elle fiable a 100% ?">
+        <Accordion title="L'IA est-elle fiable à 100 % ?">
           <p>
-            L'IA donne des estimations basees sur les donnees que vous fournissez et sur
-            des modeles statistiques avances. Cependant, elle ne garantit pas les resultats.
-            Les recommandations sont des outils d'aide a la decision, pas des certitudes.
-            Vous restez maitre de vos choix.
+            Non. L'IA donne des estimations basées sur les données que vous fournissez et sur
+            des modèles statistiques avancés. Elle ne garantit aucun résultat.
+            Les recommandations sont des outils d'aide à la décision, pas des certitudes.
+            Vous restez maître de vos choix. Consultez nos{' '}
+            <Link to="/terms" style={{ color: 'var(--accent-violet-light)' }}>
+              Conditions générales d'utilisation
+            </Link>{' '}
+            pour le détail de notre obligation de moyens.
           </p>
         </Accordion>
-        <Accordion title="Puis-je utiliser l'app sur mobile ?">
+        <Accordion title="Puis-je utiliser l'application sur mobile ?">
           <p>
-            L'application est actuellement optimisee pour les navigateurs desktop.
-            Le responsive mobile est en cours de developpement pour offrir une experience
+            L'application est actuellement optimisée pour les navigateurs desktop.
+            Le responsive mobile est en cours de développement pour offrir une expérience
             optimale sur tous les appareils.
           </p>
         </Accordion>
@@ -418,7 +476,7 @@ export default function HelpPage() {
       {/* ── Contact ─────────────────────────────────────────────────── */}
       <CategorySection icon="&#x1F4E7;" title="Contact">
         <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
-          Une question ? Un probleme ? Contactez-nous par email a <strong>sylea.ai.assistance@gmail.com</strong> ou
+          Une question ? Un problème ? Contactez-nous par email à <strong>sylea.ai.assistance@gmail.com</strong> ou
           utilisez le formulaire ci-dessous.
         </p>
         <ContactForm />

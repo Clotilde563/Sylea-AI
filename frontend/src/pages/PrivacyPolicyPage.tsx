@@ -106,11 +106,10 @@ export default function PrivacyPolicyPage() {
           <li><strong>Données de profil professionnel et personnel</strong> : profession, situation familiale, objectif de vie déclaré, compétences, diplômes, langues parlées, revenu annuel déclaré, patrimoine estimé déclaré, charges mensuelles déclarées.</li>
           <li><strong>Données de bien-être déclarées</strong> : scores auto-évalués de santé, stress, énergie, bonheur (échelle de 1 à 10), volumes horaires quotidiens déclarés (travail, sommeil, loisirs, transport, objectif).</li>
           <li><strong>Données comportementales et décisionnelles</strong> : choix soumis à analyse, événements enregistrés, options sélectionnées, impact temporel calculé, bilans quotidiens, sous-objectifs créés.</li>
-          <li><strong>Données conversationnelles</strong> : intégralité des messages échangés avec les agents intelligents (Agent Syléa 1, 2, 3), y compris les messages vocaux et leur transcription textuelle automatique.</li>
+          <li><strong>Données conversationnelles</strong> : intégralité des messages textuels échangés avec les agents conversationnels intégrés au Service (Agent Syléa 1 — Compagnon, Agent Syléa 2 — Assistant), incluant le contenu des conversations et les métadonnées associées (horodatage, contexte).</li>
           <li><strong>Données techniques</strong> : adresse IP, identifiants de session, user-agent du navigateur, type d'appareil, système d'exploitation, fuseau horaire, langue préférée, géolocalisation approximative (ville uniquement, sur la base du consentement explicite ou de l'adresse IP), données de météo locale (fournies par un tiers).</li>
-          <li><strong>Données vocales et biométriques</strong> : enregistrements audio des messages vocaux émis par l'utilisateur, conservés tant que l'utilisateur n'en demande pas la suppression. Aucune analyse biométrique d'identification n'est effectuée.</li>
           <li><strong>Données financières (paiements)</strong> : montants payés, identifiants d'abonnement, historique de facturation. Les données de carte bancaire ne sont jamais collectées ni stockées par Syléa : elles sont traitées exclusivement par notre prestataire Stripe, certifié PCI-DSS niveau 1.</li>
-          <li><strong>Données d'intégration tierce</strong> : tokens d'accès OAuth Google, GitHub, Notion, Slack, etc. (chiffrés par algorithme Fernet AES-128-CBC + HMAC-SHA256 avant stockage en base de données).</li>
+          <li><strong>Données d'intégration tierce</strong> : jetons d'accès OAuth (Google, GitHub, et autres fournisseurs au fur et à mesure de leur déploiement), chiffrés par algorithme Fernet (AES-128-CBC + HMAC-SHA256) avant stockage en base de données.</li>
         </ul>
         <p>
           L'utilisateur est seul responsable de l'exactitude des données qu'il déclare. Syléa ne procède à aucune vérification
@@ -126,7 +125,7 @@ export default function PrivacyPolicyPage() {
           finalités spécifiquement poursuivies :
         </p>
         <ul style={{ paddingLeft: '1rem', margin: '0.4rem 0' }}>
-          <li><strong>Consentement libre, éclairé, spécifique et univoque (art. 6.1.a RGPD)</strong> pour l'ensemble des données de profil étendu, données de bien-être, données conversationnelles, données vocales et données de géolocalisation précise. Ce consentement peut être retiré à tout moment sans porter atteinte à la licéité du traitement effectué avant retrait.</li>
+          <li><strong>Consentement libre, éclairé, spécifique et univoque (art. 6.1.a RGPD)</strong> pour l'ensemble des données de profil étendu, données de bien-être, données conversationnelles et données de géolocalisation précise. Ce consentement peut être retiré à tout moment sans porter atteinte à la licéité du traitement effectué avant retrait.</li>
           <li><strong>Exécution du contrat (art. 6.1.b RGPD)</strong> pour la fourniture effective du Service auquel l'utilisateur a souscrit, y compris la création et la maintenance du compte, l'exécution des analyses demandées, la facturation des prestations.</li>
           <li><strong>Intérêt légitime (art. 6.1.f RGPD)</strong> pour les données techniques nécessaires au fonctionnement, à la sécurité, à la prévention des fraudes et abus, à l'amélioration du Service, ainsi que pour les communications opérationnelles non promotionnelles.</li>
           <li><strong>Obligation légale (art. 6.1.c RGPD)</strong> pour la conservation des données comptables et fiscales conformément aux durées légales (10 ans pour les pièces comptables, code de commerce art. L.123-22).</li>
@@ -155,7 +154,7 @@ export default function PrivacyPolicyPage() {
         </p>
         <ul style={{ paddingLeft: '1rem', margin: '0.4rem 0' }}>
           <li><strong>Anthropic, Inc.</strong> (Claude API) — analyses par modèles de langage, génération de réponses conversationnelles. Hébergement aux États-Unis. Garanties : Data Processing Addendum signé, conformité SOC 2 Type II, clauses contractuelles types (CCT) UE-USA.</li>
-          <li><strong>OpenAI, L.L.C.</strong> — synthèse vocale (text-to-speech) et fonctionnalités complémentaires. Hébergement aux États-Unis. Mêmes garanties contractuelles que pour Anthropic.</li>
+          <li><strong>OpenAI, L.L.C.</strong> — fonctionnalités complémentaires d'intelligence artificielle. Hébergement aux États-Unis. Mêmes garanties contractuelles que pour Anthropic.</li>
           <li><strong>Stripe Payments Europe Ltd.</strong> — traitement des paiements par carte bancaire. Conformité PCI-DSS niveau 1. Aucune donnée bancaire ne transite par les serveurs de Syléa.</li>
           <li><strong>Open-Meteo GmbH</strong> — données météorologiques publiques basées sur la géolocalisation approximative déclarée.</li>
           <li><strong>Hébergeurs techniques</strong> : Railway Corp (États-Unis), Vercel Inc. (États-Unis), Supabase Inc. (Singapour/USA) ou tout autre fournisseur équivalent. Tous nos hébergeurs sont liés par des accords de traitement (DPA) et fournissent des garanties contractuelles strictes.</li>
@@ -197,8 +196,8 @@ export default function PrivacyPolicyPage() {
           <li>Données de compte et de profil : tant que le compte est actif, augmenté d'un délai de 30 jours après la
             demande de clôture pour permettre l'exécution effective de l'effacement et la résolution d'éventuels litiges
             relatifs aux dernières opérations.</li>
-          <li>Données conversationnelles et vocales : 180 jours glissants à compter de leur création, sauf demande expresse
-            de prolongation par l'utilisateur ou suppression anticipée à sa demande.</li>
+          <li>Données conversationnelles avec les agents : 180 jours glissants à compter de leur création, sauf demande
+            expresse de prolongation par l'utilisateur ou suppression anticipée à sa demande.</li>
           <li>Données techniques (logs de connexion, logs applicatifs) : 12 mois maximum, conformément aux recommandations
             de la CNIL et aux obligations issues du décret n° 2011-219 relatif à la conservation des données.</li>
           <li>Données comptables, fiscales et de facturation : 10 ans à compter de la clôture de l'exercice comptable,

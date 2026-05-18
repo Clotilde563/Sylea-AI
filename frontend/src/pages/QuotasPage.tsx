@@ -143,28 +143,24 @@ export default function QuotasPage() {
 
   // ── Feature lists (validees avec utilisateur) ──────────────────────────
   const FREE_FEATURES: Array<{ label: string; state: FeatureState }> = [
-    { label: 'Agent Sylea 1 (compagnon personnel)', state: 'included' },
+    { label: 'Agent Syléa 1 (compagnon personnel)', state: 'included' },
     { label: 'Profil personnalisé + objectif de vie', state: 'included' },
     { label: 'Analyse de choix, évènements et messages Agent 1 — limité à 10 actions / jour', state: 'included' },
     { label: 'Suivi de progression simplifié', state: 'included' },
     { label: '« Que faire ? » — plan d\'action IA quotidien', state: 'excluded' },
-    { label: 'Agent Sylea 2 (assistant exécutant)', state: 'excluded' },
-    { label: 'Sylea Desktop (mails, calendrier, notes…)', state: 'excluded' },
-    { label: 'Coaching Vocal', state: 'excluded' },
+    { label: 'Agent Syléa 2 (assistant exécutant)', state: 'excluded' },
+    { label: 'Syléa Desktop (mails, calendrier, notes…)', state: 'excluded' },
     { label: 'Intégrations', state: 'excluded' },
-    { label: 'Outils Agent 3', state: 'excluded' },
   ]
 
   const ADVANCED_FEATURES: Array<{ label: string; state: FeatureState }> = [
-    { label: 'Agent Sylea 1 + Agent Sylea 2 (assistant exécutant)', state: 'included' },
+    { label: 'Agent Syléa 1 + Agent Syléa 2 (assistant exécutant)', state: 'included' },
     { label: '« Que faire ? » — plan d\'action IA quotidien', state: 'included' },
-    { label: 'Sylea Desktop (mails, calendrier, notes, prise de cours…)', state: 'included' },
+    { label: 'Syléa Desktop (mails, calendrier, notes, prise de cours…)', state: 'included' },
     { label: 'Analyses, évènements et messages — limité à 30 actions / jour', state: 'included' },
     { label: 'Statistiques avancées + courbes de progression', state: 'included' },
     { label: 'Notifications intelligentes & vérifications de tâches', state: 'included' },
-    { label: 'Coaching Vocal', state: 'excluded' },
     { label: 'Intégrations', state: 'excluded' },
-    { label: 'Outils Agent 3', state: 'excluded' },
   ]
 
   return (

@@ -487,7 +487,7 @@ export function DashboardPage() {
             <ActionCard
               emoji={'✦'}
               title={t('dashboard.que_faire')}
-              desc={'🔒 Disponible avec Sylea Avancé — clique pour découvrir'}
+              desc={'🔒 Disponible avec Syléa Avancé — cliquez pour découvrir'}
               onClick={() => navigate('/quotas')}
             />
           ) : (
@@ -495,7 +495,7 @@ export function DashboardPage() {
             emoji={'\u2726'}
             title={t('dashboard.que_faire')}
             desc={tachesEnCours
-              ? `${tachesData!.taches.filter(t => t.completee).length}/${tachesData!.taches.length} taches completees — Cliquez pour voir`
+              ? `${tachesData!.taches.filter(t => t.completee).length}/${tachesData!.taches.length} tâches complétées — Cliquez pour voir`
               : tachesData && tachesData.statut !== 'en_cours'
                 ? (tachesData.statut === 'terminee' ? "Taches terminees pour aujourd'hui" : "Taches abandonnees pour aujourd'hui")
                 : "Generez votre plan d'action quotidien par l'IA"

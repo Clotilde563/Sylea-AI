@@ -1,5 +1,5 @@
-// Page Outils — Gestion fine des 38 outils OpenClaw (Agent 3)
-// Chaque outil peut etre active/desactive au niveau utilisateur en plus du profil agent.
+// Page Outils — Gestion fine des outils OpenClaw
+// Chaque outil peut être activé/désactivé au niveau utilisateur en plus du profil agent.
 
 import { useState, useEffect, useMemo } from 'react'
 import { api } from '../api/client'
@@ -379,13 +379,13 @@ export default function OutilsPage() {
           color: 'var(--text-muted)', fontSize: '0.875rem',
           marginBottom: '0.25rem', textTransform: 'uppercase', letterSpacing: '0.1em',
         }}>
-          Agent 3 — OpenClaw
+          Outils OpenClaw
         </p>
         <h1 style={{ fontSize: '1.75rem', color: 'var(--accent-silver)', marginBottom: '0.5rem' }}>
           Outils ({activeTools}/{totalTools} actifs)
         </h1>
         <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', lineHeight: 1.5 }}>
-          Controlez precisement quels outils l'agent peut utiliser. Les outils sensibles (email, terminal, automation) sont signales d'un{' '}
+          Contrôlez précisément quels outils l'agent peut utiliser. Les outils sensibles (email, terminal, automation) sont signalés d'un{' '}
           <span style={{ color: '#f59e0b' }}>⚠️</span>.
           {data.has_user_overrides && (
             <span style={{ marginLeft: '0.5rem', color: '#8b5cf6' }}>

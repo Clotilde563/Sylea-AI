@@ -14,20 +14,15 @@ import type { AnalyseDilemme, Decision } from '../types'
 type Phase = 'form' | 'loading' | 'result' | 'done'
 
 // ── Active agent detection ───────────────────────────────────────────────────
-function getActiveAgent(): { id: 1 | 2 | 3; name: string; colors: { primary: string; gradient: string; bg: string; border: string; btnBg: string; btnColor: string } } | null {
+function getActiveAgent(): { id: 1 | 2; name: string; colors: { primary: string; gradient: string; bg: string; border: string; btnBg: string; btnColor: string } } | null {
   const a1 = localStorage.getItem('sylea_agent1_active') === 'true'
   const a2 = localStorage.getItem('sylea_agent2_active') === 'true'
-  const a3 = localStorage.getItem('sylea_agent3_active') === 'true'
-  if (a3) return {
-    id: 3, name: 'Agent Sylea 3',
-    colors: { primary: AGENT_COLORS.agent3.primary, gradient: 'linear-gradient(135deg, #1e3a5f, #2563eb, #d4a017, #fbbf24)', bg: 'rgba(37,99,235,0.08)', border: 'rgba(37,99,235,0.3)', btnBg: 'linear-gradient(135deg, #2563eb, #d4a017)', btnColor: 'white' },
-  }
   if (a2) return {
-    id: 2, name: 'Agent Sylea 2',
+    id: 2, name: 'Agent Syléa 2',
     colors: { primary: AGENT_COLORS.agent2.primary, gradient: 'linear-gradient(135deg, #b91c1c, #ef4444, #f87171)', bg: 'rgba(239,68,68,0.08)', border: 'rgba(239,68,68,0.3)', btnBg: 'linear-gradient(135deg, #b91c1c, #ef4444)', btnColor: 'white' },
   }
   if (a1) return {
-    id: 1, name: 'Agent Sylea 1',
+    id: 1, name: 'Agent Syléa 1',
     colors: { primary: AGENT_COLORS.agent1.primary, gradient: 'linear-gradient(135deg, #d4a017, #f59e0b, #fbbf24)', bg: 'rgba(212,160,23,0.08)', border: 'rgba(212,160,23,0.3)', btnBg: 'linear-gradient(135deg, #d4a017, #f59e0b)', btnColor: '#0d0d14' },
   }
   return null

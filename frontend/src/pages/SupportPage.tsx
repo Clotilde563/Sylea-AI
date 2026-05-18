@@ -95,24 +95,24 @@ const FAQ_DATA: FAQItem[] = [
     ],
   },
 
-  // ─── Catégorie : Agents IA ────────────────────────────────────────────────
+  // ─── Catégorie : Agents Syléa ─────────────────────────────────────────────
   {
     category: 'Agents Syléa',
-    question: 'L\'Agent Syléa 1 ne me répond pas / répond très lentement',
+    question: 'L\'Agent Syléa 1 (Compagnon) ne me répond pas ou répond très lentement',
     steps: [
       'Vérifiez votre connexion Internet (test sur un autre site web).',
       'Patientez 30 à 60 secondes : la génération par IA peut prendre du temps selon la longueur de la réponse.',
       'Rechargez la page (F5 ou Ctrl+R).',
-      'Si l\'Agent répond « Agent indisponible — clé API manquante », c\'est un problème de configuration côté serveur : signalez-le à sylea.ai.assistance@gmail.com.',
+      'Si l\'agent répond « Agent indisponible — clé API manquante », il s\'agit d\'un problème de configuration côté serveur : signalez-le à sylea.ai.assistance@gmail.com.',
       'Si vous obtenez « Quota quotidien atteint », vous avez utilisé votre limite journalière. Patientez jusqu\'à minuit (UTC) ou passez à un plan supérieur.',
-      'Vérifiez que l\'Agent Syléa 1 est bien activé dans la section « Mes agents ».',
+      'Vérifiez que l\'Agent Syléa 1 est bien activé dans la section « Mes agents Syléa ».',
     ],
   },
   {
     category: 'Agents Syléa',
     question: 'L\'Agent Syléa 2 (Assistant) est inaccessible',
     steps: [
-      'L\'Agent Syléa 2 est réservé aux plans Avancé, Team et Enterprise. Avec le plan Gratuit, vous obtenez une erreur 403.',
+      'L\'Agent Syléa 2 est réservé aux plans payants (Avancé et supérieurs). Avec le plan Gratuit, vous obtenez une erreur 403.',
       'Pour y accéder, passez à un plan payant depuis la page « Quotas et abonnements ».',
       'Si vous êtes déjà sur un plan payant et obtenez 403, vérifiez que votre abonnement est actif (page Quotas).',
       'En cas de problème de paiement, contactez sylea.ai.assistance@gmail.com.',
@@ -120,19 +120,10 @@ const FAQ_DATA: FAQItem[] = [
   },
   {
     category: 'Agents Syléa',
-    question: 'L\'Agent Syléa 3 (autonome) répond « Agent Sylea 3 est réservé aux plans Team et Enterprise »',
-    steps: [
-      'L\'Agent 3 nécessite un plan Team ou Enterprise en raison de ses capacités avancées (exécution de code, recherche web, manipulation de fichiers).',
-      'Souscrivez au plan Team depuis la page Quotas.',
-      'Pour un usage Enterprise (équipes), contactez sylea.ai.assistance@gmail.com pour un devis personnalisé.',
-    ],
-  },
-  {
-    category: 'Agents Syléa',
     question: 'L\'agent me répète les mêmes messages proactifs',
     steps: [
-      'Ce comportement est désormais corrigé : un cooldown minimum de 24 heures est appliqué entre deux messages proactifs.',
-      'Si vous voyez encore d\'anciens messages dupliqués, ils ont été générés avant la correction. Vous pouvez les ignorer ou supprimer la conversation depuis le menu « Effacer la conversation » dans l\'agent.',
+      'Ce comportement est désormais corrigé : un délai minimum de 24 heures est appliqué entre deux messages proactifs.',
+      'Si vous voyez encore d\'anciens messages dupliqués, ils ont été générés avant la correction. Vous pouvez les ignorer ou effacer la conversation depuis le menu « Effacer la conversation » dans l\'agent.',
       'Pour désactiver complètement les notifications proactives : Paramètres > Notifications > Désactiver « Messages proactifs ».',
     ],
   },
@@ -143,7 +134,7 @@ const FAQ_DATA: FAQItem[] = [
       'Les analyses produites par l\'intelligence artificielle peuvent comporter des erreurs, biais ou imprécisions. Elles constituent une AIDE À LA DÉCISION et non une décision en elle-même.',
       'Vérifiez que votre profil est complet et à jour (nom, âge, profession, objectif). Plus le profil est précis, plus les recommandations sont pertinentes.',
       'Reformulez votre question en étant plus spécifique (contexte, contraintes, alternatives).',
-      'Utilisez le bouton « 👎 » sous chaque message pour signaler une réponse insatisfaisante : Syléa apprend de ces retours pour améliorer la qualité.',
+      'Utilisez le bouton « pouce vers le bas » sous chaque message pour signaler une réponse insatisfaisante : Syléa s\'appuie sur ces retours pour améliorer la qualité au fil du temps.',
       'Pour les décisions importantes (santé, finances, juridique), consultez systématiquement un professionnel qualifié. Le Service ne remplace en aucun cas un avis professionnel.',
     ],
     severity: 'warning',

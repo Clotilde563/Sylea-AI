@@ -422,7 +422,7 @@ export default function LoginPage() {
       setVerificationCode(['', '', '', '', '', ''])
       setTab('login')
       setPassword('')
-      setSuccessMsg('Compte verifie ! Connectez-vous.')
+      setSuccessMsg('Compte vérifié ! Connectez-vous.')
     } catch { /* error in store */ } finally { setSubmitting(false) }
   }
 

@@ -8,6 +8,8 @@ import { useToast } from '../components/Toast'
 
 // Agent 2 feature flag — set to true when desktop version is ready
 const AGENT2_ENABLED = true
+// Agent 3 feature flag — masqué tant que la fonctionnalité n'est pas opérationnelle
+const AGENT3_ENABLED = false
 
 // VoiceCall is only used by Agent 2 — import kept but component only rendered when AGENT2_ENABLED is true
 import VoiceCall from '../components/VoiceCall'
@@ -2953,8 +2955,8 @@ export default function AgentsPage() {
     { name: 'Super Agent Sylea', subtitle: 'Cerveau autonome 24/7', desc: 'Agit pour vous pendant que vous dormez' },
   ]
 
-  // ── Agent 3 Chat view ────────────────────────────────────────────────────
-  if (chat3Open) {
+  // ── Agent 3 Chat view — masque tant que AGENT3_ENABLED = false ─────────
+  if (AGENT3_ENABLED && chat3Open) {
     return (
       <div className="page animate-fade-in" style={{ flex: 1, height: 'calc(100vh - 3.5rem - 3rem)', minHeight: 0, maxHeight: 'calc(100vh - 3.5rem - 3rem)', overflow: 'hidden' }}>
         <style>{`
@@ -7321,10 +7323,8 @@ export default function AgentsPage() {
             box-shadow: 0 0 0 2px rgba(37,99,235,0.15), 0 0 0 4px rgba(212,160,23,0.08) !important;
           }
         `}</style>
-        {/* Agent 3 verrouille — pas dispo pour free ni pour avance (a venir).
-            On force l'etat "grise" avec opacity reduite et tout interaction
-            (boutons, click) desactivee. */}
-        <div style={{
+        {/* Agent 3 verrouille — masque tant que la fonctionnalite n'est pas operationnelle */}
+        {AGENT3_ENABLED && (<div style={{
           display: 'flex', alignItems: 'center', gap: '1rem',
           background: 'var(--bg-surface)',
           border: '1px solid rgba(255,255,255,0.06)',
@@ -7435,7 +7435,7 @@ export default function AgentsPage() {
               Disponible bientôt
             </span>
           </div>
-        </div>
+        </div>)}
 
         {/* Future agent placeholder cards */}
         {futureAgents.map((agent, i) => (
@@ -7491,13 +7491,13 @@ export default function AgentsPage() {
         />
       )}
 
-      {/* ── Voice Call overlay (Agent 3) ── */}
-      {inCall3 && (
+      {/* ── Voice Call overlay (Agent 3) — masque ── */}
+      {AGENT3_ENABLED && inCall3 && (
         <VoiceCall
           onEndCall={() => setInCall3(false)}
           onMessage={handleVoiceCallMessage3}
           agentColor="#2563eb"
-          agentName="Agent Sylea 3"
+          agentName="Agent Syléa 3"
           chatEndpoint={agent3ChatEndpoint}
         />
       )}
@@ -7718,8 +7718,8 @@ export default function AgentsPage() {
         </div>
       )}
 
-      {/* ── Agent 3 Activation modal ── */}
-      {showActivateModal3 && (
+      {/* ── Agent 3 Activation modal — masque ── */}
+      {AGENT3_ENABLED && showActivateModal3 && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 1000,
           background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)',
@@ -8290,8 +8290,8 @@ export default function AgentsPage() {
         </div>
       )}
 
-      {/* ── Agent 3 Deactivation modal ── */}
-      {showDeactivateModal3 && (
+      {/* ── Agent 3 Deactivation modal — masque ── */}
+      {AGENT3_ENABLED && showDeactivateModal3 && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 1000,
           background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)',

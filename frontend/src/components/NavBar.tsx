@@ -196,39 +196,6 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
                 </div>
               </button>
 
-              {/* Outils Agent 3 — temporairement greye, "à venir" */}
-              <button
-                disabled
-                aria-disabled="true"
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.6rem',
-                  width: '100%', padding: '0.75rem 1rem',
-                  background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
-                  color: 'var(--text-muted)', fontSize: '0.82rem',
-                  cursor: 'not-allowed', textAlign: 'left',
-                  opacity: 0.55,
-                }}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-                </svg>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 500, color: 'var(--text-secondary)' }}>
-                    Outils Agent 3
-                    <span style={{
-                      fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.05em',
-                      padding: '0.08rem 0.4rem', borderRadius: 999,
-                      background: 'rgba(245,158,11,0.15)', color: '#fbbf24',
-                      border: '1px solid rgba(245,158,11,0.3)',
-                      textTransform: 'uppercase',
-                    }}>
-                      À venir
-                    </span>
-                  </div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Activer/désactiver les capacités de l'agent</div>
-                </div>
-              </button>
-
               {/* Phase 10/11 entries */}
               <button
                 onClick={() => { setDropdownOpen(false); navigate('/quotas') }}
@@ -321,39 +288,6 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
                 <div>
                   <div style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{t('nav.service')}</div>
                   <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>{t('nav.service_desc')}</div>
-                </div>
-              </button>
-
-              {/* Coaching Vocal — temporairement greye, "à venir" */}
-              <button
-                disabled
-                aria-disabled="true"
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.6rem',
-                  width: '100%', padding: '0.75rem 1rem',
-                  background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
-                  color: 'var(--text-muted)', fontSize: '0.82rem',
-                  cursor: 'not-allowed', textAlign: 'left',
-                  opacity: 0.55,
-                }}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
-                </svg>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 500, color: 'var(--text-secondary)' }}>
-                    Coaching Vocal
-                    <span style={{
-                      fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.05em',
-                      padding: '0.08rem 0.4rem', borderRadius: 999,
-                      background: 'rgba(245,158,11,0.15)', color: '#fbbf24',
-                      border: '1px solid rgba(245,158,11,0.3)',
-                      textTransform: 'uppercase',
-                    }}>
-                      À venir
-                    </span>
-                  </div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Sessions hebdo, bilans et récaps</div>
                 </div>
               </button>
 
