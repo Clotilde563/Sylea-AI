@@ -36,6 +36,7 @@ import QuotasPage           from './pages/QuotasPage'
 import AdminPage            from './pages/AdminPage'
 import WorkspacesPage       from './pages/WorkspacesPage'
 import { ProgressionDecisionsPage } from './pages/ProgressionDecisionsPage'
+import { SupportPage } from './pages/SupportPage'
 import { ToastProvider }    from './components/Toast'
 
 // ── Application ───────────────────────────────────────────────────────────────
@@ -63,6 +64,7 @@ function AppContent() {
         <Route path="/privacy" element={<PrivacyPolicyPage />} />
         <Route path="/terms" element={<TermsPage />} />
         <Route path="/help" element={<HelpPage />} />
+        <Route path="/support" element={<SupportPage />} />
 
         {/* Route splash legacy (navigation directe à /splash) */}
         <Route path="/splash" element={<SplashPage />} />
@@ -125,10 +127,13 @@ function AppContent() {
                   </span>
                   <span style={{ marginLeft: '1.5rem' }}>
                     <a href="/privacy" style={{ color: 'var(--text-muted)', textDecoration: 'none', marginRight: '0.75rem' }}>
-                      Confidentialite
+                      Confidentialité
                     </a>
-                    <a href="/terms" style={{ color: 'var(--text-muted)', textDecoration: 'none' }}>
+                    <a href="/terms" style={{ color: 'var(--text-muted)', textDecoration: 'none', marginRight: '0.75rem' }}>
                       CGU
+                    </a>
+                    <a href="/support" style={{ color: 'var(--accent-violet-light)', textDecoration: 'none', fontWeight: 500 }}>
+                      Support &amp; aide
                     </a>
                   </span>
                 </footer>
