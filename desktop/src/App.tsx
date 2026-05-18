@@ -13,7 +13,13 @@ import { CountUp } from './CountUp'
 import { SlideIn } from './Motion'
 import { EcouteActive } from './EcouteActive'
 
-const API_BASE = 'http://localhost:8000'
+// API backend URL. En dev : localhost. En prod : configurable via VITE_API_BASE
+// (au build Tauri) ou via window.localStorage 'sylea_api_base' (modifiable user).
+const API_BASE = (
+  (typeof window !== 'undefined' && window.localStorage?.getItem('sylea_api_base')) ||
+  (import.meta.env as any)?.VITE_API_BASE ||
+  'http://localhost:8000'
+)
 
 // ── Palette officielle tech ────────────────────────────────────────────────
 // Source de verite : desktop/index.html (variables CSS --sy-*)
@@ -445,7 +451,9 @@ function App() {
 
     const connect = () => {
       if (isCleaningUp) return
-      const ws = new WebSocket(`ws://localhost:8000/ws/agent?token=${token}`)
+      // WS URL derive de API_BASE : http:// -> ws://, https:// -> wss://
+      const wsBase = API_BASE.replace(/^http/, 'ws')
+      const ws = new WebSocket(`${wsBase}/ws/agent?token=${token}`)
       wsRef.current = ws
 
       ws.onopen = () => {
