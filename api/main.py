@@ -150,6 +150,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Middlewares de sécurité niveau pro ───────────────────────────────────────
+# Ordre important : Starlette applique les middlewares dans l'ordre INVERSE
+# d'ajout (LIFO). On veut donc :
+#   1) IP rate limit (premier rempart, avant tout traitement)
+#   2) CSRF protection (vérifie cookies/headers)
+#   3) Security headers (pose les headers sur la réponse finale)
+# → ordre d'ajout : security_headers d'abord, puis CSRF, puis IP rate limit.
+from api.security_headers import SecurityHeadersMiddleware
+from api.csrf_middleware import CSRFMiddleware
+from api.ip_rate_limiter import IPRateLimitMiddleware
+
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(CSRFMiddleware)
+app.add_middleware(IPRateLimitMiddleware)
+
 # ── Routers ───────────────────────────────────────────────────────────────────
 
 app.include_router(profil.router)
@@ -179,6 +194,34 @@ app.include_router(pending_router)
 def health_check():
     """Liveness check — retourne 200 si l'API est opérationnelle."""
     return HealthOut(status="ok", version="1.0.0")
+
+
+@app.get("/api/health/security", tags=["system"])
+def health_security():
+    """Diagnostic des middlewares de sécurité (sans valeur sensible).
+
+    Retourne uniquement les drapeaux on/off et les paramètres publics
+    (capacités, modes). Aucun secret n'est exposé. Utile pour audits.
+    """
+    from api.security_headers import get_security_headers_config
+    from api.ip_rate_limiter import get_ip_rate_limit_config
+    from api.secrets_manager import list_active_backend_info
+
+    return {
+        "security_headers": get_security_headers_config(),
+        "ip_rate_limit": get_ip_rate_limit_config(),
+        "csrf": {
+            "enabled": os.environ.get("SYLEA_DISABLE_CSRF", "").strip().lower()
+                        not in ("1", "true", "yes", "on"),
+            "cookie_secure": os.environ.get(
+                "SYLEA_CSRF_COOKIE_SECURE", ""
+            ).strip().lower() in ("1", "true", "yes", "on"),
+            "cookie_samesite": os.environ.get(
+                "SYLEA_CSRF_COOKIE_SAMESITE", "lax"
+            ),
+        },
+        "secrets": list_active_backend_info(),
+    }
 
 
 # ── WebSocket pour le desktop ─────────────────────────────────────────────────

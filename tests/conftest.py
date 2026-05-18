@@ -13,11 +13,25 @@ Helpers DB partages (migration PG 2026-05-13) :
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Désactivation par défaut des middlewares de sécurité dans les tests.
+# Chaque module de test ciblé (test_csrf_middleware, test_ip_rate_limiter,
+# test_security_headers) override ces flags via monkeypatch dans ses fixtures.
+# Sans ça, les tests legacy qui appellent POST sans token CSRF échouent en 403.
+#
+# Doit être appliqué AVANT que `api.main` ne soit importé par un test, donc
+# au top-level du conftest (importé en premier par pytest).
+# ─────────────────────────────────────────────────────────────────────────────
+os.environ.setdefault("SYLEA_DISABLE_CSRF", "true")
+os.environ.setdefault("SYLEA_DISABLE_IP_RATELIMIT", "true")
+os.environ.setdefault("SYLEA_DISABLE_SECURITY_HEADERS", "true")
 
 
 def pytest_configure(config):
