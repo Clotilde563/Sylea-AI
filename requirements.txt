@@ -37,3 +37,9 @@ pyperclip>=1.8.0
 
 # Stripe (Agent 3 — Phase 13 — paiements Pro/Team)
 stripe>=10.0.0
+
+# Cache distribue (migration 2026-05-17 : in-memory -> Redis pour multi-worker)
+# redis     : client Redis async (cache_layer + distributed_rate_limiter)
+# fakeredis : mock in-process pour tests sans Redis server
+redis>=5.0.0
+fakeredis>=2.20.0

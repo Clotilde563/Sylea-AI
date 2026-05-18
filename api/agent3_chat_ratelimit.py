@@ -122,10 +122,30 @@ def check_chat_rate_limit(user_id: str | None) -> tuple[bool, float]:
     """Raccourci : (allowed, retry_after_s).
 
     Bypass auto sous pytest (PYTEST_CURRENT_TEST) ou via SYLEA_DISABLE_CHAT_RATELIMIT=1.
+
+    Mode in-memory (sync) — pour contexte sync. Si vous etes dans un endpoint
+    async, preferez `check_chat_rate_limit_async` qui utilise le rate limiter
+    distribue (Redis Lua atomique).
     """
     if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("SYLEA_DISABLE_CHAT_RATELIMIT") == "1":
         return True, 0.0
     return get_chat_limiter().acquire(user_id)
+
+
+async def check_chat_rate_limit_async(user_id: str | None) -> tuple[bool, float]:
+    """Version async distribuée (Redis Lua atomique quand REDIS_URL defini).
+
+    Migration 2026-05-17 : utilise `api.distributed_rate_limiter.chat_native_limiter`
+    pour la coherence multi-worker. Fallback in-memory si Redis indisponible.
+    """
+    if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("SYLEA_DISABLE_CHAT_RATELIMIT") == "1":
+        return True, 0.0
+    try:
+        from api.distributed_rate_limiter import chat_native_limiter
+        return await chat_native_limiter.acquire(user_id)
+    except Exception:
+        # Fallback in-memory si distributed_rate_limiter cassé
+        return get_chat_limiter().acquire(user_id)
 
 
 def get_chat_rate_stats() -> dict[str, Any]:
