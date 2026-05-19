@@ -203,12 +203,23 @@ export function DashboardPage() {
             />
             <div>
             <p className="eyebrow" style={{ marginBottom: 4 }}>{t('dashboard.bon_retour')}</p>
-            <h1 style={{
-              fontSize: 'var(--fs-3xl)', fontWeight: 700,
-              letterSpacing: 'var(--tracking-tight)',
-              color: 'var(--text-primary)',
-              marginBottom: 6, lineHeight: 1.1,
-            }}>{profil.nom}</h1>
+            {/* Nom de l'utilisateur + badge éclair (compteur d'actions du jour) sur
+                la même ligne. L'éclair est placé entre le nom et le graphique de
+                progression (qui est positionné absolu plus à droite). */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', marginBottom: 6 }}>
+              <h1 style={{
+                fontSize: 'var(--fs-3xl)', fontWeight: 700,
+                letterSpacing: 'var(--tracking-tight)',
+                color: 'var(--text-primary)',
+                margin: 0, lineHeight: 1.1,
+              }}>{profil.nom}</h1>
+              <ActionLightning
+                size={44}
+                showLimit
+                onClick={() => navigate('/quotas')}
+                style={{ padding: '8px 16px 8px 10px', fontSize: '1.15rem' }}
+              />
+            </div>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <span style={{ color: 'var(--text-secondary)' }}>{profil.profession}</span>
               <span style={{ width: 3, height: 3, borderRadius: '50%', background: 'var(--text-muted)', opacity: 0.5 }} />
@@ -216,15 +227,8 @@ export function DashboardPage() {
             </p>
             </div>
           </div>
-          {/* Logo Syléa + badge éclair (compteur d'actions quotidien) à droite */}
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
-            <SyleaLogo size={52} animated={false} />
-            <ActionLightning
-              size={18}
-              showLimit
-              onClick={() => navigate('/quotas')}
-            />
-          </div>
+          {/* Logo Syléa à droite */}
+          <SyleaLogo size={52} animated={false} />
           {/* Mini-graphique de progression — positionne en ABSOLU pour ne pas
               imposer sa hauteur (170px) au hero. Centre verticalement sur la
               bio, et place a droite (juste a gauche du logo). pointer-events:

@@ -5798,8 +5798,9 @@ export default function AgentsPage() {
 
             {/* Badge eclair : compteur d'actions restantes aujourd'hui */}
             <ActionLightning
-              size={18}
+              size={32}
               onClick={() => window.location.assign('/quotas')}
+              style={{ padding: '6px 12px 6px 8px', fontSize: '0.95rem' }}
             />
 
             {/* Voice auto-play toggle */}
@@ -6426,8 +6427,9 @@ export default function AgentsPage() {
 
             {/* Badge eclair : compteur d'actions restantes aujourd'hui */}
             <ActionLightning
-              size={18}
+              size={32}
               onClick={() => window.location.assign('/quotas')}
+              style={{ padding: '6px 12px 6px 8px', fontSize: '0.95rem' }}
             />
 
             {/* Voice auto-play toggle */}
