@@ -9,8 +9,10 @@
       <stop offset="65%"  stop-color="#0090e0"/>
       <stop offset="100%" stop-color="#00c8ff"/>
     </linearGradient>
-    <!-- Halo flou pour la lueur extérieure -->
-    <filter id="sl-halo">
+    <!-- Halo flou pour la lueur extérieure (région étendue pour éviter
+         le rectangle visible autour du logo) -->
+    <filter id="sl-halo" x="-100%" y="-100%" width="300%" height="300%"
+            filterUnits="objectBoundingBox">
       <feGaussianBlur stdDeviation="5"/>
     </filter>
   </defs>

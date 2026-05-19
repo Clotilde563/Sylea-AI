@@ -15,6 +15,7 @@ const AGENT3_ENABLED = false
 import VoiceCall from '../components/VoiceCall'
 import FeedbackButton from '../components/FeedbackButton'
 import { ProposalCard } from '../components/ProposalCard'
+import { ActionLightning } from '../components/ActionLightning'
 
 // Agent 3 Plan Mode / Permissions / Cost UI (Claude-Code-inspired, ethically reimplemented)
 import {
@@ -5788,12 +5789,19 @@ export default function AgentsPage() {
               <path d={S_PATH} stroke="#050810" strokeWidth="18" fill="none" strokeLinecap="butt" />
             </svg>
             <div style={{ flex: 1 }}>
-              <p style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)', lineHeight: 1.2 }}>Agent Sylea 2</p>
+              <p style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)', lineHeight: 1.2 }}>Agent Syléa 2</p>
               <p style={{ fontSize: '0.7rem', color: '#4ade80', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
                 <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', display: 'inline-block' }} />
                 {t('agents.status_active')}
               </p>
             </div>
+
+            {/* Badge eclair : compteur d'actions restantes aujourd'hui */}
+            <ActionLightning
+              variant="compact"
+              size={16}
+              onClick={() => window.location.assign('/quotas')}
+            />
 
             {/* Voice auto-play toggle */}
             {isTTSSupported() && (
@@ -6410,12 +6418,19 @@ export default function AgentsPage() {
             </button>
             <AgentSyleaLogo size={24} />
             <div style={{ flex: 1 }}>
-              <p style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)', lineHeight: 1.2 }}>Agent Sylea 1</p>
+              <p style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)', lineHeight: 1.2 }}>Agent Syléa 1</p>
               <p style={{ fontSize: '0.7rem', color: '#4ade80', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
                 <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', display: 'inline-block' }} />
                 {t('agents.status_active')}
               </p>
             </div>
+
+            {/* Badge eclair : compteur d'actions restantes aujourd'hui */}
+            <ActionLightning
+              variant="compact"
+              size={16}
+              onClick={() => window.location.assign('/quotas')}
+            />
 
             {/* Voice auto-play toggle */}
             {isTTSSupported() && (

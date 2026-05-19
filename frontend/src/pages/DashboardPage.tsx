@@ -7,6 +7,7 @@ import { SyleaLogo } from '../components/SyleaLogo'
 import ProfilePhotoAvatar from '../components/ProfilePhotoAvatar'
 import { PendingVerificationBanner } from '../components/PendingVerificationBanner'
 import { ObjectiveProgressMini } from '../components/ObjectiveProgressMini'
+import { ActionLightning } from '../components/ActionLightning'
 import { usePlan } from '../hooks/usePlan'
 import { useStore } from '../store/useStore'
 import { useT } from '../i18n/LanguageContext'
@@ -215,8 +216,15 @@ export function DashboardPage() {
             </p>
             </div>
           </div>
-          {/* Logo Syléa seul dans le flux flex à droite. */}
-          <SyleaLogo size={52} animated={false} />
+          {/* Logo Syléa + badge éclair (compteur d'actions quotidien) à droite */}
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
+            <SyleaLogo size={52} animated={false} />
+            <ActionLightning
+              variant="badge"
+              size={16}
+              onClick={() => navigate('/quotas')}
+            />
+          </div>
           {/* Mini-graphique de progression — positionne en ABSOLU pour ne pas
               imposer sa hauteur (170px) au hero. Centre verticalement sur la
               bio, et place a droite (juste a gauche du logo). pointer-events:

@@ -789,8 +789,12 @@ async def agent_chat(
         except Exception:
             pass
         try:
-            mem = await load_memories_async(user_id, limit=30)
-            memory_blk = format_memories(mem, max_items=25) if mem else ""
+            # Memoire long terme : on charge plus de souvenirs (80) et on en
+            # injecte plus dans le system prompt (60). Avec le prompt caching
+            # Anthropic (api/llm_router.py), le surcout est negligeable car
+            # le bloc memoire est cache 5 min entre messages.
+            mem = await load_memories_async(user_id, limit=80)
+            memory_blk = format_memories(mem, max_items=60) if mem else ""
         except Exception:
             pass
     system_prompt = _build_agent_prompt(

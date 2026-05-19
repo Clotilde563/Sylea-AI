@@ -761,8 +761,11 @@ async def agent2_chat(
         except Exception:
             pass
         try:
-            mem = await load_memories_async(user_id, limit=30)
-            memory_blk = format_memories(mem, max_items=25) if mem else ""
+            # Memoire long terme : 80 souvenirs chargees, 60 injectes.
+            # Agent 2 a besoin d'autant de contexte qu'Agent 1 pour proposer
+            # des actions pertinentes (ex: rappels d'objectif, contacts repetes).
+            mem = await load_memories_async(user_id, limit=80)
+            memory_blk = format_memories(mem, max_items=60) if mem else ""
         except Exception:
             pass
         try:

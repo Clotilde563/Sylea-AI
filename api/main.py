@@ -48,6 +48,7 @@ init_sentry()
 
 from api.dependencies import get_optional_user
 from api.routers import profil, dilemme, historique, evenement, bilan, objectifs, service_client
+from api.routers import actions as actions_router
 from api.routers.agent_companion import router as agent_companion_router
 from api.routers.agent_assistant import router as agent_assistant_router
 from api.routers.agent3_openclaw import router as agent3_router
@@ -230,6 +231,7 @@ app.include_router(notifications_router)
 app.include_router(shared_workspaces_router)
 app.include_router(credentials_vault_router)
 app.include_router(pending_router)
+app.include_router(actions_router.router)
 
 
 # ── Routes utilitaires ────────────────────────────────────────────────────────
