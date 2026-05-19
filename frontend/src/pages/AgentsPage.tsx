@@ -5798,8 +5798,7 @@ export default function AgentsPage() {
 
             {/* Badge eclair : compteur d'actions restantes aujourd'hui */}
             <ActionLightning
-              variant="compact"
-              size={16}
+              size={18}
               onClick={() => window.location.assign('/quotas')}
             />
 
@@ -6427,8 +6426,7 @@ export default function AgentsPage() {
 
             {/* Badge eclair : compteur d'actions restantes aujourd'hui */}
             <ActionLightning
-              variant="compact"
-              size={16}
+              size={18}
               onClick={() => window.location.assign('/quotas')}
             />
 

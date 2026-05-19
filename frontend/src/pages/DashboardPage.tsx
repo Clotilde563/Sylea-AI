@@ -220,8 +220,8 @@ export function DashboardPage() {
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
             <SyleaLogo size={52} animated={false} />
             <ActionLightning
-              variant="badge"
-              size={16}
+              size={18}
+              showLimit
               onClick={() => navigate('/quotas')}
             />
           </div>
