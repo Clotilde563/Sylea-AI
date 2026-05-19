@@ -805,6 +805,17 @@ async def agent2_chat(
     import logging
     _agent2_logger = logging.getLogger("sylea.agent2")
 
+    # Sanitization stricte : Anthropic refuse les champs autres que role+content
+    # sur les messages. Si on laisse passer "type" ou "audio_data" -> 400 :
+    # "messages.0.type: Extra inputs are not permitted".
+    # La branche user_id authentifie construisait deja des dicts propres, mais
+    # le `else` (user anonyme) renvoyait data.messages[-20:] tel quel.
+    sanitized_messages = [
+        {"role": m["role"], "content": m["content"]}
+        for m in chat_messages[-20:]
+        if m.get("role") and m.get("content")
+    ]
+
     client = anthropic.Anthropic(api_key=key)
     try:
         msg = await asyncio.to_thread(
@@ -816,7 +827,7 @@ async def agent2_chat(
                     "text": system_prompt,
                     "cache_control": {"type": "ephemeral"},
                 }],
-                messages=chat_messages[-20:],
+                messages=sanitized_messages,
             )
         )
     except anthropic.APIStatusError as e:
