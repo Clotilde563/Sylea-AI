@@ -49,6 +49,9 @@ export const useAuthStore = create<AuthState>((set) => ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
+        // credentials: 'include' pour recevoir le cookie sylea_csrf que le
+        // backend pose dans la réponse (utilisé sur les POST suivants).
+        credentials: 'include',
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }))
@@ -74,6 +77,7 @@ export const useAuthStore = create<AuthState>((set) => ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password, password_confirm: password }),
+        credentials: 'include',
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }))
@@ -220,6 +224,7 @@ export const useAuthStore = create<AuthState>((set) => ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, code }),
+        credentials: 'include',
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }))

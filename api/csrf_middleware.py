@@ -62,16 +62,16 @@ CSRF_COOKIE_MAX_AGE_S = 8 * 3600  # 8h — re-généré au prochain GET sinon
 _UNSAFE_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # Endpoints exemptés (pas de session à protéger ou auth déjà robuste)
+# IMPORTANT : doit matcher les VRAIES routes (cf. api/auth/router.py).
 _EXEMPT_PATH_PREFIXES: tuple[str, ...] = (
-    # Auth : login/signup s'appuient sur le rate-limiter IP + JWT issued
+    # Auth : login/register/verify s'appuient sur le rate-limiter IP + JWT issued
     "/api/auth/login",
-    "/api/auth/signup",
+    "/api/auth/register",         # POST /api/auth/register (signup)
+    "/api/auth/verify",           # POST /api/auth/verify (email code)
     "/api/auth/forgot-password",
     "/api/auth/reset-password",
-    "/api/auth/verify-code",
-    "/api/auth/oauth/",       # OAuth Google/GitHub/Apple callbacks
+    "/api/auth/oauth/",           # OAuth Google/GitHub/Apple callbacks
     "/api/auth/callback",
-    "/api/auth/oauth/apple/callback",  # Apple form_post explicit exempt
     # Webhooks Stripe — signature dédiée, pas de CSRF
     "/api/stripe/webhook",
     # WebSocket handshake — token JWT en query string

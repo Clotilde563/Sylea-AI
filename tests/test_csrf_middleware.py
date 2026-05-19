@@ -131,12 +131,15 @@ def test_verify_garbage():
 
 def test_is_path_exempt():
     assert is_path_exempt("/api/auth/login")
-    assert is_path_exempt("/api/auth/signup")
+    assert is_path_exempt("/api/auth/register")
+    assert is_path_exempt("/api/auth/verify")
+    assert is_path_exempt("/api/auth/forgot-password")
     assert is_path_exempt("/api/health")
     assert is_path_exempt("/ws/agent")
     assert is_path_exempt("/api/stripe/webhook")
     assert not is_path_exempt("/api/profil")
     assert not is_path_exempt("/api/dilemme/analyser")
+    assert not is_path_exempt("/api/agent/chat")
 
 
 def test_cookie_is_not_httponly(client):

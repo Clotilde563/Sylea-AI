@@ -59,7 +59,10 @@ export function useActionsStatus(): {
       const token = localStorage.getItem('sylea_auth_token')
       const headers: Record<string, string> = {}
       if (token) headers['Authorization'] = `Bearer ${token}`
-      const r = await fetch(`${API_BASE}/api/actions/today`, { headers })
+      const r = await fetch(`${API_BASE}/api/actions/today`, {
+        headers,
+        credentials: 'include',
+      })
       if (!r.ok) return
       const data: ActionsStatus = await r.json()
       setStatus(data)

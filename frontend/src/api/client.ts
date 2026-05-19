@@ -22,14 +22,73 @@ import type {
 export const API_BASE = import.meta.env.VITE_API_URL || ''
 const BASE = `${API_BASE}/api`
 const AUTH_TOKEN_KEY = 'sylea_auth_token'
+const CSRF_COOKIE_NAME = 'sylea_csrf'
+const CSRF_HEADER_NAME = 'X-CSRF-Token'
 
-export function getAuthHeaders(): Record<string, string> {
+/**
+ * Lit le cookie CSRF posé par le backend sur chaque GET.
+ *
+ * Le cookie est non-HttpOnly (lisible JS) pour que ce double-submit
+ * pattern fonctionne : on lit le cookie côté JS et on le renvoie en
+ * header `X-CSRF-Token` sur tous les POST/PUT/PATCH/DELETE.
+ *
+ * Voir api/csrf_middleware.py côté backend.
+ */
+function getCsrfToken(): string {
+  try {
+    const match = document.cookie
+      .split('; ')
+      .find((c) => c.startsWith(`${CSRF_COOKIE_NAME}=`))
+    return match ? match.split('=')[1] : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * Méthodes HTTP qui nécessitent un token CSRF côté backend.
+ * Doit matcher api/csrf_middleware.py _UNSAFE_METHODS.
+ */
+const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+export function getAuthHeaders(method?: string): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const token = localStorage.getItem(AUTH_TOKEN_KEY)
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
   }
+  // Inject X-CSRF-Token sur les méthodes mutantes. Si le cookie n'est pas
+  // encore posé (1er chargement avant le 1er GET), le header sera vide et
+  // le backend retournera 403 — corrigé par un GET préalable (cf. ensureCsrfCookie).
+  if (method && UNSAFE_METHODS.has(method.toUpperCase())) {
+    const csrf = getCsrfToken()
+    if (csrf) {
+      headers[CSRF_HEADER_NAME] = csrf
+    }
+  }
   return headers
+}
+
+/**
+ * Garantit qu'on a un cookie CSRF avant la première requête mutante.
+ *
+ * Le cookie est posé par le backend sur n'importe quel GET. On déclenche
+ * donc un GET léger (/api/health) si on n'a pas encore de cookie en
+ * localStorage flag. Idempotent — appelable plusieurs fois sans coût.
+ */
+let _csrfReady = false
+async function ensureCsrfCookie(): Promise<void> {
+  if (_csrfReady || getCsrfToken()) {
+    _csrfReady = true
+    return
+  }
+  try {
+    await fetch(`${API_BASE}/api/health`, { credentials: 'include' })
+    _csrfReady = true
+  } catch {
+    // si /api/health échoue, on ne bloque pas — le backend renverra l'erreur réelle
+    // sur l'appel mutant
+  }
 }
 
 // Messages FR user-friendly par status HTTP.
@@ -52,11 +111,29 @@ async function request<T>(
   path: string,
   options?: RequestInit,
 ): Promise<T> {
+  const method = (options?.method || 'GET').toUpperCase()
+  // Avant un POST/PUT/PATCH/DELETE : on s'assure qu'on a bien un cookie CSRF.
+  // Le cookie est posé par le backend sur n'importe quel GET (cf. CSRFMiddleware).
+  if (UNSAFE_METHODS.has(method)) {
+    await ensureCsrfCookie()
+  }
+
+  // Merge des headers : custom headers passés par l'appelant > auth/CSRF.
+  // On utilise un Headers object pour gérer la casse correctement.
+  const finalHeaders: Record<string, string> = {
+    ...getAuthHeaders(method),
+    ...(options?.headers as Record<string, string> | undefined),
+  }
+
   let res: Response
   try {
     res = await fetch(`${BASE}${path}`, {
-      headers: getAuthHeaders(),
       ...options,
+      headers: finalHeaders,
+      // credentials: 'include' = envoie les cookies cross-origin
+      // (localhost:5173 frontend <-> localhost:8000 backend).
+      // Nécessaire pour que le cookie sylea_csrf soit propagé.
+      credentials: 'include',
     })
   } catch (e) {
     // Erreurs réseau (offline, CORS, DNS) — pas de res.ok
