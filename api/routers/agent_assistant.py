@@ -802,20 +802,42 @@ async def agent2_chat(
 
     # Call Claude
     import anthropic
+    import logging
+    _agent2_logger = logging.getLogger("sylea.agent2")
 
     client = anthropic.Anthropic(api_key=key)
-    msg = await asyncio.to_thread(
-        lambda: client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=4000,
-            system=[{
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
-            }],
-            messages=chat_messages[-20:],
+    try:
+        msg = await asyncio.to_thread(
+            lambda: client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=4000,
+                system=[{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                messages=chat_messages[-20:],
+            )
         )
-    )
+    except anthropic.APIStatusError as e:
+        _agent2_logger.error(
+            "[agent2] Anthropic API error status=%s msg=%s system_len=%d msgs=%d audio=%s",
+            getattr(e, "status_code", "?"), str(e)[:300],
+            len(system_prompt), len(chat_messages),
+            "yes" if user_msg_type == "voice" else "no",
+        )
+        return Agent2ChatOut(
+            message=f"Erreur Claude {getattr(e, 'status_code', '?')} : {str(e)[:200]}",
+        )
+    except Exception as e:
+        _agent2_logger.error(
+            "[agent2] Erreur inattendue type=%s msg=%s",
+            type(e).__name__, str(e)[:300],
+            exc_info=True,
+        )
+        return Agent2ChatOut(
+            message=f"Erreur interne ({type(e).__name__}) : {str(e)[:200]}",
+        )
 
     agent_response_raw = msg.content[0].text.strip()
 

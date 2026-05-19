@@ -896,10 +896,14 @@ export default function AgentsPage() {
           : null,
       }
       setMessages(prev => [...prev, agentMsg])
-    } catch {
+    } catch (err: unknown) {
+      // Log l'erreur réelle dans la console pour debug
+      console.error('[Agent 1] Erreur chat:', err)
+      const errMessage = err instanceof Error ? err.message : 'Erreur inconnue'
       const errMsg: AgentMessage = {
         role: 'agent',
-        content: "Desole, une erreur est survenue. Reessayez dans un instant.",
+        // Affiche le détail de l'erreur pour aider à diagnostiquer
+        content: `Désolé, une erreur est survenue : ${errMessage}. Réessayez dans un instant.`,
         timestamp: new Date().toISOString(),
         type: 'text',
       }
@@ -1517,10 +1521,12 @@ export default function AgentsPage() {
           ? { ...(res.proposal as any), statut: 'pending' }
           : null,
       }])
-    } catch {
+    } catch (err: unknown) {
+      console.error('[Agent 2] Erreur chat:', err)
+      const errMessage = err instanceof Error ? err.message : 'Erreur inconnue'
       setStreamSteps2(prev => prev.map(s => s.status === 'running' ? { ...s, status: 'error' } : s))
       setMessages2(prev => [...prev, {
-        role: 'agent', content: "Desole, une erreur est survenue. Reessayez dans un instant.",
+        role: 'agent', content: `Désolé, une erreur est survenue : ${errMessage}. Réessayez dans un instant.`,
         timestamp: new Date().toISOString(), type: 'text',
       }])
     } finally {
