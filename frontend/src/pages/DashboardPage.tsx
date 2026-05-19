@@ -214,10 +214,10 @@ export function DashboardPage() {
                 margin: 0, lineHeight: 1.1,
               }}>{profil.nom}</h1>
               <ActionLightning
-                size={44}
+                size={32}
                 showLimit
                 onClick={() => navigate('/quotas')}
-                style={{ padding: '8px 16px 8px 10px', fontSize: '1.15rem' }}
+                style={{ padding: '5px 12px 5px 8px', fontSize: '0.95rem' }}
               />
             </div>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
