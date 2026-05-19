@@ -28,6 +28,16 @@ export default function AppleDesktopBridgePage() {
   const [status, setStatus] = useState('Préparation de Sign in with Apple…')
 
   useEffect(() => {
+    // Sign in with Apple est masqué tant que les fonds Apple Developer
+    // ne sont pas disponibles. Réactiver via VITE_APPLE_SIGNIN_ENABLED=true.
+    if (import.meta.env.VITE_APPLE_SIGNIN_ENABLED !== 'true') {
+      setError(
+        "La connexion Apple n'est pas encore disponible. " +
+          "Utilisez Google, GitHub ou e-mail pour vous connecter.",
+      )
+      return
+    }
+
     const nonce = searchParams.get('nonce') || ''
     if (!nonce) {
       setError("Paramètre 'nonce' manquant — relancez depuis l'application desktop.")

@@ -1,0 +1,43 @@
+<!-- Logo Syléa.AI — S stylisé, gradient cyan → bleu → violet, canal central blanc.
+     Pas de cadre carré : fond transparent, le navigateur ou l'OS dessine le bord. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
+  <defs>
+    <!-- Gradient violet (bas) → cyan (haut) -->
+    <linearGradient id="sl-grad" x1="50%" y1="100%" x2="50%" y2="0%">
+      <stop offset="0%"   stop-color="#5520b8"/>
+      <stop offset="30%"  stop-color="#1848d8"/>
+      <stop offset="65%"  stop-color="#0090e0"/>
+      <stop offset="100%" stop-color="#00c8ff"/>
+    </linearGradient>
+    <!-- Halo flou pour la lueur extérieure -->
+    <filter id="sl-halo">
+      <feGaussianBlur stdDeviation="5"/>
+    </filter>
+  </defs>
+
+  <!-- Halo atmosphérique (gradient + flou) -->
+  <path
+    d="M 60 21 C 88 21, 88 45, 60 54 C 32 63, 32 87, 60 87"
+    stroke="url(#sl-grad)" stroke-width="30" fill="none" stroke-linecap="round"
+    style="filter: url(#sl-halo); opacity: 0.22"/>
+
+  <!-- Couche 1 : bordure extérieure sombre (donne la profondeur) -->
+  <path
+    d="M 60 21 C 88 21, 88 45, 60 54 C 32 63, 32 87, 60 87"
+    stroke="rgba(2,4,16,0.97)" stroke-width="20" fill="none" stroke-linecap="round"/>
+
+  <!-- Couche 2 : corps en gradient (2 rails de chaque côté du canal) -->
+  <path
+    d="M 60 21 C 88 21, 88 45, 60 54 C 32 63, 32 87, 60 87"
+    stroke="url(#sl-grad)" stroke-width="16" fill="none" stroke-linecap="round"/>
+
+  <!-- Couche 3 : canal central creux -->
+  <path
+    d="M 60 21 C 88 21, 88 45, 60 54 C 32 63, 32 87, 60 87"
+    stroke="#050810" stroke-width="6" fill="none" stroke-linecap="butt"/>
+
+  <!-- Couche 4 : reflet spéculaire blanc-cyan -->
+  <path
+    d="M 60 21 C 88 21, 88 45, 60 54 C 32 63, 32 87, 60 87"
+    stroke="rgba(160,225,255,0.55)" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+</svg>

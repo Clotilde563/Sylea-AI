@@ -476,14 +476,29 @@ class ComputerUseSession:
 
         elif action == "open_url":
             url = params.get("url", "")
-            if url:
-                try:
-                    os.startfile(url)
-                except Exception:
-                    subprocess.Popen(["cmd", "/c", "start", "", url], shell=True)
-                time.sleep(5)
-                # Focus browser
-                self._try_focus_browser()
+            # Validation stricte : seuls http(s) acceptés. Empêche les schemes
+            # dangereux (file://, javascript:, data:, sylea:// usurpé etc.)
+            # car cette action est appelée par un LLM (untrusted).
+            if url and (url.startswith("https://") or url.startswith("http://")):
+                # Garde-fou supplémentaire : refus si l'URL contient des
+                # caractères qui n'ont rien à faire dans une URL HTTP (quoting
+                # shell, redirections cmd.exe). Si le LLM tente d'injecter
+                # `foo & calc.exe`, on bloque.
+                if not any(c in url for c in ['&', '|', ';', '\n', '\r', '"', "'", '`', '$']):
+                    try:
+                        os.startfile(url)  # sûr, ne passe pas par un shell
+                    except Exception:
+                        # Fallback : Popen SANS shell=True (la liste argv est
+                        # passée directement à CreateProcess, pas de parsing
+                        # shell donc immune à l'injection).
+                        subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
+                    time.sleep(5)
+                    # Focus browser
+                    self._try_focus_browser()
+                else:
+                    logger.warning(f"open_url refusé (caractères suspects) : {url[:80]}")
+            else:
+                logger.warning(f"open_url refusé (scheme non autorisé) : {url[:80]}")
 
         elif action == "focus_window":
             title = params.get("title", "")

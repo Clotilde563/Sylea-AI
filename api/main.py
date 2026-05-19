@@ -133,28 +133,62 @@ async def _close_agent3_http_pool():
     except Exception:
         pass
 
-# CORS : autoriser le frontend React (dev + production)
+# CORS : autoriser le frontend React (dev + production).
+# Important : `allow_origins=["*"]` + `allow_credentials=True` est INTERDIT
+# par le standard (le navigateur refuse). On liste donc explicitement.
 origins = [
+    # Dev local
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:3000",
     "http://localhost:1420",
-    "https://sylea-ai.vercel.app",   # Production frontend
-    "https://*.vercel.app",          # Preview deployments
+    # Production
+    "https://sylea-ai.vercel.app",
+    "https://sylea.ai",
+    "https://www.sylea.ai",
+    # Tauri desktop
     "tauri://localhost",
     "https://tauri.localhost",
 ]
 
+# Origines dynamiques depuis env (preview deployments Vercel, etc.)
+# Format : CORS_ORIGINS=https://preview-123.vercel.app,https://staging.sylea.ai
 extra_origins = os.environ.get("CORS_ORIGINS", "")
 if extra_origins:
-    origins.extend(extra_origins.split(","))
+    for o in extra_origins.split(","):
+        o = o.strip()
+        if o and o not in origins:
+            origins.append(o)
+
+# Regex pour matcher les preview Vercel sans wildcard littéral
+# (CORSMiddleware traite "*" comme une chaîne, pas un pattern → ne match rien).
+# Liste blanche stricte des patterns autorisés en prod.
+_origin_regex = (
+    r"^https://(sylea-ai-[a-z0-9-]+\.vercel\.app"
+    r"|sylea-ai-git-[a-z0-9-]+\.vercel\.app)$"
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=_origin_regex,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Liste explicite : on autorise les verbes REST standards, pas TRACE/CONNECT
+    # qui peuvent ouvrir des vecteurs XST (Cross-Site Tracing).
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    # Liste explicite des headers attendus. "*" était trop permissif.
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Authorization",
+        "Content-Language",
+        "Content-Type",
+        "X-Request-Id",
+        "X-CSRF-Token",
+    ],
+    # Headers que le frontend peut lire (utile pour le debug + tracing).
+    expose_headers=["X-Request-Id", "Retry-After", "X-RateLimit-Bucket"],
+    max_age=600,  # cache preflight 10 min
 )
 
 # ── Middlewares de sécurité niveau pro ───────────────────────────────────────

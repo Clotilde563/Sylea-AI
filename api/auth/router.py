@@ -34,7 +34,16 @@ class VerifyCodeIn(BaseModel):
 
 
 def _generate_code() -> str:
-    return "".join(random.choices(string.digits, k=6))
+    """Génère un code de vérification 6 chiffres cryptographiquement sûr.
+
+    Avant : utilisait `random.choices()` qui n'est PAS sûr cryptographiquement
+    (mersenne twister prédictible si on observe quelques sorties). Risque : un
+    attaquant pouvait potentiellement prédire les codes de récupération.
+
+    Maintenant : `secrets.choice()` utilise os.urandom() (CSPRNG OS-level).
+    """
+    import secrets
+    return "".join(secrets.choice(string.digits) for _ in range(6))
 
 
 def _cleanup_expired():
