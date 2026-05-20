@@ -125,7 +125,7 @@ function relativeTime(iso: string): string {
   return `il y a ${days} jour${days > 1 ? 's' : ''}`
 }
 
-const WELCOME_MESSAGE = "Bonjour ! Je suis votre Agent Sylea 1. Mon role est de vous accompagner au quotidien vers votre objectif. Comment allez-vous aujourd'hui ?"
+const WELCOME_MESSAGE = "Bonjour ! Je suis votre Agent Syléa 1. Mon rôle est de vous accompagner au quotidien vers votre objectif. Comment allez-vous aujourd'hui ?"
 
 // ── TTS helper ──────────────────────────────────────────────────────────────
 function speakMessage(text: string) {
@@ -1290,7 +1290,7 @@ export default function AgentsPage() {
           const reminderTime = new Date(`${r.date}T${r.time}`)
           if (Math.abs(now.getTime() - reminderTime.getTime()) < 60000 && !r.completed) {
             if ('Notification' in window && Notification.permission === 'granted') {
-              new Notification('Agent Sylea 2 - Rappel', { body: r.message })
+              new Notification('Agent Syléa 2 — Rappel', { body: r.message })
             }
             api.agent2CompleteReminder(r.id)
           }
@@ -1324,7 +1324,7 @@ export default function AgentsPage() {
     setChat2Open(false)
   }
 
-  const WELCOME_MESSAGE_2 = "Salut ! Je suis ton Agent Sylea 2. Je peux envoyer des mails, rediger des textes, creer des rappels et bien plus. Qu'est-ce que je peux faire pour toi ?"
+  const WELCOME_MESSAGE_2 = "Salut ! Je suis ton Agent Syléa 2. Je peux envoyer des mails, rédiger des textes, créer des rappels et bien plus. Qu'est-ce que je peux faire pour toi ?"
 
   const openChat2 = useCallback(async () => {
     setChat2Open(true)
@@ -2113,12 +2113,12 @@ export default function AgentsPage() {
 
   const handleActivate3 = async () => {
     if (active) {
-      setConflictModal('Agent Sylea 1')
+      setConflictModal('Agent Syléa 1')
       setShowActivateModal3(false)
       return
     }
     if (active2) {
-      setConflictModal('Agent Sylea 2')
+      setConflictModal('Agent Syléa 2')
       setShowActivateModal3(false)
       return
     }

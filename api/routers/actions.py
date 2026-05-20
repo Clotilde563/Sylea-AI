@@ -23,11 +23,15 @@ router = APIRouter(prefix="/api/actions", tags=["actions"])
 
 
 @router.get("/today")
-async def actions_today(user: dict | None = Depends(get_optional_user)):
+async def actions_today(user: str | None = Depends(get_optional_user)):
     """Retourne le quota d'actions du jour pour l'utilisateur courant.
 
     Utilisé par le badge éclair affiché dans le Dashboard et les chats
     Agent 1 / Agent 2.
+
+    Note : `get_optional_user` retourne un user_id (str) ou None, PAS un dict.
+    L'ancienne signature `user: dict` causait un AttributeError 500 sur
+    `user.get("id")` au lieu de juste utiliser la string directement.
     """
-    user_id = user.get("id") if user else None
-    return await get_actions_status_async(user_id)
+    # user_id est déjà un str ou None — pas besoin de .get("id")
+    return await get_actions_status_async(user)

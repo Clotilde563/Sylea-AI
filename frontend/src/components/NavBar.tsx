@@ -62,7 +62,7 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
   // Masquer tous les liens tant que le profil n'est pas créé
   const links = profil ? [
     { to: '/', label: t('nav.dashboard') },
-    { to: '/network', label: 'Réseau Syléa' },
+    { to: '/statistiques', label: t('nav.statistiques') || 'Statistiques' },
     { to: '/progression-decisions', label: t('nav.progression_decisions') || 'Progression des décisions' },
   ] : []
 

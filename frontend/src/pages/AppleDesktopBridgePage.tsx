@@ -33,7 +33,7 @@ export default function AppleDesktopBridgePage() {
     if (import.meta.env.VITE_APPLE_SIGNIN_ENABLED !== 'true') {
       setError(
         "La connexion Apple n'est pas encore disponible. " +
-          "Utilisez Google, GitHub ou e-mail pour vous connecter.",
+          "Utilisez Google ou e-mail pour vous connecter.",
       )
       return
     }
