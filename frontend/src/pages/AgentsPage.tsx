@@ -160,9 +160,27 @@ function speakMessage(text: string) {
   synth.speak(utterance)
 }
 
+// ── Strip des blocs [[PROPOSITION]] dans le texte affiché ──────────────────
+// L'agent peut emettre des blocs [[PROPOSITION]]{json}[[/PROPOSITION]] qui
+// sont parses cote backend pour creer une ProposalCard. Le bloc lui-meme
+// ne doit JAMAIS s'afficher comme du texte. Si une ancienne reponse en DB
+// contient encore un bloc (parser backend a echoue, troncature, etc.), on
+// le strippe ici pour avoir un affichage propre.
+function stripProposalBlocks(text: string): string {
+  if (!text) return text
+  // Cas 1 : bloc complet [[PROPOSITION]]...[[/PROPOSITION]]
+  let cleaned = text.replace(/\[\[PROPOSITION\]\][\s\S]*?\[\[\/PROPOSITION\]\]/g, '')
+  // Cas 2 : bloc tronque [[PROPOSITION]]... jusqu'a la fin du texte
+  cleaned = cleaned.replace(/\[\[PROPOSITION\]\][\s\S]*$/g, '')
+  return cleaned.trim()
+}
+
 // ── Markdown-light renderer ─────────────────────────────────────────────────
 // Converts markdown-ish text (links, bold, tables, headers, lists, hr) to React elements
 function renderFormattedText(text: string) {
+  if (!text) return null
+  // Nettoie d'eventuels blocs [[PROPOSITION]] residuels avant rendu
+  text = stripProposalBlocks(text)
   if (!text) return null
   const lines = text.split('\n')
   const elements: React.ReactNode[] = []
@@ -1384,6 +1402,10 @@ export default function AgentsPage() {
     text = text.replace(/<\/?(?:function_calls|invoke|antml:\w+)[^>]*>/g, '')
     // Strip remaining code blocks with JSON
     text = text.replace(/```(?:json)?\s*\{[\s\S]*?\}\s*```/g, '')
+    // Strip les blocs [[PROPOSITION]]...[[/PROPOSITION]] (et leur variante
+    // tronquee sans fermeture due a max_tokens) — ils sont parses cote
+    // backend pour generer la ProposalCard, jamais affiches en texte brut.
+    text = stripProposalBlocks(text)
     return { text: text.trim(), actions }
   }
 
