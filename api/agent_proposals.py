@@ -38,28 +38,84 @@ _PROPOSAL_PATTERN = re.compile(
     re.DOTALL,
 )
 
+# Fallback : proposition tronquee (sans [[/PROPOSITION]] de fin) car
+# max_tokens a coupe la generation Claude. On essaie de recuperer le JSON
+# best-effort en fermant manuellement les accolades.
+_PROPOSAL_PATTERN_OPEN = re.compile(
+    r"\[\[PROPOSITION\]\]\s*(\{.*?)(?:\[\[/PROPOSITION\]\]|$)",
+    re.DOTALL,
+)
+
+
+def _try_repair_truncated_json(json_str: str) -> Optional[dict]:
+    """Repare best-effort un JSON tronque en milieu de chaine.
+
+    Strategie :
+      1. Trim a la derniere valeur complete (apres une virgule ou guillemet)
+      2. Fermer les accolades manquantes
+      3. Parse
+
+    Returns le dict si reussi, None sinon.
+    """
+    if not json_str or not json_str.strip().startswith("{"):
+        return None
+
+    # Compte les accolades ouvertes/fermees et les guillemets
+    s = json_str.rstrip()
+
+    # Si on est en plein milieu d'une string (nombre de " impair), on la ferme
+    # en cherchant le dernier guillemet ouvrant et en coupant juste avant.
+    # On cherche le dernier ", complet qui sépare 2 valeurs.
+    # Heuristique simple : remonter jusqu'a la derniere occurence de `",`
+    # ou de `,\n` qui indique une cle/valeur complete.
+    last_safe = -1
+    for marker in ('",\n', '",', '"\n', '}'):
+        idx = s.rfind(marker)
+        if idx > last_safe:
+            last_safe = idx + len(marker.rstrip("\n").rstrip(","))
+
+    if last_safe > 0:
+        s = s[:last_safe].rstrip().rstrip(",")
+
+    # Fermer les accolades qui restent ouvertes
+    open_braces = s.count("{") - s.count("}")
+    if open_braces > 0:
+        s = s + ("}" * open_braces)
+
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        return None
+
 
 def extract_proposal_from_text(text: str) -> tuple[str, Optional[dict]]:
     """Extrait une proposition JSON du texte de l'agent.
 
+    Gere 2 cas :
+      1. Proposition bien fermee : [[PROPOSITION]]{...}[[/PROPOSITION]] (path standard)
+      2. Proposition tronquee : [[PROPOSITION]]{... (coupe par max_tokens)
+         -> tentative de reparation best-effort
+
     Returns:
         (text_clean, proposal_dict | None)
-        - text_clean : texte sans le bloc [[PROPOSITION]]
-        - proposal_dict : dict parsé OU None si pas de proposition / parse failed
     """
+    # Cas 1 : proposition bien fermee (path standard)
     match = _PROPOSAL_PATTERN.search(text)
-    if not match:
-        return text, None
-
-    json_str = match.group(1)
-    try:
-        prop = json.loads(json_str)
-    except json.JSONDecodeError:
-        # Mal formé → on retire quand même le bloc et on ignore
+    if match:
+        json_str = match.group(1)
+        try:
+            prop = json.loads(json_str)
+        except json.JSONDecodeError:
+            prop = None
         text_clean = _PROPOSAL_PATTERN.sub("", text).strip()
-        return text_clean, None
-
-    text_clean = _PROPOSAL_PATTERN.sub("", text).strip()
+    else:
+        # Cas 2 : tentative de parse d'une proposition tronquee
+        match_open = _PROPOSAL_PATTERN_OPEN.search(text)
+        if not match_open:
+            return text, None
+        # On retire le bloc [[PROPOSITION]]{... jusqu'a la fin du texte
+        text_clean = _PROPOSAL_PATTERN_OPEN.sub("", text).strip()
+        prop = _try_repair_truncated_json(match_open.group(1))
 
     # Validation minimale du dict
     if not isinstance(prop, dict):

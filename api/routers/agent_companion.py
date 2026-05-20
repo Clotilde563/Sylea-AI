@@ -850,7 +850,12 @@ async def agent_chat(
         msg = await asyncio.to_thread(
             lambda: client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=300,
+                # 300 etait trop bas : les reponses qui emettaient un bloc
+                # [[PROPOSITION]]{...} se faisaient tronquer en plein JSON ->
+                # parser fail -> aucune decision enregistree -> l'objectif de
+                # vie ne bougeait pas. 1200 = marge confortable pour reponse
+                # naturelle + JSON complet de proposition.
+                max_tokens=1200,
                 system=[{
                     "type": "text",
                     "text": system_prompt,
