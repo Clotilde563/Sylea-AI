@@ -147,9 +147,10 @@ origins = [
     "https://sylea-ai.vercel.app",
     "https://sylea.ai",
     "https://www.sylea.ai",
-    # Tauri desktop
-    "tauri://localhost",
-    "https://tauri.localhost",
+    # Tauri desktop (3 origines possibles selon plateforme + version)
+    "tauri://localhost",        # Linux + macOS Tauri 1.x
+    "https://tauri.localhost",  # Windows WebView2 Tauri 2.x (HTTPS)
+    "http://tauri.localhost",   # Windows WebView2 Tauri 2.x (HTTP, dev)
 ]
 
 # Origines dynamiques depuis env (preview deployments Vercel, etc.)
@@ -161,12 +162,13 @@ if extra_origins:
         if o and o not in origins:
             origins.append(o)
 
-# Regex pour matcher les preview Vercel sans wildcard littéral
-# (CORSMiddleware traite "*" comme une chaîne, pas un pattern → ne match rien).
-# Liste blanche stricte des patterns autorisés en prod.
+# Regex pour matcher les preview Vercel + variations Tauri ports/schemes.
+# On accepte aussi (http|https|tauri)://localhost(:PORT)? et tauri.localhost
+# car les versions futures de Tauri pourraient varier l'origine de la webview.
 _origin_regex = (
-    r"^https://(sylea-ai-[a-z0-9-]+\.vercel\.app"
-    r"|sylea-ai-git-[a-z0-9-]+\.vercel\.app)$"
+    r"^(https://(sylea-ai-[a-z0-9-]+\.vercel\.app"
+    r"|sylea-ai-git-[a-z0-9-]+\.vercel\.app)"
+    r"|(http|https|tauri)://(tauri\.)?localhost(:\d+)?)$"
 )
 
 app.add_middleware(
