@@ -48,10 +48,10 @@ export function SyleaSplash({ onDone }: { onDone: () => void }) {
           0%,100% { opacity: 0.16 }
           50%     { opacity: 0.28 }
         }
-        /* ── Brillance du S (rose) ── */
+        /* ── Brillance du S ── */
         @keyframes sp-glow {
-          0%,100% { filter: drop-shadow(0 0 10px rgba(236,72,153,0.5)) }
-          50%     { filter: drop-shadow(0 0 28px rgba(244,114,182,0.85)) }
+          0%,100% { filter: drop-shadow(0 0 10px rgba(0,170,255,0.5)) }
+          50%     { filter: drop-shadow(0 0 28px rgba(0,200,255,0.85)) }
         }
         /* ── Texte slide-up ── */
         @keyframes sp-text {
@@ -86,12 +86,12 @@ export function SyleaSplash({ onDone }: { onDone: () => void }) {
           style={{ overflow: 'visible' }}
         >
           <defs>
-            {/* ── Gradient rose Syléa (bas profond → haut pâle) ── */}
+            {/* ── Gradient violet → cyan (bas → haut) ── */}
             <linearGradient id="sp-g" x1="50%" y1="100%" x2="50%" y2="0%">
-              <stop offset="0%"   stopColor="#9f1239"/>
-              <stop offset="30%"  stopColor="#be185d"/>
-              <stop offset="65%"  stopColor="#ec4899"/>
-              <stop offset="100%" stopColor="#fbcfe8"/>
+              <stop offset="0%"   stopColor="#5520b8"/>
+              <stop offset="30%"  stopColor="#1848d8"/>
+              <stop offset="65%"  stopColor="#0090e0"/>
+              <stop offset="100%" stopColor="#00c8ff"/>
             </linearGradient>
 
             {/* ── Filtre halo flou ──
@@ -172,10 +172,9 @@ export function SyleaSplash({ onDone }: { onDone: () => void }) {
             {/*
               Couche 4 — Reflet spéculaire sur le bord intérieur des rails
               Donne l'impression de brillance sur le dessus du tube
-              (rose pâle pour s'harmoniser avec le gradient principal)
             */}
             <path d={S}
-              stroke="rgba(255,205,225,0.65)" strokeWidth="2.5"
+              stroke="rgba(160,225,255,0.55)" strokeWidth="2.5"
               fill="none" strokeLinecap="round"
             />
           </g>
@@ -194,11 +193,11 @@ export function SyleaSplash({ onDone }: { onDone: () => void }) {
               fontWeight: 600,
               fontSize: '3.1rem',
               letterSpacing: '0.04em',
-              background: 'linear-gradient(180deg, #fbcfe8 0%, #ec4899 45%, #9f1239 100%)',
+              background: 'linear-gradient(180deg, #00c8ff 0%, #0090e0 45%, #5520b8 100%)',
               WebkitBackgroundClip: 'text',
               WebkitTextFillColor: 'transparent',
               backgroundClip: 'text',
-              filter: 'drop-shadow(0 0 22px rgba(236,72,153,0.55))',
+              filter: 'drop-shadow(0 0 22px rgba(0,160,240,0.55))',
             }}
           >
             Syléa
@@ -212,7 +211,7 @@ export function SyleaSplash({ onDone }: { onDone: () => void }) {
             fontFamily: '"Inter", system-ui, sans-serif',
             fontSize: '0.7rem',
             letterSpacing: '0.30em',
-            color: 'rgba(244,114,182,0.55)',
+            color: 'rgba(80,155,230,0.45)',
             textTransform: 'uppercase',
             animation: 'sp-sub 1s ease 5.3s both',
           }}
@@ -226,8 +225,8 @@ export function SyleaSplash({ onDone }: { onDone: () => void }) {
           style={{
             position: 'absolute', bottom: '2.5rem', right: '2.5rem',
             background: 'none',
-            border: '1px solid rgba(236,72,153,0.20)',
-            color: 'rgba(244,114,182,0.45)',
+            border: '1px solid rgba(0,150,240,0.20)',
+            color: 'rgba(0,200,255,0.35)',
             padding: '0.45rem 1.25rem', borderRadius: '20px',
             cursor: 'pointer', fontSize: '0.72rem',
             letterSpacing: '0.12em',
@@ -235,12 +234,12 @@ export function SyleaSplash({ onDone }: { onDone: () => void }) {
             transition: 'all 0.25s',
           }}
           onMouseEnter={e => {
-            e.currentTarget.style.borderColor = 'rgba(236,72,153,0.55)'
-            e.currentTarget.style.color       = 'rgba(244,114,182,0.85)'
+            e.currentTarget.style.borderColor = 'rgba(0,150,240,0.55)'
+            e.currentTarget.style.color       = 'rgba(0,200,255,0.75)'
           }}
           onMouseLeave={e => {
-            e.currentTarget.style.borderColor = 'rgba(236,72,153,0.20)'
-            e.currentTarget.style.color       = 'rgba(244,114,182,0.45)'
+            e.currentTarget.style.borderColor = 'rgba(0,150,240,0.20)'
+            e.currentTarget.style.color       = 'rgba(0,200,255,0.35)'
           }}
         >
           PASSER ›
