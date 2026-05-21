@@ -6,9 +6,27 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+
+// Cache du dernier deep-link URL recu. Quand le desktop est lance via un
+// deep-link (cold start), le handler Rust fire AVANT que le JS soit pret.
+// On stocke alors l'URL ici, et le JS la consomme via la commande Tauri
+// `take_pending_deep_link()` au boot. C'est un Option<String> derriere Mutex
+// (pas async, pas de contention car set tres rare).
+lazy_static::lazy_static! {
+    static ref PENDING_DEEP_LINK: Mutex<Option<String>> = Mutex::new(None);
+}
+
+/// Recupere et consomme le dernier deep-link en attente. Appelle au boot
+/// par le listener JS pour rattraper un eventuel cold-start via sylea://.
+/// Retourne None si rien en attente.
+#[tauri::command]
+fn take_pending_deep_link() -> Option<String> {
+    PENDING_DEEP_LINK.lock().ok().and_then(|mut g| g.take())
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Systeme de fichiers — Commandes v1 (inchangees)
@@ -925,7 +943,12 @@ fn main() {
                     let url_str = url.to_string();
                     // On NE log JAMAIS le token, mais on log le scheme + path
                     eprintln!("[deep-link] received: {} {}", url.scheme(), url.path());
-                    // Emit vers la UI pour traitement
+                    // Cache pour cold-start (le JS appelle take_pending_deep_link()
+                    // au boot pour recuperer si l'event a fire avant qu'il soit pret)
+                    if let Ok(mut pending) = PENDING_DEEP_LINK.lock() {
+                        *pending = Some(url_str.clone());
+                    }
+                    // Emit vers la UI pour traitement immediat (si JS deja pret)
                     let _ = app_handle_for_dl.emit("deep-link:received", url_str);
                     // Focus la fenetre principale pour que l'utilisateur voie
                     // le resultat (au lieu de rester sur le navigateur)
@@ -943,6 +966,28 @@ fn main() {
                     let _ = w.hide();
                 }
             }
+
+            // Debug hook : --test-set-nonce <NONCE> injecte un nonce en
+            // localStorage avant que le JS soit pret. Utilisé pour tester le
+            // flow deep-link OAuth sans avoir besoin de cliquer sur le bouton.
+            // Effet : localStorage.setItem('sylea_desktop_oauth_nonce', <NONCE>)
+            // PAS de garde release/debug — c'est explicit opt-in via CLI flag,
+            // pas un security hole car le nonce ne donne aucun pouvoir seul
+            // (faut aussi un JWT valide signe par le backend pour s'auth).
+            if let Some(idx) = args.iter().position(|a| a == "--test-set-nonce") {
+                if let Some(nonce) = args.get(idx + 1).cloned() {
+                    if let Some(w) = app.get_webview_window("main") {
+                        let safe_nonce = nonce.replace('\\', "").replace('\'', "");
+                        let js = format!(
+                            "setTimeout(() => {{ localStorage.setItem('sylea_desktop_oauth_nonce', '{}'); console.log('[test] nonce injected'); }}, 200)",
+                            safe_nonce
+                        );
+                        let _ = w.eval(&js);
+                        eprintln!("[test] --test-set-nonce scheduled (nonce length {})", safe_nonce.len());
+                    }
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -971,6 +1016,8 @@ fn main() {
             list_installed_clawhub_skills,
             // Phase 2c — Bridge desktop -> web
             open_url,
+            // Deep-link cold-start consumer (recupere URL stockee si JS pas pret)
+            take_pending_deep_link,
             // Sprint 1 — Window/pill/quit
             toggle_pill_mode,
             toggle_main_window,

@@ -411,40 +411,91 @@ function App() {
   // Securite : on verifie le nonce contre celui stocke en localStorage avant
   // de setToken — empeche un attaquant qui devine l'URL deep-link de forger
   // un login. Cf. GoogleDesktopBridgePage.tsx pour le flow complet.
+  //
+  // Tolerance UX :
+  //   - Pas de nonce stocke → silence (peut etre un attaquant ou un test
+  //     externe ; rien de bon a montrer a l'user, on ignore juste).
+  //   - Nonce mismatch → erreur friendly (sans le mot "forge" qui fait peur).
+  //   - Succes → setToken + suppression du nonce (idempotent : si l'event
+  //     fire 2x, le second find expectedNonce='' et silence proprement).
   useEffect(() => {
     let unsub: (() => void) | undefined
-    listen<string>('deep-link:received', (event) => {
+
+    // Handler factorise (memes regles pour event recu live et URL "pending"
+    // recuperee au boot via take_pending_deep_link).
+    const handleDeepLinkUrl = (urlStr: string) => {
       try {
-        const urlStr = event.payload || ''
-        if (!urlStr.startsWith('sylea://auth/callback')) return
+        console.log('[deep-link] received in JS:', urlStr.substring(0, 60) + '...')
+        if (!urlStr.startsWith('sylea://auth/callback')) {
+          console.log('[deep-link] ignored (not /auth/callback path)')
+          return
+        }
         // Parser l'URL — URL ne sait pas parser sylea:// directement, on
         // convertit en http:// le temps de l'analyse.
         const httpUrl = urlStr.replace(/^sylea:\/\//, 'http://')
         const parsed = new URL(httpUrl)
         const token = parsed.searchParams.get('token') || ''
         const nonce = parsed.searchParams.get('nonce') || ''
+        console.log('[deep-link] token present:', !!token, 'nonce present:', !!nonce)
         if (!token) {
-          setError('Deep-link sans token reçu')
+          // Cas rare : sylea://auth/callback sans token. On ignore.
+          console.warn('[deep-link] no token in payload, ignoring')
           return
         }
-        // Verifie le nonce
+        // Verifie le nonce contre celui stocke quand l'user a clique sur
+        // "Continuer avec Google".
         const expectedNonce = (() => {
           try { return localStorage.getItem('sylea_desktop_oauth_nonce') || '' }
           catch { return '' }
         })()
-        if (!expectedNonce || expectedNonce !== nonce) {
-          setError('Deep-link rejeté : nonce invalide (tentative de forge ?)')
+        if (!expectedNonce) {
+          // Pas de flow OAuth en cours → on ignore silencieusement.
+          // Ca evite de scarer l'user avec un message d'erreur si :
+          //   - Un test envoie un deep-link bidon
+          //   - Un attaquant forge un deep-link
+          //   - Le user lance l'app directement par un lien sylea:// stale
+          console.warn('[deep-link] no OAuth in progress, ignoring (no nonce stored)')
+          return
+        }
+        if (expectedNonce !== nonce) {
+          // Nonce stocke mais ne matche pas — possiblement double-click sur
+          // le bouton (le 2e click a regenere un nouveau nonce, et la 1ere
+          // reponse OAuth arrive avec l'ancien). On affiche un message friendly.
+          console.warn('[deep-link] nonce mismatch (expected vs received differ)')
+          setError('Connexion Google échouée. Réessaie en cliquant sur le bouton.')
+          // On nettoie pour permettre un retry propre
+          try { localStorage.removeItem('sylea_desktop_oauth_nonce') } catch {}
           return
         }
         // OK — on consume le nonce et on setToken
+        console.log('[deep-link] login OK, setting token')
         try { localStorage.removeItem('sylea_desktop_oauth_nonce') } catch {}
         localStorage.setItem('sylea_desktop_token', token)
         setToken(token)
         setError('')
       } catch (e) {
-        setError(`Deep-link parse error : ${e instanceof Error ? e.message : ''}`)
+        console.error('[deep-link] parse error:', e)
+        setError(`Erreur deep-link : ${e instanceof Error ? e.message : ''}`)
       }
+    }
+
+    // Listener temps-reel : deep-link recu pendant que l'app tourne
+    listen<string>('deep-link:received', (event) => {
+      handleDeepLinkUrl(event.payload || '')
     }).then((fn) => { unsub = fn }).catch(() => {})
+
+    // Cold-start : si l'app vient d'etre lancee VIA un sylea://, le handler
+    // Rust a fire avant que ce listener soit attache. On rattrape via la
+    // commande Tauri take_pending_deep_link() qui consomme l'URL cachee.
+    invoke<string | null>('take_pending_deep_link')
+      .then((url) => {
+        if (url) {
+          console.log('[deep-link] cold-start URL detected, processing')
+          handleDeepLinkUrl(url)
+        }
+      })
+      .catch(() => {})
+
     return () => { try { unsub?.() } catch {} }
   }, [])
 
@@ -1387,17 +1438,25 @@ function App() {
               Le nonce empeche un attaquant de forger un deep-link de login. */}
           <button
             onClick={() => {
+              // Clear toute erreur affichee (notamment celle d'un test ou d'un
+              // precedent essai foire) avant de lancer un nouveau flow.
+              setError('')
               // Genere un nonce cryptographique (32 chars hex)
               const arr = new Uint8Array(16)
               crypto.getRandomValues(arr)
               const nonce = Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('')
-              // Stocke le nonce pour verification au retour
+              // Stocke le nonce pour verification au retour. Ecrase tout ancien
+              // nonce (si l'user re-clique avant que le 1er flow se termine).
               try { localStorage.setItem('sylea_desktop_oauth_nonce', nonce) } catch {}
+              console.log('[oauth-button] generated nonce, opening browser')
               const webBase = API_BASE.includes('localhost')
                 ? 'http://localhost:5173'
                 : 'https://sylea.ai'
               invoke('open_url', { url: `${webBase}/auth/google-desktop?nonce=${nonce}` })
-                .catch(() => {})
+                .catch((e) => {
+                  console.error('[oauth-button] open_url failed:', e)
+                  setError('Impossible d\'ouvrir le navigateur')
+                })
             }}
             style={{
               width: '100%', padding: '10px 14px', borderRadius: 8,
