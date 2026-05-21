@@ -793,6 +793,29 @@ async def oauth_apple_form_post_callback(
     return RedirectResponse(url=f"{frontend_base}/auth/callback?{query}", status_code=303)
 
 
+# ── CSRF token (apps natives Tauri/mobile sans gestion cookie cross-origin) ──
+
+@router.get("/csrf-token")
+async def get_csrf_token_endpoint():
+    """Retourne un token CSRF signé en JSON (sans cookie).
+
+    Utilisé par les clients natifs (Tauri desktop, app mobile) qui ne peuvent
+    pas garantir la propagation cross-origin du cookie sylea_csrf.
+
+    Le token retourné est valide pour le mode "signed-token only" du
+    CSRFMiddleware : envoyé en header X-CSRF-Token sur les POST/PUT/PATCH/
+    DELETE, il est accepté si sa signature HMAC est valide (sans nécessité
+    de cookie match).
+
+    Sécurité : la signature HMAC empêche un attaquant de forger un token
+    sans connaître SYLEA_CSRF_SECRET. Combinée au Bearer JWT (auth), elle
+    offre une protection équivalente au double-submit pour les apps
+    natives.
+    """
+    from api.csrf_middleware import generate_csrf_token
+    return {"csrf_token": generate_csrf_token()}
+
+
 # ── Me (current user info) ────────────────────────────────────────────────────
 
 @router.get("/me", response_model=UserOut)

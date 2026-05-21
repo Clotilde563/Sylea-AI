@@ -12,6 +12,7 @@ import { StatsHUD, type StatsHUDData, pushHist } from './StatsHUD'
 import { CountUp } from './CountUp'
 import { SlideIn } from './Motion'
 import { EcouteActive } from './EcouteActive'
+import { apiFetch } from './apiClient'
 
 // API backend URL. En dev : localhost. En prod : configurable via VITE_API_BASE
 // (au build Tauri) ou via window.localStorage 'sylea_api_base' (modifiable user).
@@ -377,15 +378,16 @@ function App() {
     stepsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [steps])
 
-  // Login
+  // Login — passe par apiFetch pour avoir credentials:'include' + le cookie
+  // CSRF auto-fetché si nécessaire (le backend l'exige sur tous les POST
+  // depuis le commit b2fe000 "sécurité niveau pro").
   const handleLogin = async () => {
     setError('')
     try {
-      const res = await fetch(`${API_BASE}/api/auth/login`, {
+      const res = await apiFetch(API_BASE, '/api/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
-      })
+      }, { withAuth: false })  // pas de Bearer pour login (on l'a pas encore)
       const data = await res.json()
       if (data.access_token) {
         setToken(data.access_token)
@@ -393,8 +395,8 @@ function App() {
       } else {
         setError(data.detail || 'Identifiants incorrects')
       }
-    } catch {
-      setError('Serveur inaccessible (localhost:8000)')
+    } catch (e) {
+      setError(`Serveur inaccessible (${API_BASE}) : ${e instanceof Error ? e.message : ''}`)
     }
   }
 
@@ -408,12 +410,12 @@ function App() {
   // Reminder checker — polls every 30s and fires desktop notifications
   useEffect(() => {
     if (!token) return
-    const headers = { 'Authorization': `Bearer ${token}` }
+    // (headers Bearer + CSRF gérés automatiquement par apiFetch)
     const firedReminders = new Set<number>()
 
     const checkReminders = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/agent2/reminders`, { headers })
+        const res = await apiFetch(API_BASE, '/api/agent2/reminders')
         const reminders = await res.json()
         const now = new Date()
         for (const r of reminders) {
@@ -425,9 +427,9 @@ function App() {
             if (!notifsPausedRef.current && 'Notification' in window && Notification.permission === 'granted') {
               new Notification('⏰ Sylea Agent — Rappel', { body: r.message })
             }
-            // Mark as completed
-            fetch(`${API_BASE}/api/agent2/reminders/${r.id}/complete`, {
-              method: 'POST', headers,
+            // Mark as completed (POST → apiFetch ajoute X-CSRF-Token auto)
+            apiFetch(API_BASE, `/api/agent2/reminders/${r.id}/complete`, {
+              method: 'POST',
             }).catch(() => {})
           }
         }
@@ -442,9 +444,7 @@ function App() {
   // Fetch initial agents activation state au boot/login (snapshot)
   useEffect(() => {
     if (!token) return
-    fetch(`${API_BASE}/api/desktop/agents-activation`, {
-      headers: { 'Authorization': `Bearer ${token}` },
-    })
+    apiFetch(API_BASE, '/api/desktop/agents-activation')
       .then(r => r.json())
       .then(data => {
         if (data?.active) setActivatedAgents(data.active)
@@ -457,9 +457,7 @@ function App() {
     if (!token) return
     const checkOpenClaw = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/agent3/status`, {
-          headers: { 'Authorization': `Bearer ${token}` },
-        })
+        const res = await apiFetch(API_BASE, '/api/agent3/status')
         const data = await res.json()
         setOpenclawConnected(data.openclaw_connected === true)
       } catch {
@@ -587,10 +585,9 @@ function App() {
             try {
               const { invoke } = await import('@tauri-apps/api/core')
               const content = await invoke('read_file', { path: data.path })
-              // Send content back to server
-              const response = await fetch(`${API_BASE}/api/agent3/file-response`, {
+              // Send content back to server (CSRF auto-géré par apiFetch)
+              await apiFetch(API_BASE, '/api/agent3/file-response', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
                 body: JSON.stringify({ request_id: data.request_id, content, path: data.path }),
               })
             } catch (err) {
@@ -687,9 +684,8 @@ function App() {
       case 'EMAIL': {
         addStep('EMAIL', `${tag}Preparation mail pour ${action.data.to}...`, 'running', sourceAgent)
         try {
-          const res = await fetch(`${API_BASE}/api/agent2/send-email`, {
+          const res = await apiFetch(API_BASE, '/api/agent2/send-email', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
             body: JSON.stringify(action.data),
           })
           const result = await res.json()
@@ -747,9 +743,8 @@ function App() {
       case 'REMINDER':
         addStep('REMINDER', `${tag}Creation rappel: ${action.data.message} a ${action.data.time}...`, 'running', sourceAgent)
         try {
-          await fetch(`${API_BASE}/api/agent2/create-reminder`, {
+          await apiFetch(API_BASE, '/api/agent2/create-reminder', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
             body: JSON.stringify({ time: action.data.time, date: action.data.date, message: action.data.message }),
           })
           addStep('REMINDER', `${tag}Rappel cree: ${action.data.message} — ${action.data.date} a ${action.data.time}`, 'done', sourceAgent)
@@ -849,9 +844,8 @@ function App() {
           addStep('FILE', `${tag}Fichier lu (${content.length} caracteres)`, 'done', sourceAgent)
           // Envoyer le contenu au backend pour que l'agent l'analyse
           try {
-            await fetch(`${API_BASE}/api/agent3/chat`, {
+            await apiFetch(API_BASE, '/api/agent3/chat', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
               body: JSON.stringify({
                 messages: [{ role: 'user', content: `Voici le contenu du fichier "${readPath}":\n\n${content.substring(0, 10000)}` }],
               }),
@@ -883,9 +877,9 @@ function App() {
         addStep('FILE', `${tag}Telechargement: ${downloadName}...`, 'running', sourceAgent)
         try {
           const { invoke } = await import('@tauri-apps/api/core')
-          const response = await fetch(`${API_BASE}${downloadUrl}`, {
-            headers: { 'Authorization': `Bearer ${token}` },
-          })
+          // GET binaire : apiFetch ajoute Authorization Bearer + credentials:include.
+          // Le Content-Type:application/json sur le request n'a pas d'effet en GET sans body.
+          const response = await apiFetch(API_BASE, downloadUrl)
           const blob = await response.blob()
           const buffer = await blob.arrayBuffer()
           const bytes = new Uint8Array(buffer)
@@ -928,9 +922,8 @@ function App() {
         // Auto-download le PDF sur le PC
         try {
           const { invoke } = await import('@tauri-apps/api/core')
-          const response = await fetch(`${API_BASE}${pdfUrl}`, {
-            headers: { 'Authorization': `Bearer ${token}` },
-          })
+          // GET binaire PDF (Bearer + credentials gérés par apiFetch)
+          const response = await apiFetch(API_BASE, pdfUrl)
           if (response.ok) {
             const blob = await response.blob()
             const buffer = await blob.arrayBuffer()

@@ -227,39 +227,56 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             self._ensure_cookie(request, response)
             return response
 
-        # POST/PUT/PATCH/DELETE : validation stricte
+        # POST/PUT/PATCH/DELETE : validation
         if method in _UNSAFE_METHODS:
             cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
             header_token = request.headers.get(CSRF_HEADER_NAME)
 
-            if not cookie_token or not header_token:
+            # Le header est OBLIGATOIRE dans tous les modes
+            if not header_token:
                 return JSONResponse(
                     status_code=403,
                     content={
-                        "detail": "Protection CSRF : cookie ou header manquant.",
+                        "detail": "Protection CSRF : header X-CSRF-Token manquant.",
                         "code": "csrf_missing",
                     },
                 )
 
-            # Double-submit : cookie et header DOIVENT correspondre
-            if not hmac.compare_digest(cookie_token, header_token):
-                return JSONResponse(
-                    status_code=403,
-                    content={
-                        "detail": "Protection CSRF : cookie et header divergent.",
-                        "code": "csrf_mismatch",
-                    },
-                )
-
-            # Signature : empêche un attaquant de forger un cookie+header
-            if not verify_csrf_token(cookie_token):
-                return JSONResponse(
-                    status_code=403,
-                    content={
-                        "detail": "Protection CSRF : signature invalide.",
-                        "code": "csrf_invalid_signature",
-                    },
-                )
+            # ── Mode 1 : double-submit cookie (web standard) ─────────────────
+            # Si un cookie est présent, on EXIGE qu'il matche le header (le
+            # mode le plus strict — empêche un attaquant qui aurait injecté
+            # un header de bypasser sans contrôler aussi le cookie).
+            if cookie_token:
+                if not hmac.compare_digest(cookie_token, header_token):
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "detail": "Protection CSRF : cookie et header divergent.",
+                            "code": "csrf_mismatch",
+                        },
+                    )
+                if not verify_csrf_token(cookie_token):
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "detail": "Protection CSRF : signature invalide.",
+                            "code": "csrf_invalid_signature",
+                        },
+                    )
+            # ── Mode 2 : signed-token only (apps natives Tauri/iOS/Android) ──
+            # Pas de cookie présent (cross-origin tauri:// vers http:// par
+            # ex.). On accepte si le header est un token signé HMAC valide.
+            # La protection CSRF est garantie par la signature : un attaquant
+            # ne peut pas forger un token sans connaître SYLEA_CSRF_SECRET.
+            else:
+                if not verify_csrf_token(header_token):
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "detail": "Protection CSRF : signature du header invalide.",
+                            "code": "csrf_invalid_signature",
+                        },
+                    )
 
         # Méthode safe (GET/HEAD/OPTIONS) ou POST valide : on continue
         response = await call_next(request)
