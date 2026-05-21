@@ -30,18 +30,19 @@ from PIL import Image, ImageDraw, ImageFilter
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Palette rose Syléa (identique au desktop SyleaLogo.tsx)
+# Palette rose + violet Syléa (alignee sur desktop/src/SyleaLogo.tsx)
 # ─────────────────────────────────────────────────────────────────────────────
-# Bas (profond) -> Haut (clair)
+# Bas (plum profond / violet) -> Haut (rose chaud)
+# Pas de rouge ni de blanc - que des roses et violets vibrants.
 GRADIENT_STOPS = [
-    (0.00, (159, 18, 57)),     # #9f1239 - rose-900
-    (0.30, (190, 24, 93)),     # #be185d - pink-700
-    (0.65, (236, 72, 153)),    # #ec4899 - pink-500
-    (1.00, (251, 207, 232)),   # #fbcfe8 - pink-200
+    (0.00, (61, 20, 97)),      # #3d1461 - plum profond (violet sombre)
+    (0.30, (124, 58, 237)),    # #7c3aed - violet electrique
+    (0.65, (217, 70, 239)),    # #d946ef - fuchsia / magenta
+    (1.00, (236, 72, 153)),    # #ec4899 - rose chaud (pink-500)
 ]
 
-# Couleur de halo (pour le flou exterieur)
-HALO_COLOR = (236, 72, 153)  # #ec4899
+# Couleur de halo (rose fuchsia pour eclat lumineux)
+HALO_COLOR = (217, 70, 239)  # #d946ef
 
 # Bordure exterieure sombre
 BORDER_COLOR = (2, 4, 16)
@@ -49,8 +50,8 @@ BORDER_COLOR = (2, 4, 16)
 # Canal central creux
 CHANNEL_COLOR = (5, 8, 16)
 
-# Reflet speculaire (rose pale + transparence)
-SPECULAR_COLOR = (255, 205, 225)
+# Reflet speculaire (violet pale, pas du blanc)
+SPECULAR_COLOR = (210, 180, 250)  # rgb plum/violet pale
 
 
 # ─────────────────────────────────────────────────────────────────────────────
