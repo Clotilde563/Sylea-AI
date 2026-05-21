@@ -308,6 +308,9 @@ function App() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
+  // Plan de l'utilisateur — null = pas encore chargé, 'free' = bloqué, autre = OK
+  const [userPlan, setUserPlan] = useState<string | null>(null)
+  const [planLoading, setPlanLoading] = useState(false)
   const [wsConnected, setWsConnected] = useState(false)
   // Agent selectionne. null = "auto" : suit l'agent le plus recemment actif.
   // Si l'utilisateur clique sur un agent dans la sidebar, on bascule en mode
@@ -399,6 +402,32 @@ function App() {
       setError(`Serveur inaccessible (${API_BASE}) : ${e instanceof Error ? e.message : ''}`)
     }
   }
+
+  // Plan check — charge le plan utilisateur apres login.
+  // Le desktop Syléa Agent est reserve aux abonnes payants (Avance / Pro / Team).
+  // Les comptes "free" voient un ecran de proposition d'upgrade au lieu de l'app.
+  useEffect(() => {
+    if (!token) {
+      setUserPlan(null)
+      return
+    }
+    setPlanLoading(true)
+    apiFetch(API_BASE, '/api/agent3/plan')
+      .then(r => r.json())
+      .then(data => {
+        // Le backend renvoie {"plan": {"name": "free"|"advanced"|"pro"|"team", ...}, "usage": {...}}
+        // (cf. api/routers/agent3_openclaw.py @router.get("/plan"))
+        const planObj = data?.plan || data  // fallback si format change
+        const name = (planObj?.name || planObj?.plan_name || 'free').toLowerCase()
+        setUserPlan(name)
+      })
+      .catch(() => {
+        // En cas d'erreur, on suppose free par defaut (securite : ne pas
+        // ouvrir le desktop si on n'arrive pas a confirmer le tier).
+        setUserPlan('free')
+      })
+      .finally(() => setPlanLoading(false))
+  }, [token])
 
   // Request notification permission on mount
   useEffect(() => {
@@ -1085,6 +1114,102 @@ function App() {
   }
 
   // ── LOGIN ──
+  // ─── Gate plan free ─────────────────────────────────────────────────────
+  // Le desktop Syléa Agent est reserve aux abonnes payants. Un user free
+  // qui se connecte voit un ecran "Upgrade" avec lien vers /quotas, et un
+  // bouton pour se deconnecter.
+  if (token && userPlan === 'free' && !planLoading) {
+    return (
+      <div style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        minHeight: '100vh', padding: '2rem',
+      }}>
+        <SyleaWordmark logoSize={48} fontSize={20} gap={14} animated hover3d />
+        <div style={{
+          marginTop: 32,
+          background: SY.surface,
+          border: `1px solid ${SY.border}`,
+          borderRadius: 10,
+          padding: '32px 28px',
+          maxWidth: 440, width: '100%',
+          position: 'relative',
+          backdropFilter: 'blur(8px)',
+          boxShadow: `0 0 0 1px ${SY.border} inset, 0 8px 30px rgba(0,0,0,0.45)`,
+          textAlign: 'center',
+        }}>
+          <CornerBrackets color={SY.cyan} />
+          <div style={{
+            fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.2em',
+            color: SY.cyan, marginBottom: 18, textTransform: 'uppercase',
+          }}>
+            <span style={{ opacity: 0.6 }}>[</span> upgrade requis <span style={{ opacity: 0.6 }}>]</span>
+          </div>
+          <div style={{ fontSize: 32, marginBottom: 12 }}>🔒</div>
+          <h2 style={{
+            fontSize: 18, fontWeight: 700, marginBottom: 14,
+            color: SY.text, fontFamily: SY.mono, letterSpacing: '0.05em',
+          }}>
+            Syléa Desktop n'est pas inclus<br/>dans le plan Free
+          </h2>
+          <p style={{
+            fontSize: 13, color: SY.textDim, lineHeight: 1.55,
+            marginBottom: 22, fontFamily: SY.mono,
+          }}>
+            Le desktop est reserve aux abonnes <strong style={{ color: SY.cyan }}>Avancé</strong>.<br/>
+            Mets à niveau ton compte pour debloquer :
+          </p>
+          <div style={{
+            fontSize: 12, color: SY.text, fontFamily: SY.mono,
+            background: 'rgba(0,200,255,0.04)',
+            border: `1px solid rgba(0,200,255,0.15)`,
+            borderRadius: 8, padding: '12px 14px',
+            marginBottom: 22, textAlign: 'left', lineHeight: 1.7,
+          }}>
+            <div>✓ Agent Syléa 2 (assistant exécutant)</div>
+            <div>✓ Skills OpenClaw (email, calendrier, notes…)</div>
+            <div>✓ Plan "Que faire ?" quotidien IA</div>
+            <div>✓ 30 actions/jour (vs 10 en Free)</div>
+            <div>✓ Notifications & rappels intelligents</div>
+          </div>
+          <button
+            onClick={() => invoke('open_url', { url: 'https://sylea.ai/quotas' }).catch(() => {})}
+            style={{
+              width: '100%', padding: '11px 14px', borderRadius: 8,
+              background: `linear-gradient(135deg, ${SY.violet} 0%, ${SY.indigo} 40%, ${SY.blue} 75%, ${SY.cyan} 100%)`,
+              color: '#fff',
+              fontWeight: 700, fontSize: 13, letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+              cursor: 'pointer',
+              boxShadow: `0 0 0 1px rgba(0,200,255,0.3), 0 6px 20px rgba(0,200,255,0.18)`,
+              fontFamily: SY.mono,
+              border: 'none',
+            }}
+          >
+            ▸ Passer à Sylea Avancé
+          </button>
+          <button
+            onClick={() => {
+              setToken(null)
+              localStorage.removeItem('sylea_desktop_token')
+              setUserPlan(null)
+            }}
+            style={{
+              marginTop: 14, width: '100%', padding: '9px 14px', borderRadius: 8,
+              background: 'transparent',
+              border: `1px solid ${SY.border}`,
+              color: SY.textDim,
+              fontWeight: 500, fontSize: 12, letterSpacing: '0.1em',
+              cursor: 'pointer',
+              fontFamily: SY.mono,
+            }}
+          >
+            Se déconnecter
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   if (!token) {
     return (
       <div style={{
@@ -1170,15 +1295,63 @@ function App() {
             cursor: 'pointer',
             boxShadow: `0 0 0 1px rgba(0,200,255,0.3), 0 6px 20px rgba(0,200,255,0.18)`,
             fontFamily: SY.mono,
+            border: 'none',
           }}>
             ▸ Connexion
+          </button>
+
+          {/* Divider OU */}
+          <div style={{
+            margin: '18px 0 14px', display: 'flex', alignItems: 'center', gap: 10,
+            color: SY.textDim, fontSize: 10, fontFamily: SY.mono, letterSpacing: '0.15em',
+          }}>
+            <div style={{ flex: 1, height: 1, background: SY.border }} />
+            <span>OU</span>
+            <div style={{ flex: 1, height: 1, background: SY.border }} />
+          </div>
+
+          {/* Bouton Continuer avec Google.
+              Ouvre la page de login web dans le navigateur systeme — l'user
+              y fait son OAuth Google, recupere son JWT en se loggant. Il
+              revient ensuite sur le desktop avec son email + mot de passe
+              (le compte est cree en cas de besoin lors du flow web). */}
+          <button
+            onClick={() => {
+              const webBase = API_BASE.includes('localhost')
+                ? 'http://localhost:5173'
+                : 'https://sylea.ai'
+              invoke('open_url', { url: `${webBase}/login` }).catch(() => {})
+            }}
+            style={{
+              width: '100%', padding: '10px 14px', borderRadius: 8,
+              background: '#fff',
+              color: '#1f2937',
+              fontWeight: 600, fontSize: 13, letterSpacing: '0.05em',
+              cursor: 'pointer',
+              border: 'none',
+              fontFamily: SY.mono,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+              transition: 'transform 0.15s, box-shadow 0.15s',
+              boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-1px)' }}
+            onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)' }}
+            title="Ouvre le navigateur sur la page de connexion web. Crée ton compte avec Google là-bas, puis reviens te connecter ici avec email/mot de passe."
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24">
+              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4" />
+              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
+              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+            </svg>
+            Continuer avec Google
           </button>
 
           <div style={{
             marginTop: 16, fontSize: 10, fontFamily: SY.mono,
             color: SY.textDim, textAlign: 'center', letterSpacing: '0.1em',
           }}>
-            Secure · End-to-end · <span style={{ color: SY.cyan }}>localhost:8000</span>
+            Secure · End-to-end · <span style={{ color: SY.cyan }}>{API_BASE.replace(/^https?:\/\//, '')}</span>
           </div>
         </div>
       </div>
