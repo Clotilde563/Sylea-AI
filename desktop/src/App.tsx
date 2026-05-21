@@ -403,6 +403,51 @@ function App() {
     }
   }
 
+  // Listener deep-link OAuth — recoit le JWT apres "Continuer avec Google"
+  // (et a terme Apple). Le navigateur ouvre sylea://auth/callback?token=<JWT>
+  // &nonce=<NONCE> qui declenche le scheme handler Windows/macOS/Linux. Tauri
+  // emet l'evenement 'deep-link:received' avec l'URL complete.
+  //
+  // Securite : on verifie le nonce contre celui stocke en localStorage avant
+  // de setToken — empeche un attaquant qui devine l'URL deep-link de forger
+  // un login. Cf. GoogleDesktopBridgePage.tsx pour le flow complet.
+  useEffect(() => {
+    let unsub: (() => void) | undefined
+    listen<string>('deep-link:received', (event) => {
+      try {
+        const urlStr = event.payload || ''
+        if (!urlStr.startsWith('sylea://auth/callback')) return
+        // Parser l'URL — URL ne sait pas parser sylea:// directement, on
+        // convertit en http:// le temps de l'analyse.
+        const httpUrl = urlStr.replace(/^sylea:\/\//, 'http://')
+        const parsed = new URL(httpUrl)
+        const token = parsed.searchParams.get('token') || ''
+        const nonce = parsed.searchParams.get('nonce') || ''
+        if (!token) {
+          setError('Deep-link sans token reçu')
+          return
+        }
+        // Verifie le nonce
+        const expectedNonce = (() => {
+          try { return localStorage.getItem('sylea_desktop_oauth_nonce') || '' }
+          catch { return '' }
+        })()
+        if (!expectedNonce || expectedNonce !== nonce) {
+          setError('Deep-link rejeté : nonce invalide (tentative de forge ?)')
+          return
+        }
+        // OK — on consume le nonce et on setToken
+        try { localStorage.removeItem('sylea_desktop_oauth_nonce') } catch {}
+        localStorage.setItem('sylea_desktop_token', token)
+        setToken(token)
+        setError('')
+      } catch (e) {
+        setError(`Deep-link parse error : ${e instanceof Error ? e.message : ''}`)
+      }
+    }).then((fn) => { unsub = fn }).catch(() => {})
+    return () => { try { unsub?.() } catch {} }
+  }, [])
+
   // Plan check — charge le plan utilisateur apres login.
   // Le desktop Syléa Agent est reserve aux abonnes payants (Avance / Pro / Team).
   // Les comptes "free" voient un ecran de proposition d'upgrade au lieu de l'app.
@@ -1330,17 +1375,29 @@ function App() {
             <div style={{ flex: 1, height: 1, background: SY.border }} />
           </div>
 
-          {/* Bouton Continuer avec Google.
-              Ouvre la page de login web dans le navigateur systeme — l'user
-              y fait son OAuth Google, recupere son JWT en se loggant. Il
-              revient ensuite sur le desktop avec son email + mot de passe
-              (le compte est cree en cas de besoin lors du flow web). */}
+          {/* Bouton Continuer avec Google — deep-link OAuth.
+              Flow complet (cf. GoogleDesktopBridgePage.tsx + AuthCallbackPage.tsx) :
+                1. Genere un nonce aleatoire et le stocke en localStorage
+                2. Ouvre /auth/google-desktop?nonce=<NONCE> dans le navigateur
+                3. La page web lance l'OAuth Google avec state=desktop_google_<NONCE>
+                4. Google → /auth/callback → JWT recu → redirect sylea://auth/callback
+                   ?token=<JWT>&nonce=<NONCE>
+                5. Le listener deep-link (plus haut) recoit l'evenement, verifie
+                   le nonce, setToken(jwt) → user connecte automatiquement.
+              Le nonce empeche un attaquant de forger un deep-link de login. */}
           <button
             onClick={() => {
+              // Genere un nonce cryptographique (32 chars hex)
+              const arr = new Uint8Array(16)
+              crypto.getRandomValues(arr)
+              const nonce = Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('')
+              // Stocke le nonce pour verification au retour
+              try { localStorage.setItem('sylea_desktop_oauth_nonce', nonce) } catch {}
               const webBase = API_BASE.includes('localhost')
                 ? 'http://localhost:5173'
                 : 'https://sylea.ai'
-              invoke('open_url', { url: `${webBase}/login` }).catch(() => {})
+              invoke('open_url', { url: `${webBase}/auth/google-desktop?nonce=${nonce}` })
+                .catch(() => {})
             }}
             style={{
               width: '100%', padding: '10px 14px', borderRadius: 8,
@@ -1356,7 +1413,7 @@ function App() {
             }}
             onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-1px)' }}
             onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)' }}
-            title="Ouvre le navigateur sur la page de connexion web. Crée ton compte avec Google là-bas, puis reviens te connecter ici avec email/mot de passe."
+            title="Ouvre le navigateur, fais ton OAuth Google, et tu reviens automatiquement loggé sur le desktop."
           >
             <svg width="18" height="18" viewBox="0 0 24 24">
               <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4" />

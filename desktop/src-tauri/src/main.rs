@@ -818,14 +818,42 @@ fn main() {
     let toggle_shortcut_handler = toggle_shortcut.clone();
     let toggle_shortcut_setup = toggle_shortcut.clone();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // Single-instance : Windows/Linux uniquement. Quand une 2e instance se
+    // lance (par exemple via deep-link sylea://), elle envoie ses arguments
+    // a la 1ere instance puis quitte. La 1ere instance recoit le callback,
+    // ramene sa fenetre au premier plan, et reemet le deep-link au handler
+    // tauri-plugin-deep-link (via plugin-side feature "deep-link").
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            eprintln!("[single-instance] new launch args: {:?}", args);
+            // Bring main window to front
+            use tauri::Manager;
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+            // Note : avec la feature "deep-link" du plugin single-instance,
+            // l'URL deep-link contenue dans `args` est automatiquement
+            // forwardee au plugin deep-link (qui declenche on_open_url).
+            // On n'a donc rien d'autre a faire ici.
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Deep-link : permet a sylea://auth/callback?token=... d'arriver dans
-        // l'app (utilise par Sign in with Apple via navigateur systeme).
+        // l'app (utilise par Sign in with Google + Apple via navigateur
+        // systeme). Sur Windows/Linux, fonctionne en tandem avec single-instance
+        // : les schemes sont forwardes a l'instance courante au lieu de spawner
+        // une nouvelle fenetre.
         .plugin(tauri_plugin_deep_link::init())
         .plugin({
             // macos_launcher est gate par cfg(target_os = "macos")
@@ -873,9 +901,24 @@ fn main() {
             }
 
             // Deep-link handler : sylea://auth/callback?token=...&...
-            // Sur macOS, Apple Sign-In dans le navigateur systeme aboutit a
-            // sylea://auth/callback?token=<JWT> qu'on emet vers la UI JS.
+            // Utilise pour ramener l'utilisateur sur le desktop apres un OAuth
+            // Google/Apple effectue dans le navigateur systeme.
+            //
+            // Enregistrement du scheme sur Windows : en release build sans MSI
+            // installer, le scheme n'est pas enregistre automatiquement dans le
+            // registre. On force l'enregistrement au demarrage via register_all()
+            // (cree HKCU\Software\Classes\sylea\shell\open\command). C'est idempotent.
+            // Sur macOS le scheme est dans Info.plist, sur Linux dans .desktop file
+            // — l'appel register_all() est un no-op gracieux sur ces plateformes.
             use tauri_plugin_deep_link::DeepLinkExt;
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            {
+                if let Err(e) = app.deep_link().register_all() {
+                    eprintln!("[deep-link] register_all failed (non-fatal): {}", e);
+                } else {
+                    eprintln!("[deep-link] sylea:// scheme registered");
+                }
+            }
             let app_handle_for_dl = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
                 for url in event.urls() {

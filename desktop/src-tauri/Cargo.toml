@@ -12,9 +12,9 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-window-state = "2"
-# Deep-link : recoit sylea://auth/callback?token=... apres Sign in with Apple
-# via le navigateur systeme. Enregistre automatiquement le scheme sylea://
-# au boot de l'app.
+# Deep-link : recoit sylea://auth/callback?token=... apres Sign in with Google
+# /Apple via le navigateur systeme. Enregistre automatiquement le scheme
+# sylea:// au boot de l'app.
 tauri-plugin-deep-link = "2"
 dirs = "5"
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +27,15 @@ cpal = "0.15"
 hound = "3.5"
 chrono = { version = "0.4", features = ["serde"] }
 lazy_static = "1.5"
+
+# Single-instance : OBLIGATOIRE sur Windows/Linux pour que les deep-links
+# soient forwardes a l'instance existante au lieu d'en spawner une nouvelle.
+# Sans ce plugin, chaque clic sur un lien sylea:// ouvre une 2e fenetre.
+# La feature "deep-link" cable automatiquement le hook ; il faut quand meme
+# enregistrer le plugin dans main.rs avec un callback qui recoit les args
+# (URL deep-link incluse) et les emit vers le handler deep-link existant.
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 # Wake lock — empeche le laptop de se mettre en veille pendant 4h de recording.
 # Cross-platform : Windows utilise SetThreadExecutionState (ES_DISPLAY_REQUIRED
