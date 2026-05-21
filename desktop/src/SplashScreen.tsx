@@ -137,30 +137,30 @@ export function SplashScreen({ onComplete, duration = 1100 }: SplashScreenProps)
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         animation: phase === 'visible' ? 'sy-splash-pop 1s ease-out' : 'none',
       }}>
-        {/* Halo lumineux derriere le logo */}
+        {/* Halo lumineux derriere le logo (rose Syléa) */}
         <div style={{
           position: 'absolute', inset: 24, borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(0,200,255,0.35) 0%, transparent 70%)',
+          background: 'radial-gradient(circle, rgba(236,72,153,0.35) 0%, transparent 70%)',
           filter: 'blur(20px)',
           animation: 'sy-pulse 2s ease-in-out infinite',
         }} />
         <SyleaLogo size={140} animated />
       </div>
 
-      {/* Wordmark */}
+      {/* Wordmark (rose Syléa) */}
       <div style={{
         fontFamily: '"Inter", system-ui, sans-serif',
         fontWeight: 800,
         fontSize: 28,
         letterSpacing: '0.32em',
-        color: '#e6f0ff',
-        textShadow: '0 0 18px rgba(0, 200, 255, 0.45)',
+        color: '#fbe4f0',
+        textShadow: '0 0 18px rgba(236, 72, 153, 0.45)',
         animation: phase === 'visible' ? 'sy-splash-fadein 0.7s ease-out 0.2s backwards' : 'none',
       }}>
-        SYLEA <span style={{ color: '#7ad9ff' }}>AGENT</span>
+        SYLEA <span style={{ color: '#f9a8d4' }}>AGENT</span>
       </div>
 
-      {/* Bar de progression + label tech */}
+      {/* Bar de progression + label tech (rose Syléa) */}
       <div style={{
         marginTop: 4,
         display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10,
@@ -168,23 +168,23 @@ export function SplashScreen({ onComplete, duration = 1100 }: SplashScreenProps)
       }}>
         <div style={{
           width: 260, height: 2, borderRadius: 1,
-          background: 'rgba(0, 200, 255, 0.08)',
+          background: 'rgba(236, 72, 153, 0.08)',
           overflow: 'hidden', position: 'relative',
         }}>
           <div style={{
             position: 'absolute', left: 0, top: 0, height: '100%',
             width: '40%',
-            background: 'linear-gradient(90deg, transparent, #00c8ff, transparent)',
+            background: 'linear-gradient(90deg, transparent, #ec4899, transparent)',
             animation: 'sy-splash-bar 1.1s ease-in-out infinite',
           }} />
         </div>
         <div style={{
           fontFamily: '"JetBrains Mono","Fira Code",monospace',
           fontSize: 10, letterSpacing: '0.28em',
-          color: 'rgba(122, 217, 255, 0.7)',
+          color: 'rgba(244, 114, 182, 0.75)',
           textTransform: 'uppercase',
         }}>
-          <span style={{ color: '#00c8ff' }}>▸</span> Initializing system
+          <span style={{ color: '#ec4899' }}>▸</span> Initializing system
           <span className="sy-splash-dots">...</span>
         </div>
       </div>

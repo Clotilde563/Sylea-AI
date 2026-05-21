@@ -2,12 +2,12 @@
      Pas de cadre carré : fond transparent, le navigateur ou l'OS dessine le bord. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
   <defs>
-    <!-- Gradient violet (bas) → cyan (haut) -->
+    <!-- Gradient rose Syléa (bas profond → haut pâle) -->
     <linearGradient id="sl-grad" x1="50%" y1="100%" x2="50%" y2="0%">
-      <stop offset="0%"   stop-color="#5520b8"/>
-      <stop offset="30%"  stop-color="#1848d8"/>
-      <stop offset="65%"  stop-color="#0090e0"/>
-      <stop offset="100%" stop-color="#00c8ff"/>
+      <stop offset="0%"   stop-color="#9f1239"/>
+      <stop offset="30%"  stop-color="#be185d"/>
+      <stop offset="65%"  stop-color="#ec4899"/>
+      <stop offset="100%" stop-color="#fbcfe8"/>
     </linearGradient>
     <!-- Halo flou pour la lueur extérieure (région étendue pour éviter
          le rectangle visible autour du logo) -->
@@ -38,8 +38,8 @@
     d="M 60 21 C 88 21, 88 45, 60 54 C 32 63, 32 87, 60 87"
     stroke="#050810" stroke-width="6" fill="none" stroke-linecap="butt"/>
 
-  <!-- Couche 4 : reflet spéculaire blanc-cyan -->
+  <!-- Couche 4 : reflet spéculaire rose pâle -->
   <path
     d="M 60 21 C 88 21, 88 45, 60 54 C 32 63, 32 87, 60 87"
-    stroke="rgba(160,225,255,0.55)" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+    stroke="rgba(255,205,225,0.65)" stroke-width="1.2" fill="none" stroke-linecap="round"/>
 </svg>

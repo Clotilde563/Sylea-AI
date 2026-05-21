@@ -28,12 +28,12 @@ export function SyleaLogo({ size = 40, animated = true }: SyleaLogoProps) {
       style={{ display: 'block' }}
     >
       <defs>
-        {/* Gradient violet → cyan (bas → haut) */}
+        {/* Gradient rose profond → rose pale (bas → haut) — palette Syléa */}
         <linearGradient id={gradId} x1="50%" y1="100%" x2="50%" y2="0%">
-          <stop offset="0%"   stopColor="#5520b8"/>
-          <stop offset="30%"  stopColor="#1848d8"/>
-          <stop offset="65%"  stopColor="#0090e0"/>
-          <stop offset="100%" stopColor="#00c8ff"/>
+          <stop offset="0%"   stopColor="#9f1239"/>
+          <stop offset="30%"  stopColor="#be185d"/>
+          <stop offset="65%"  stopColor="#ec4899"/>
+          <stop offset="100%" stopColor="#fbcfe8"/>
         </linearGradient>
 
         {/* Halo flou — région étendue pour éviter le clipping rectangulaire */}
@@ -77,8 +77,8 @@ export function SyleaLogo({ size = 40, animated = true }: SyleaLogoProps) {
         fill="none" strokeLinecap="round"
         style={{
           filter: animated
-            ? 'drop-shadow(0 0 3px rgba(0,160,240,0.6))'
-            : 'drop-shadow(0 0 2px rgba(0,160,240,0.4))',
+            ? 'drop-shadow(0 0 3px rgba(236,72,153,0.6))'
+            : 'drop-shadow(0 0 2px rgba(236,72,153,0.4))',
         }}
       >
         {animated && (
@@ -98,10 +98,10 @@ export function SyleaLogo({ size = 40, animated = true }: SyleaLogoProps) {
         fill="none" strokeLinecap="butt"
       />
 
-      {/* Couche 4 — reflet spéculaire */}
+      {/* Couche 4 — reflet spéculaire (rose pâle pour s'harmoniser) */}
       <path
         d={S_PATH}
-        stroke="rgba(160,225,255,0.55)" strokeWidth="1.2"
+        stroke="rgba(255,205,225,0.65)" strokeWidth="1.2"
         fill="none" strokeLinecap="round"
       />
     </svg>
