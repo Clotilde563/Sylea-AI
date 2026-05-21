@@ -1085,32 +1085,45 @@ function App() {
   // ── ONBOARDING OPENCLAW (Phase 2b) ──
   // Affichage bloquant au 1er lancement : wizard qui installe OpenClaw,
   // genere le token gateway et propose 5 skills ClawHub pre-coches.
+  // NB : tous les ecrans en dehors du dashboard rendent DesktopTitlebar
+  // explicitement (la fenetre est frameless `decorations: false`) — sinon
+  // l'utilisateur n'a aucun moyen de fermer/reduire/maximiser la fenetre.
   if (isOnboarded === null) {
     return (
-      <div style={{
-        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-        minHeight: '100vh', gap: 18,
-      }}>
-        <SyleaLogo size={48} animated />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{
-            display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
-            background: SY.cyan,
-            boxShadow: `0 0 10px ${SY.cyan}`,
-            animation: 'sy-pulse 1.2s ease-in-out infinite',
-          }} />
-          <span style={{
-            fontFamily: SY.mono, fontSize: 11, letterSpacing: '0.18em',
-            color: SY.textMute, textTransform: 'uppercase',
-          }}>
-            Initialisation du systeme
-          </span>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+        <DesktopTitlebar accent={SY.cyanSoft} />
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', gap: 18,
+        }}>
+          <SyleaLogo size={48} animated />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{
+              display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+              background: SY.cyan,
+              boxShadow: `0 0 10px ${SY.cyan}`,
+              animation: 'sy-pulse 1.2s ease-in-out infinite',
+            }} />
+            <span style={{
+              fontFamily: SY.mono, fontSize: 11, letterSpacing: '0.18em',
+              color: SY.textMute, textTransform: 'uppercase',
+            }}>
+              Initialisation du systeme
+            </span>
+          </div>
         </div>
       </div>
     )
   }
   if (isOnboarded === false) {
-    return <OpenClawOnboarding onComplete={() => setIsOnboarded(true)} />
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+        <DesktopTitlebar accent={SY.cyanSoft} />
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          <OpenClawOnboarding onComplete={() => setIsOnboarded(true)} />
+        </div>
+      </div>
+    )
   }
 
   // ── LOGIN ──
@@ -1120,10 +1133,13 @@ function App() {
   // bouton pour se deconnecter.
   if (token && userPlan === 'free' && !planLoading) {
     return (
-      <div style={{
-        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-        minHeight: '100vh', padding: '2rem',
-      }}>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+        <DesktopTitlebar accent={SY.cyanSoft} />
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', padding: '2rem',
+          overflow: 'auto',
+        }}>
         <SyleaWordmark logoSize={48} fontSize={20} gap={14} animated hover3d />
         <div style={{
           marginTop: 32,
@@ -1206,16 +1222,20 @@ function App() {
             Se déconnecter
           </button>
         </div>
+        </div>
       </div>
     )
   }
 
   if (!token) {
     return (
-      <div style={{
-        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-        minHeight: '100vh', padding: '2rem',
-      }}>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+        <DesktopTitlebar accent={SY.cyanSoft} />
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', padding: '2rem',
+          overflow: 'auto',
+        }}>
         {/* Logo officiel + wordmark — 3D hover (Sprint 2.10) */}
         <SyleaWordmark logoSize={48} fontSize={20} gap={14} animated hover3d />
 
@@ -1353,6 +1373,7 @@ function App() {
           }}>
             Secure · End-to-end · <span style={{ color: SY.cyan }}>{API_BASE.replace(/^https?:\/\//, '')}</span>
           </div>
+        </div>
         </div>
       </div>
     )
