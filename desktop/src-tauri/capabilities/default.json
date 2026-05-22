@@ -19,6 +19,7 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
     "core:webview:allow-set-webview-size",
+    "core:webview:allow-create-webview-window",
     "core:event:default",
     "fs:default",
     "fs:allow-read-text-file",

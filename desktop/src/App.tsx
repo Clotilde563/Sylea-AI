@@ -391,12 +391,28 @@ function App() {
         method: 'POST',
         body: JSON.stringify({ email, password }),
       }, { withAuth: false })  // pas de Bearer pour login (on l'a pas encore)
+
+      // Cas special : 409 Conflict = compte OAuth-only (Google/Apple/GitHub).
+      // Le backend nous demande gentiment d'utiliser le bouton OAuth correspondant.
+      if (res.status === 409) {
+        const errData = await res.json().catch(() => ({}))
+        const detail = errData?.detail || {}
+        if (detail.code === 'USE_OAUTH') {
+          const provider = (detail.provider || 'OAuth').toString()
+          const providerCap = provider.charAt(0).toUpperCase() + provider.slice(1)
+          setError(
+            `Ce compte se connecte avec ${providerCap}. Utilise le bouton "Continuer avec ${providerCap}" ci-dessous.`,
+          )
+          return
+        }
+      }
+
       const data = await res.json()
       if (data.access_token) {
         setToken(data.access_token)
         localStorage.setItem('sylea_desktop_token', data.access_token)
       } else {
-        setError(data.detail || 'Identifiants incorrects')
+        setError(typeof data.detail === 'string' ? data.detail : 'Identifiants incorrects')
       }
     } catch (e) {
       setError(`Serveur inaccessible (${API_BASE}) : ${e instanceof Error ? e.message : ''}`)
@@ -1418,10 +1434,163 @@ function App() {
             ▸ Connexion
           </button>
 
-          {/* Le bouton "Continuer avec Google" a ete retire du desktop.
-              Pour creer un compte ou se connecter via Google, l'utilisateur
-              passe par sylea.ai (web), puis se connecte ici avec email/mdp
-              (apres avoir configure son mot de passe sur le web). */}
+          {/* Divider OU */}
+          <div style={{
+            margin: '18px 0 14px', display: 'flex', alignItems: 'center', gap: 10,
+            color: SY.textDim, fontSize: 10, fontFamily: SY.mono, letterSpacing: '0.15em',
+          }}>
+            <div style={{ flex: 1, height: 1, background: SY.border }} />
+            <span>OU</span>
+            <div style={{ flex: 1, height: 1, background: SY.border }} />
+          </div>
+
+          {/* Bouton Continuer avec Google — OAuth NATIF popup Tauri.
+              Flow 100% in-app (pas de navigateur externe) :
+                1. Backend retourne l'URL Google OAuth
+                2. Rust ouvre une mini-fenetre Tauri (500x700) sur cette URL
+                3. L'user se connecte a Google DANS la popup
+                4. Google redirige vers /auth/callback?code=... — Rust intercepte
+                   AVANT chargement et extrait le code, ferme la popup
+                5. Le code est emit en event "google-oauth:code"
+                6. On l'echange contre un JWT via POST /api/auth/oauth/google
+                7. setToken(jwt) → user connecte. Tout reste dans l'app.
+              Cookies persistes : le profil WebView2 est partage avec la
+              fenetre principale, donc Google se souvient de l'user. */}
+          <button
+            onClick={async () => {
+              setError('')
+              const webBase = API_BASE.includes('localhost')
+                ? 'http://localhost:5173'
+                : 'https://sylea.ai'
+              const redirectUri = `${webBase}/auth/callback`
+              let codeUnsub: (() => void) | undefined
+              let errorUnsub: (() => void) | undefined
+              let cancelUnsub: (() => void) | undefined
+              const cleanup = () => {
+                try { codeUnsub?.() } catch {}
+                try { errorUnsub?.() } catch {}
+                try { cancelUnsub?.() } catch {}
+              }
+              try {
+                // 1. Demande l'URL Google OAuth au backend (state=desktop_native
+                //    distingue ce flow des autres pour le tracking eventuel ;
+                //    le backend ne s'en sert pas pour la logique).
+                const urlRes = await apiFetch(
+                  API_BASE,
+                  `/api/auth/oauth/google/url?redirect_uri=${encodeURIComponent(redirectUri)}&state=desktop_native`,
+                  {},
+                  { withAuth: false },
+                )
+                if (!urlRes.ok) throw new Error("Backend n'a pas retourne l'URL Google")
+                const { url: oauthUrl } = await urlRes.json()
+
+                // 2. Setup race promise : code (succes) | error (Google) | cancelled (close)
+                const codePromise = new Promise<string>((resolve, reject) => {
+                  const timeout = setTimeout(() => {
+                    cleanup()
+                    reject(new Error('Timeout (3 minutes)'))
+                  }, 180_000)
+
+                  listen<string>('google-oauth:code', (event) => {
+                    clearTimeout(timeout); cleanup()
+                    console.log('[oauth-button] code received')
+                    resolve(event.payload)
+                  }).then((fn) => { codeUnsub = fn }).catch(() => {})
+
+                  listen<string>('google-oauth:error', (event) => {
+                    clearTimeout(timeout); cleanup()
+                    reject(new Error(`Google : ${event.payload}`))
+                  }).then((fn) => { errorUnsub = fn }).catch(() => {})
+
+                  listen('google-oauth:cancelled', () => {
+                    clearTimeout(timeout); cleanup()
+                    reject(new Error('cancelled'))
+                  }).then((fn) => { cancelUnsub = fn }).catch(() => {})
+                })
+
+                // 3. Lance la popup
+                await invoke('open_google_oauth_popup', { oauthUrl })
+
+                // 4. Attend que l'user se connecte (ou annule)
+                const code = await codePromise
+
+                // 5. Echange le code contre un JWT (meme endpoint que le web).
+                //    On reutilise apiFetch pour avoir le CSRF auto.
+                const jwtRes = await apiFetch(
+                  API_BASE,
+                  '/api/auth/oauth/google',
+                  {
+                    method: 'POST',
+                    body: JSON.stringify({ code, redirect_uri: redirectUri }),
+                  },
+                  { withAuth: false },
+                )
+
+                // Cas special : 409 = compte deja existant en email/mdp.
+                // Politique "1 compte = 1 methode" — on refuse de lier Google et
+                // on redirige l'user vers le formulaire email/mdp.
+                if (jwtRes.status === 409) {
+                  const errData = await jwtRes.json().catch(() => ({}))
+                  const detail = errData?.detail || {}
+                  if (detail.code === 'USE_PASSWORD') {
+                    throw new Error('USE_PASSWORD')
+                  }
+                }
+
+                if (!jwtRes.ok) {
+                  const errData = await jwtRes.json().catch(() => ({}))
+                  const detail = errData?.detail
+                  const msg = typeof detail === 'string'
+                    ? detail
+                    : (detail?.message || 'Echange du code Google a echoue')
+                  throw new Error(msg)
+                }
+                const { access_token } = await jwtRes.json()
+
+                // 6. Connecte l'user, comme apres un login email/mdp
+                localStorage.setItem('sylea_desktop_token', access_token)
+                setToken(access_token)
+              } catch (e) {
+                cleanup()
+                const msg = e instanceof Error ? e.message : 'erreur'
+                if (msg === 'cancelled') {
+                  // L'user a juste ferme la popup, pas d'erreur a montrer
+                  console.log('[oauth-button] cancelled by user')
+                } else if (msg === 'USE_PASSWORD') {
+                  // Compte existe en email/mdp — on guide l'user vers le formulaire
+                  setError(
+                    `Ce compte (${email || 'ton compte'}) se connecte avec email/mot de passe. Utilise le formulaire ci-dessus.`,
+                  )
+                } else {
+                  console.error('[oauth-button] failed:', msg)
+                  setError(`Connexion Google : ${msg}`)
+                }
+              }
+            }}
+            style={{
+              width: '100%', padding: '10px 14px', borderRadius: 8,
+              background: '#fff',
+              color: '#1f2937',
+              fontWeight: 600, fontSize: 13, letterSpacing: '0.05em',
+              cursor: 'pointer',
+              border: 'none',
+              fontFamily: SY.mono,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+              transition: 'transform 0.15s, box-shadow 0.15s',
+              boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-1px)' }}
+            onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)' }}
+            title="Ouvre le navigateur, fais ton OAuth Google, et tu reviens automatiquement loggé sur le desktop."
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24">
+              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4" />
+              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
+              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+            </svg>
+            Continuer avec Google
+          </button>
 
           <div style={{
             marginTop: 16, fontSize: 10, fontFamily: SY.mono,

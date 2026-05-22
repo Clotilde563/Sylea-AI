@@ -55,7 +55,21 @@ export const useAuthStore = create<AuthState>((set) => ({
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }))
-        throw new Error(err.detail || `Erreur ${res.status}`)
+        // Cas special : 409 USE_OAUTH = compte OAuth-only.
+        // Le backend renvoie un detail object {code, provider, message}, on
+        // affiche un message friendly pointant vers le bon bouton.
+        if (res.status === 409 && err?.detail?.code === 'USE_OAUTH') {
+          const provider = (err.detail.provider || 'OAuth').toString()
+          const providerCap = provider.charAt(0).toUpperCase() + provider.slice(1)
+          throw new Error(
+            `Ce compte se connecte avec ${providerCap}. Utilise le bouton "Continuer avec ${providerCap}" ci-dessous.`,
+          )
+        }
+        // Cas normal : detail peut etre string ou objet
+        const msg = typeof err?.detail === 'string'
+          ? err.detail
+          : (err?.detail?.message || `Erreur ${res.status}`)
+        throw new Error(msg)
       }
       const data = await res.json()
       const token = data.access_token || data.token

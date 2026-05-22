@@ -158,7 +158,17 @@ async function request<T>(
     }
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     const friendly = HTTP_STATUS_FR[res.status]
-    const detail = err.detail || friendly || `Erreur ${res.status}`
+    // err.detail peut etre une string OU un objet structure (e.g. 409 USE_OAUTH
+    // / USE_PASSWORD avec {code, provider, message}). On extrait le message
+    // dans les deux cas pour eviter un "[object Object]" peu utile a l'user.
+    let detail: string
+    if (typeof err.detail === 'string') {
+      detail = err.detail
+    } else if (err.detail && typeof err.detail === 'object' && typeof err.detail.message === 'string') {
+      detail = err.detail.message
+    } else {
+      detail = friendly || `Erreur ${res.status}`
+    }
     throw new Error(detail)
   }
   return res.json() as Promise<T>

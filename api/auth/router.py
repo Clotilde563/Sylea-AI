@@ -333,8 +333,28 @@ async def verify_code(data: VerifyCodeIn, db=Depends(get_db)):
 @router.post("/login", response_model=TokenOut)
 async def login(data: LoginIn, db=Depends(get_db)):
     user = await _get_user_by_email_async(data.email)
-    if not user or not user.get("hashed_password"):
+    if not user:
+        # Email totalement inconnu — 401 classique
         raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
+
+    if not user.get("hashed_password"):
+        # Compte existant SANS mot de passe = compte OAuth-only (Google/Apple/GitHub).
+        # Plutot que de renvoyer 401 "mdp incorrect" (trompeur), on signale clairement
+        # avec un 409 Conflict + code + provider — le client (web/desktop) peut
+        # alors afficher "Connecte-toi avec <provider>" et orienter l'user vers le
+        # bon bouton. Politique "1 compte = 1 methode" (Option A grandfather : les
+        # comptes existants qui ont DEJA un mdp + provider OAuth continuent a
+        # marcher des 2 cotes, mais les nouveaux comptes OAuth-only ne peuvent
+        # pas se connecter en email/mdp.)
+        provider = user.get("provider") or "oauth"
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "USE_OAUTH",
+                "provider": provider,
+                "message": f"Ce compte se connecte avec {provider.capitalize()}. Utilise le bouton {provider.capitalize()}.",
+            },
+        )
 
     if not verify_password(data.password, user["hashed_password"]):
         raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
@@ -389,7 +409,29 @@ async def oauth_google(data: OAuthIn, db=Depends(get_db)):
         # Check if email exists with local account
         existing = await _get_user_by_email_async(email)
         if existing:
-            # Link Google to existing account (async, PG-compatible).
+            # Politique "1 compte = 1 methode" :
+            #   - Si l'email existe avec provider='local' ET mdp set → REFUSE la
+            #     liaison Google. L'user doit se connecter avec son mdp.
+            #   - Si l'email existe avec provider OAuth different (rare) → REFUSE.
+            #   - Sinon (cas legacy Chloé : provider=google ET mdp set, dual-auth
+            #     historique pre-migration), c'est qu'on retrouve le compte par
+            #     email mais que _get_user_by_provider n'a pas matche. On accepte
+            #     et on met juste a jour le provider_id pour synchroniser.
+            existing_provider = existing.get("provider") or "local"
+            has_password = bool(existing.get("hashed_password"))
+
+            if existing_provider == "local" and has_password:
+                # Compte email/mdp existant -> ne PAS lier Google
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "USE_PASSWORD",
+                        "email": email,
+                        "message": f"Ce compte ({email}) se connecte avec email/mot de passe. Utilise le formulaire de connexion classique.",
+                    },
+                )
+
+            # Compte legacy dual-auth ou OAuth different : on synchronise le provider_id
             from sqlalchemy import text as _sa_text
             from api.database import get_session_factory as _gsf
             _factory = _gsf()
