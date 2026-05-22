@@ -93,38 +93,6 @@ export default function AuthCallbackPage() {
         .catch((e: any) => {
           setError(e.message || 'Erreur de connexion Apple')
         })
-    } else if (state.startsWith('desktop_google_')) {
-      // Flow 5 : login/register Google depuis le desktop (deep-link return).
-      //
-      // Le state contient le nonce genere cote desktop. Apres echange du code
-      // contre un JWT, on redirige le navigateur vers sylea://auth/callback
-      // ?token=<JWT>&nonce=<NONCE> — le scheme handler reveille Syléa Desktop
-      // qui recupere le token via le plugin deep-link.
-      //
-      // Symetrique a desktop_apple_ ci-dessus.
-      setStatus('Connexion à votre compte Google…')
-      const nonce = state.substring('desktop_google_'.length)
-      handleGoogleCallback(code)
-        .then(() => {
-          const token = localStorage.getItem('sylea_auth_token') || ''
-          const deepLink =
-            `sylea://auth/callback?token=${encodeURIComponent(token)}` +
-            `&nonce=${encodeURIComponent(nonce)}`
-          setStatus("Retour vers l'application Syléa Desktop…")
-          setTimeout(() => {
-            window.location.href = deepLink
-            // Backup : afficher un message si le deep-link ne marche pas
-            setTimeout(() => {
-              setStatus(
-                "Si l'application Syléa Desktop ne s'ouvre pas automatiquement, " +
-                  'revenez manuellement dans l\'app — votre session est active.',
-              )
-            }, 2000)
-          }, 200)
-        })
-        .catch((e: any) => {
-          setError(e.message || 'Erreur de connexion Google')
-        })
     } else {
       // Flow 1: login/register with Google
       setStatus('Connexion à votre compte Google...')
