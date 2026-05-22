@@ -403,14 +403,16 @@ function App() {
     }
   }
 
-  // Listener deep-link OAuth — recoit le JWT apres "Continuer avec Google"
-  // (et a terme Apple). Le navigateur ouvre sylea://auth/callback?token=<JWT>
-  // &nonce=<NONCE> qui declenche le scheme handler Windows/macOS/Linux. Tauri
-  // emet l'evenement 'deep-link:received' avec l'URL complete.
+  // Listener deep-link OAuth — RESERVE pour Apple Sign-In (et tout flow
+  // OAuth qui passerait par le navigateur systeme en fallback). Google
+  // utilise maintenant la popup Tauri native (cf. bouton onClick plus bas),
+  // PAS le deep-link, donc ce listener ne fire JAMAIS pour Google en flow
+  // normal — il reste juste pour Apple qui dépend du navigateur (Apple
+  // n'autorise pas l'OAuth dans une WebView embarquee).
   //
   // Securite : on verifie le nonce contre celui stocke en localStorage avant
   // de setToken — empeche un attaquant qui devine l'URL deep-link de forger
-  // un login. Cf. GoogleDesktopBridgePage.tsx pour le flow complet.
+  // un login.
   //
   // Tolerance UX :
   //   - Pas de nonce stocke → silence (peut etre un attaquant ou un test
@@ -1426,37 +1428,107 @@ function App() {
             <div style={{ flex: 1, height: 1, background: SY.border }} />
           </div>
 
-          {/* Bouton Continuer avec Google — deep-link OAuth.
-              Flow complet (cf. GoogleDesktopBridgePage.tsx + AuthCallbackPage.tsx) :
-                1. Genere un nonce aleatoire et le stocke en localStorage
-                2. Ouvre /auth/google-desktop?nonce=<NONCE> dans le navigateur
-                3. La page web lance l'OAuth Google avec state=desktop_google_<NONCE>
-                4. Google → /auth/callback → JWT recu → redirect sylea://auth/callback
-                   ?token=<JWT>&nonce=<NONCE>
-                5. Le listener deep-link (plus haut) recoit l'evenement, verifie
-                   le nonce, setToken(jwt) → user connecte automatiquement.
-              Le nonce empeche un attaquant de forger un deep-link de login. */}
+          {/* Bouton Continuer avec Google — OAuth NATIF popup Tauri.
+              Flow 100% in-app (pas de navigateur externe) :
+                1. Backend retourne l'URL Google OAuth
+                2. Rust ouvre une mini-fenetre Tauri (500x700) sur cette URL
+                3. L'user se connecte a Google DANS la popup
+                4. Google redirige vers /auth/callback?code=... — Rust intercepte
+                   AVANT chargement et extrait le code, ferme la popup
+                5. Le code est emit en event "google-oauth:code"
+                6. On l'echange contre un JWT via POST /api/auth/oauth/google
+                7. setToken(jwt) → user connecte. Tout reste dans l'app.
+              Cookies persistes : le profil WebView2 est partage avec la
+              fenetre principale, donc Google se souvient de l'user. */}
           <button
-            onClick={() => {
-              // Clear toute erreur affichee (notamment celle d'un test ou d'un
-              // precedent essai foire) avant de lancer un nouveau flow.
+            onClick={async () => {
               setError('')
-              // Genere un nonce cryptographique (32 chars hex)
-              const arr = new Uint8Array(16)
-              crypto.getRandomValues(arr)
-              const nonce = Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('')
-              // Stocke le nonce pour verification au retour. Ecrase tout ancien
-              // nonce (si l'user re-clique avant que le 1er flow se termine).
-              try { localStorage.setItem('sylea_desktop_oauth_nonce', nonce) } catch {}
-              console.log('[oauth-button] generated nonce, opening browser')
               const webBase = API_BASE.includes('localhost')
                 ? 'http://localhost:5173'
                 : 'https://sylea.ai'
-              invoke('open_url', { url: `${webBase}/auth/google-desktop?nonce=${nonce}` })
-                .catch((e) => {
-                  console.error('[oauth-button] open_url failed:', e)
-                  setError('Impossible d\'ouvrir le navigateur')
+              const redirectUri = `${webBase}/auth/callback`
+              let codeUnsub: (() => void) | undefined
+              let errorUnsub: (() => void) | undefined
+              let cancelUnsub: (() => void) | undefined
+              const cleanup = () => {
+                try { codeUnsub?.() } catch {}
+                try { errorUnsub?.() } catch {}
+                try { cancelUnsub?.() } catch {}
+              }
+              try {
+                // 1. Demande l'URL Google OAuth au backend (state=desktop_native
+                //    distingue ce flow des autres pour le tracking eventuel ;
+                //    le backend ne s'en sert pas pour la logique).
+                const urlRes = await apiFetch(
+                  API_BASE,
+                  `/api/auth/oauth/google/url?redirect_uri=${encodeURIComponent(redirectUri)}&state=desktop_native`,
+                  {},
+                  { withAuth: false },
+                )
+                if (!urlRes.ok) throw new Error("Backend n'a pas retourne l'URL Google")
+                const { url: oauthUrl } = await urlRes.json()
+
+                // 2. Setup race promise : code (succes) | error (Google) | cancelled (close)
+                const codePromise = new Promise<string>((resolve, reject) => {
+                  const timeout = setTimeout(() => {
+                    cleanup()
+                    reject(new Error('Timeout (3 minutes)'))
+                  }, 180_000)
+
+                  listen<string>('google-oauth:code', (event) => {
+                    clearTimeout(timeout); cleanup()
+                    console.log('[oauth-button] code received')
+                    resolve(event.payload)
+                  }).then((fn) => { codeUnsub = fn }).catch(() => {})
+
+                  listen<string>('google-oauth:error', (event) => {
+                    clearTimeout(timeout); cleanup()
+                    reject(new Error(`Google : ${event.payload}`))
+                  }).then((fn) => { errorUnsub = fn }).catch(() => {})
+
+                  listen('google-oauth:cancelled', () => {
+                    clearTimeout(timeout); cleanup()
+                    reject(new Error('cancelled'))
+                  }).then((fn) => { cancelUnsub = fn }).catch(() => {})
                 })
+
+                // 3. Lance la popup
+                await invoke('open_google_oauth_popup', { oauthUrl })
+
+                // 4. Attend que l'user se connecte (ou annule)
+                const code = await codePromise
+
+                // 5. Echange le code contre un JWT (meme endpoint que le web).
+                //    On reutilise apiFetch pour avoir le CSRF auto.
+                const jwtRes = await apiFetch(
+                  API_BASE,
+                  '/api/auth/oauth/google',
+                  {
+                    method: 'POST',
+                    body: JSON.stringify({ code, redirect_uri: redirectUri }),
+                  },
+                  { withAuth: false },
+                )
+                if (!jwtRes.ok) {
+                  const errData = await jwtRes.json().catch(() => ({}))
+                  throw new Error(errData.detail || 'Echange du code Google a echoue')
+                }
+                const { access_token } = await jwtRes.json()
+
+                // 6. Connecte l'user, comme apres un login email/mdp
+                localStorage.setItem('sylea_desktop_token', access_token)
+                setToken(access_token)
+              } catch (e) {
+                cleanup()
+                const msg = e instanceof Error ? e.message : 'erreur'
+                if (msg === 'cancelled') {
+                  // L'user a juste ferme la popup, pas d'erreur a montrer
+                  console.log('[oauth-button] cancelled by user')
+                } else {
+                  console.error('[oauth-button] failed:', msg)
+                  setError(`Connexion Google : ${msg}`)
+                }
+              }
             }}
             style={{
               width: '100%', padding: '10px 14px', borderRadius: 8,
