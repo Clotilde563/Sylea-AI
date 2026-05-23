@@ -454,38 +454,49 @@ function App() {
         const parsed = new URL(httpUrl)
         const token = parsed.searchParams.get('token') || ''
         const nonce = parsed.searchParams.get('nonce') || ''
-        console.log('[deep-link] token present:', !!token, 'nonce present:', !!nonce)
-        if (!token) {
-          // Cas rare : sylea://auth/callback sans token. On ignore.
-          console.warn('[deep-link] no token in payload, ignoring')
-          return
-        }
-        // Verifie le nonce contre celui stocke quand l'user a clique sur
-        // "Continuer avec Google".
+        const errorCode = parsed.searchParams.get('error') || ''
+        const errorMessage = parsed.searchParams.get('message') || ''
+        console.log('[deep-link] token:', !!token, 'error:', errorCode, 'nonce:', !!nonce)
+
+        // 1. Verification du nonce AVANT tout (anti-forge, applique aux
+        //    payloads token ET error).
         const expectedNonce = (() => {
           try { return localStorage.getItem('sylea_desktop_oauth_nonce') || '' }
           catch { return '' }
         })()
         if (!expectedNonce) {
           // Pas de flow OAuth en cours → on ignore silencieusement.
-          // Ca evite de scarer l'user avec un message d'erreur si :
-          //   - Un test envoie un deep-link bidon
+          //   - Test envoie un deep-link bidon
           //   - Un attaquant forge un deep-link
-          //   - Le user lance l'app directement par un lien sylea:// stale
-          console.warn('[deep-link] no OAuth in progress, ignoring (no nonce stored)')
+          //   - Le user lance l'app directement par un lien stale
+          console.warn('[deep-link] no OAuth in progress, ignoring')
           return
         }
         if (expectedNonce !== nonce) {
-          // Nonce stocke mais ne matche pas — possiblement double-click sur
-          // le bouton (le 2e click a regenere un nouveau nonce, et la 1ere
-          // reponse OAuth arrive avec l'ancien). On affiche un message friendly.
-          console.warn('[deep-link] nonce mismatch (expected vs received differ)')
+          console.warn('[deep-link] nonce mismatch')
           setError('Connexion Google échouée. Réessaie en cliquant sur le bouton.')
-          // On nettoie pour permettre un retry propre
           try { localStorage.removeItem('sylea_desktop_oauth_nonce') } catch {}
           return
         }
-        // OK — on consume le nonce et on setToken
+
+        // 2. Si la webview a envoye une erreur (e.g. 409 USE_PASSWORD)
+        if (errorCode) {
+          try { localStorage.removeItem('sylea_desktop_oauth_nonce') } catch {}
+          if (errorCode === 'USE_PASSWORD') {
+            setError(
+              'Ce compte se connecte avec email/mot de passe. Utilise le formulaire ci-dessus.',
+            )
+          } else {
+            setError(`Connexion Google : ${errorMessage || errorCode}`)
+          }
+          return
+        }
+
+        // 3. Cas normal : token recu
+        if (!token) {
+          console.warn('[deep-link] no token and no error, ignoring')
+          return
+        }
         console.log('[deep-link] login OK, setting token')
         try { localStorage.removeItem('sylea_desktop_oauth_nonce') } catch {}
         localStorage.setItem('sylea_desktop_token', token)
@@ -1444,128 +1455,44 @@ function App() {
             <div style={{ flex: 1, height: 1, background: SY.border }} />
           </div>
 
-          {/* Bouton Continuer avec Google — OAuth NATIF popup Tauri.
-              Flow 100% in-app (pas de navigateur externe) :
-                1. Backend retourne l'URL Google OAuth
-                2. Rust ouvre une mini-fenetre Tauri (500x700) sur cette URL
-                3. L'user se connecte a Google DANS la popup
-                4. Google redirige vers /auth/callback?code=... — Rust intercepte
-                   AVANT chargement et extrait le code, ferme la popup
-                5. Le code est emit en event "google-oauth:code"
-                6. On l'echange contre un JWT via POST /api/auth/oauth/google
-                7. setToken(jwt) → user connecte. Tout reste dans l'app.
-              Cookies persistes : le profil WebView2 est partage avec la
-              fenetre principale, donc Google se souvient de l'user. */}
+          {/* Bouton Continuer avec Google — flow navigateur systeme.
+              Comme Slack/Notion/Linear : on ouvre Chrome/Edge ou le
+              navigateur par defaut. L'avantage : l'user voit son account
+              picker Google avec ses comptes deja connectes, 1 clic et
+              c'est plie. Pas besoin de retaper l'email.
+
+              Flow complet (cf. GoogleDesktopBridgePage.tsx + AuthCallbackPage.tsx) :
+                1. Genere un nonce hex 32 chars, stocke en localStorage
+                2. invoke('open_url', '<webBase>/auth/google-desktop?nonce=N')
+                   → ouvre navigateur systeme
+                3. La bridge page demande l'URL Google OAuth avec
+                   state=desktop_google_<N> et redirige
+                4. User choisit son compte Google (account picker !)
+                5. Google → /auth/callback?code=...&state=desktop_google_<N>
+                6. AuthCallbackPage echange code -> JWT (POST /api/auth/oauth/google)
+                7a. Succes : redirige sylea://auth/callback?token=<JWT>&nonce=N
+                7b. 409 USE_PASSWORD : sylea://auth/callback?error=USE_PASSWORD&nonce=N
+                8. tauri-plugin-deep-link forwarde a l'instance existante
+                9. Notre listener (defini plus haut) verifie le nonce et
+                   soit setToken(JWT), soit affiche un message d'erreur. */}
           <button
-            onClick={async () => {
+            onClick={() => {
               setError('')
+              // Genere un nonce cryptographique (32 chars hex) pour anti-forge
+              const arr = new Uint8Array(16)
+              crypto.getRandomValues(arr)
+              const nonce = Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('')
+              // Stocke pour verification au retour. Ecrase tout nonce stale.
+              try { localStorage.setItem('sylea_desktop_oauth_nonce', nonce) } catch {}
+              console.log('[oauth-button] generated nonce, opening browser')
               const webBase = API_BASE.includes('localhost')
                 ? 'http://localhost:5173'
                 : 'https://sylea.ai'
-              const redirectUri = `${webBase}/auth/callback`
-              let codeUnsub: (() => void) | undefined
-              let errorUnsub: (() => void) | undefined
-              let cancelUnsub: (() => void) | undefined
-              const cleanup = () => {
-                try { codeUnsub?.() } catch {}
-                try { errorUnsub?.() } catch {}
-                try { cancelUnsub?.() } catch {}
-              }
-              try {
-                // 1. Demande l'URL Google OAuth au backend (state=desktop_native
-                //    distingue ce flow des autres pour le tracking eventuel ;
-                //    le backend ne s'en sert pas pour la logique).
-                const urlRes = await apiFetch(
-                  API_BASE,
-                  `/api/auth/oauth/google/url?redirect_uri=${encodeURIComponent(redirectUri)}&state=desktop_native`,
-                  {},
-                  { withAuth: false },
-                )
-                if (!urlRes.ok) throw new Error("Backend n'a pas retourne l'URL Google")
-                const { url: oauthUrl } = await urlRes.json()
-
-                // 2. Setup race promise : code (succes) | error (Google) | cancelled (close)
-                const codePromise = new Promise<string>((resolve, reject) => {
-                  const timeout = setTimeout(() => {
-                    cleanup()
-                    reject(new Error('Timeout (3 minutes)'))
-                  }, 180_000)
-
-                  listen<string>('google-oauth:code', (event) => {
-                    clearTimeout(timeout); cleanup()
-                    console.log('[oauth-button] code received')
-                    resolve(event.payload)
-                  }).then((fn) => { codeUnsub = fn }).catch(() => {})
-
-                  listen<string>('google-oauth:error', (event) => {
-                    clearTimeout(timeout); cleanup()
-                    reject(new Error(`Google : ${event.payload}`))
-                  }).then((fn) => { errorUnsub = fn }).catch(() => {})
-
-                  listen('google-oauth:cancelled', () => {
-                    clearTimeout(timeout); cleanup()
-                    reject(new Error('cancelled'))
-                  }).then((fn) => { cancelUnsub = fn }).catch(() => {})
+              invoke('open_url', { url: `${webBase}/auth/google-desktop?nonce=${nonce}` })
+                .catch((e) => {
+                  console.error('[oauth-button] open_url failed:', e)
+                  setError("Impossible d'ouvrir le navigateur")
                 })
-
-                // 3. Lance la popup
-                await invoke('open_google_oauth_popup', { oauthUrl })
-
-                // 4. Attend que l'user se connecte (ou annule)
-                const code = await codePromise
-
-                // 5. Echange le code contre un JWT (meme endpoint que le web).
-                //    On reutilise apiFetch pour avoir le CSRF auto.
-                const jwtRes = await apiFetch(
-                  API_BASE,
-                  '/api/auth/oauth/google',
-                  {
-                    method: 'POST',
-                    body: JSON.stringify({ code, redirect_uri: redirectUri }),
-                  },
-                  { withAuth: false },
-                )
-
-                // Cas special : 409 = compte deja existant en email/mdp.
-                // Politique "1 compte = 1 methode" — on refuse de lier Google et
-                // on redirige l'user vers le formulaire email/mdp.
-                if (jwtRes.status === 409) {
-                  const errData = await jwtRes.json().catch(() => ({}))
-                  const detail = errData?.detail || {}
-                  if (detail.code === 'USE_PASSWORD') {
-                    throw new Error('USE_PASSWORD')
-                  }
-                }
-
-                if (!jwtRes.ok) {
-                  const errData = await jwtRes.json().catch(() => ({}))
-                  const detail = errData?.detail
-                  const msg = typeof detail === 'string'
-                    ? detail
-                    : (detail?.message || 'Echange du code Google a echoue')
-                  throw new Error(msg)
-                }
-                const { access_token } = await jwtRes.json()
-
-                // 6. Connecte l'user, comme apres un login email/mdp
-                localStorage.setItem('sylea_desktop_token', access_token)
-                setToken(access_token)
-              } catch (e) {
-                cleanup()
-                const msg = e instanceof Error ? e.message : 'erreur'
-                if (msg === 'cancelled') {
-                  // L'user a juste ferme la popup, pas d'erreur a montrer
-                  console.log('[oauth-button] cancelled by user')
-                } else if (msg === 'USE_PASSWORD') {
-                  // Compte existe en email/mdp — on guide l'user vers le formulaire
-                  setError(
-                    `Ce compte (${email || 'ton compte'}) se connecte avec email/mot de passe. Utilise le formulaire ci-dessus.`,
-                  )
-                } else {
-                  console.error('[oauth-button] failed:', msg)
-                  setError(`Connexion Google : ${msg}`)
-                }
-              }
             }}
             style={{
               width: '100%', padding: '10px 14px', borderRadius: 8,

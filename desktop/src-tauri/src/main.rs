@@ -704,126 +704,12 @@ fn open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  Sprint 3 — OAuth Google natif (popup Tauri embarquee)
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// Permet a l'utilisateur de se connecter avec Google SANS quitter l'app
-// desktop : on ouvre une petite fenetre Tauri (500x700) qui charge l'URL
-// d'auth Google, l'user se connecte dedans, on intercepte le redirect
-// vers /auth/callback?code=... AVANT que la page ne charge, on extrait le
-// `code` et on l'emit vers la UI principale via "google-oauth:code".
-// La UI fait ensuite POST /api/auth/oauth/google avec le code pour
-// recuperer le JWT, exactement comme le flow email/mot de passe.
-//
-// Cookies persistes : la popup partage le profil WebView2 avec la fenetre
-// principale (meme userDataFolder), donc Google se souvient de l'user
-// pour les sessions suivantes (comme dans le navigateur).
-//
-// UX flow (cf. App.tsx bouton onClick) :
-//   1. JS appelle invoke('open_google_oauth_popup', { oauthUrl })
-//   2. Rust cree la fenetre "google-oauth", la centre, focused.
-//   3. User se connecte sur la page Google
-//   4. Google redirige vers <redirect_uri>?code=...
-//   5. Rust intercept la nav (avant chargement), extrait code, emit event
-//   6. JS recoit event, POST le code au backend, recupere JWT, setToken
-//
-// Si l'user ferme la popup sans completer : event "google-oauth:cancelled"
-// Si Google renvoie ?error=... : event "google-oauth:error"
-#[tauri::command]
-async fn open_google_oauth_popup(app: AppHandle, oauth_url: String) -> Result<(), String> {
-    use tauri::WebviewUrl;
-
-    let parsed = oauth_url
-        .parse::<url::Url>()
-        .map_err(|e| format!("URL OAuth Google invalide : {}", e))?;
-
-    // Ferme une eventuelle popup precedente (en cas de double-click)
-    if let Some(existing) = app.get_webview_window("google-oauth") {
-        let _ = existing.close();
-    }
-
-    // Flag partage pour distinguer "fermeture apres code" vs "user a annule"
-    let resolved_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-    let app_handle = app.clone();
-    let resolved_for_nav = resolved_flag.clone();
-    let app_handle_for_close = app.clone();
-    let resolved_for_close = resolved_flag.clone();
-
-    let popup = tauri::WebviewWindowBuilder::new(
-        &app,
-        "google-oauth",
-        WebviewUrl::External(parsed),
-    )
-    .title("Connexion à Sylea avec Google")
-    .inner_size(500.0, 700.0)
-    .center()
-    .resizable(false)
-    .focused(true)
-    .decorations(true) // garder les boutons OS pour permettre fermer/min
-    .on_navigation(move |url| {
-        let url_str = url.to_string();
-        // Log SANS le code/token (security)
-        let log_prefix: String = url_str.chars().take(60).collect();
-        eprintln!("[google-oauth] nav: {}...", log_prefix);
-
-        // Intercept callback URL avant chargement de la page
-        let is_callback = url_str.starts_with("http://localhost:5173/auth/callback")
-            || url_str.starts_with("https://sylea.ai/auth/callback");
-
-        if is_callback {
-            // Extraire code OR error de la query string
-            let mut code: Option<String> = None;
-            let mut error: Option<String> = None;
-            if let Some(query) = url.query() {
-                for pair in query.split('&') {
-                    let mut parts = pair.splitn(2, '=');
-                    if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-                        match k {
-                            "code" => code = Some(v.to_string()),
-                            "error" => error = Some(v.to_string()),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-
-            // Mark resolved BEFORE close (close handler skips cancellation)
-            resolved_for_nav.store(true, std::sync::atomic::Ordering::SeqCst);
-
-            if let Some(c) = code {
-                eprintln!("[google-oauth] code received (length {})", c.len());
-                let _ = app_handle.emit("google-oauth:code", c);
-            } else if let Some(e) = error {
-                eprintln!("[google-oauth] error: {}", e);
-                let _ = app_handle.emit("google-oauth:error", e);
-            }
-
-            // Close the popup
-            if let Some(popup) = app_handle.get_webview_window("google-oauth") {
-                let _ = popup.close();
-            }
-            return false; // Cancel the navigation
-        }
-        true
-    })
-    .build()
-    .map_err(|e| format!("Impossible de creer la popup OAuth : {}", e))?;
-
-    // Detect "user ferme la popup sans completer" -> emit cancelled
-    popup.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed) {
-            // Si on n'a PAS resolved (pas de code/error capture), c'est une annulation
-            if !resolved_for_close.load(std::sync::atomic::Ordering::SeqCst) {
-                eprintln!("[google-oauth] popup closed without code (cancelled)");
-                let _ = app_handle_for_close.emit("google-oauth:cancelled", ());
-            }
-        }
-    });
-
-    Ok(())
-}
+// NOTE : Le flow OAuth Google ne passe PAS par une popup Tauri embedded.
+// On utilise le navigateur systeme (cf. desktop/src/App.tsx bouton onClick
+// -> invoke('open_url', ...) puis bridge page web qui redirige vers Google),
+// comme Slack/Notion/Linear. L'avantage : l'user voit l'account picker Google
+// avec ses comptes deja connectes dans Chrome/Edge.
+// Le retour se fait via deep-link sylea://auth/callback?token=...&nonce=...
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Sprint 1 — Commandes window/pill/autostart/updater
@@ -1139,8 +1025,6 @@ fn main() {
             open_url,
             // Deep-link cold-start consumer (recupere URL stockee si JS pas pret)
             take_pending_deep_link,
-            // Sprint 3 — OAuth Google natif (popup Tauri embarquee)
-            open_google_oauth_popup,
             // Sprint 1 — Window/pill/quit
             toggle_pill_mode,
             toggle_main_window,
