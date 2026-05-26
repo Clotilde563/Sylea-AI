@@ -773,19 +773,18 @@ async fn open_google_oauth_popup(app: AppHandle, oauth_url: String) -> Result<()
             || url_str.starts_with("https://sylea.ai/auth/callback");
 
         if is_callback {
-            // Extraire code OR error de la query string
+            // Extraire code OR error de la query string.
+            // IMPORTANT : on utilise url.query_pairs() qui URL-DECODE chaque
+            // valeur automatiquement. Sans ca, le `code` de Google (qui
+            // contient `/` encode en `%2F`) arriverait au backend sous forme
+            // encodee et Google rejetterait avec "Malformed auth code".
             let mut code: Option<String> = None;
             let mut error: Option<String> = None;
-            if let Some(query) = url.query() {
-                for pair in query.split('&') {
-                    let mut parts = pair.splitn(2, '=');
-                    if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-                        match k {
-                            "code" => code = Some(v.to_string()),
-                            "error" => error = Some(v.to_string()),
-                            _ => {}
-                        }
-                    }
+            for (k, v) in url.query_pairs() {
+                match k.as_ref() {
+                    "code" => code = Some(v.into_owned()),
+                    "error" => error = Some(v.into_owned()),
+                    _ => {}
                 }
             }
 

@@ -385,7 +385,29 @@ async def oauth_google(data: OAuthIn, db=Depends(get_db)):
             },
         )
     if token_resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Code Google invalide")
+        # Log Google's actual error for debugging (sans le code lui-meme).
+        # Google renvoie un JSON {error, error_description} en cas d'echec.
+        try:
+            err_body = token_resp.json()
+        except Exception:
+            err_body = {"raw": token_resp.text[:200]}
+        import logging as _lg
+        _lg.getLogger("sylea.auth").warning(
+            "[oauth-google] Google token exchange failed (status=%s) — "
+            "redirect_uri=%s, error=%s",
+            token_resp.status_code,
+            data.redirect_uri,
+            err_body,
+        )
+        # Expose le message Google a l'user (utile pour debug : 'redirect_uri_mismatch',
+        # 'invalid_grant', etc.)
+        google_err = err_body.get("error", "unknown") if isinstance(err_body, dict) else "unknown"
+        google_desc = err_body.get("error_description", "") if isinstance(err_body, dict) else ""
+        raise HTTPException(
+            status_code=401,
+            detail=f"Google OAuth a refuse le code : {google_err}"
+                   + (f" ({google_desc})" if google_desc else ""),
+        )
 
     token_data = token_resp.json()
     access_token = token_data.get("access_token")
