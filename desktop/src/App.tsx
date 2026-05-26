@@ -1304,6 +1304,9 @@ function App() {
               19,99 € / mois
             </span>
           </p>
+          {/* Features list — alignee verbatim avec frontend/src/pages/QuotasPage.tsx
+              (ADVANCED_FEATURES) pour eviter toute incoherence entre la
+              promesse desktop et la promesse web. */}
           <div style={{
             fontSize: 12, color: SY.text, fontFamily: SY.mono,
             background: 'rgba(0,200,255,0.04)',
@@ -1311,16 +1314,12 @@ function App() {
             borderRadius: 8, padding: '12px 14px',
             marginBottom: 22, textAlign: 'left', lineHeight: 1.7,
           }}>
-            <div>✓ Accès complet à l'application Desktop</div>
-            <div>✓ Agent Syléa 2 (assistant exécutant)</div>
-            <div>✓ Skills OpenClaw (email, calendrier, notes…)</div>
-            <div>✓ 30 actions IA / jour (vs 10 en Free)</div>
-            <div>✓ 1 million de tokens / mois</div>
-            <div>✓ 100 deep researches / mois</div>
-            <div>✓ 50 skills installables · 30 crons</div>
-            <div>✓ 1000 uploads / mois · 5 workspaces</div>
-            <div>✓ Plan "Que faire ?" quotidien personnalisé</div>
-            <div>✓ Notifications & rappels intelligents</div>
+            <div>✓ Agent Syléa 1 + Agent Syléa 2 (assistant exécutant)</div>
+            <div>✓ « Que faire ? » — plan d'action IA quotidien</div>
+            <div>✓ Syléa Desktop (mails, calendrier, notes, prise de cours…)</div>
+            <div>✓ Analyses, évènements et messages — 30 actions / jour</div>
+            <div>✓ Statistiques avancées + courbes de progression</div>
+            <div>✓ Notifications intelligentes & vérifications de tâches</div>
           </div>
           <button
             onClick={async () => {
