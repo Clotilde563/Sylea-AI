@@ -417,10 +417,24 @@ export const api = {
       body: JSON.stringify({ type, question, options, contexte_appareil: deviceContext }),
     }),
 
-  agentSaveContext: (contextText: string, relatedTo: string, type?: string, question?: string, options?: string[]): Promise<{ ok: boolean; sufficient: boolean; feedback: string | null }> =>
+  agentSaveContext: (
+    contextText: string,
+    relatedTo: string,
+    type?: string,
+    question?: string,
+    options?: string[],
+    attempt?: number,
+  ): Promise<{ ok: boolean; sufficient: boolean; feedback: string | null }> =>
     request('/agent/save-context', {
       method: 'POST',
-      body: JSON.stringify({ context_text: contextText, related_to: relatedTo, type: type || 'dilemme', question: question || '', options }),
+      body: JSON.stringify({
+        context_text: contextText,
+        related_to: relatedTo,
+        type: type || 'dilemme',
+        question: question || '',
+        options,
+        attempt: attempt || 1,
+      }),
     }),
 
   agentTTS: async (text: string): Promise<Blob | null> => {

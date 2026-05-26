@@ -60,6 +60,10 @@ export function EvenementPage() {
   const [contextProvided, setContextProvided] = useState(false)
   const [contextLoading, setContextLoading] = useState(false)
   const [contextFeedback, setContextFeedback] = useState<string | null>(null)
+  // Compteur de tentatives (idem DilemmePage). Au-dela de MAX_CONTEXT_ATTEMPTS,
+  // on force-pass meme si Claude juge insuffisant. Anti-boucle infinie.
+  const [contextAttempts, setContextAttempts] = useState(0)
+  const MAX_CONTEXT_ATTEMPTS = 3
   const [isListeningCtx, setIsListeningCtx] = useState(false)
   const recognitionCtxRef = useRef<any>(null)
 
@@ -135,25 +139,30 @@ export function EvenementPage() {
     if (!text.trim()) return
     setContextLoading(true)
     setContextFeedback(null)
+    const newAttempt = contextAttempts + 1
+    setContextAttempts(newAttempt)
     try {
       const result = await api.agentSaveContext(
         text.trim(),
         `evenement: ${description.trim().slice(0, 50)}`,
         'evenement',
         description.trim(),
+        undefined,
+        newAttempt,
       )
       setContextInput('')
-      if (result.sufficient) {
+      // Force-pass apres MAX_CONTEXT_ATTEMPTS pour ne JAMAIS pieger l'user.
+      if (result.sufficient || newAttempt >= MAX_CONTEXT_ATTEMPTS) {
         setContextProvided(true)
         setContextNeeded(false)
       } else {
-        // Context insufficient — show feedback as a new question
         setContextFeedback(result.feedback)
         if (result.feedback) {
           setContextQuestion(result.feedback)
         }
       }
     } catch {
+      // En cas d'erreur reseau, on est indulgent : on avance
       setContextProvided(true)
       setContextNeeded(false)
     } finally {
@@ -245,6 +254,7 @@ export function EvenementPage() {
     setContextInput('')
     setContextProvided(false)
     setContextFeedback(null)
+    setContextAttempts(0)
     setPhase('form')
   }
 
@@ -345,7 +355,16 @@ export function EvenementPage() {
                   className="input"
                   rows={4}
                   value={description}
-                  onChange={(e) => setDescription(e.target.value)}
+                  onChange={(e) => {
+                    setDescription(e.target.value)
+                    // Si l'user modifie sa description apres avoir fourni le
+                    // contexte, on invalide -> nouveau check-context au prochain
+                    // clic sur "Enregistrer". Evite un contexte stale.
+                    if (contextProvided) {
+                      setContextProvided(false)
+                      setContextAttempts(0)
+                    }
+                  }}
                   placeholder={t('evenement.description_placeholder')}
                   style={{ resize: 'vertical' }}
                 />

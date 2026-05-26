@@ -65,6 +65,11 @@ export function DilemmePage() {
   const [contextProvided, setContextProvided] = useState(false)
   const [contextLoading, setContextLoading] = useState(false)
   const [contextFeedback, setContextFeedback] = useState<string | null>(null)
+  // Compteur de tentatives pour le contexte. Au-dela de MAX_CONTEXT_ATTEMPTS (3),
+  // on force-pass meme si Claude juge insuffisant -> evite la boucle infinie
+  // ou l'user reste prisonnier du panel. Le backend a aussi son propre cap.
+  const [contextAttempts, setContextAttempts] = useState(0)
+  const MAX_CONTEXT_ATTEMPTS = 3
   const [isListeningCtx, setIsListeningCtx] = useState(false)
   const recognitionCtxRef = useRef<any>(null)
 
@@ -151,6 +156,8 @@ export function DilemmePage() {
     if (!text.trim()) return
     setContextLoading(true)
     setContextFeedback(null)
+    const newAttempt = contextAttempts + 1
+    setContextAttempts(newAttempt)
     try {
       const questionAuto = `${options.map(o => o.trim()).join(' vs ')}`
       const result = await api.agentSaveContext(
@@ -159,9 +166,13 @@ export function DilemmePage() {
         'dilemme',
         questionAuto,
         options.map(o => o.trim()),
+        newAttempt,
       )
       setContextInput('')
-      if (result.sufficient) {
+      // Force-pass apres MAX_CONTEXT_ATTEMPTS pour ne JAMAIS piéger l'user.
+      // Le backend a sa propre garde a >=3 attempts, mais on duplique cote
+      // front pour gerer aussi le cas API down.
+      if (result.sufficient || newAttempt >= MAX_CONTEXT_ATTEMPTS) {
         setContextProvided(true)
         setContextNeeded(false)
       } else {
@@ -172,6 +183,7 @@ export function DilemmePage() {
         }
       }
     } catch {
+      // En cas d'erreur reseau, on est indulgent : on avance
       setContextProvided(true)
       setContextNeeded(false)
     } finally {
@@ -277,18 +289,31 @@ export function DilemmePage() {
     setContextInput('')
     setContextProvided(false)
     setContextFeedback(null)
+    setContextAttempts(0)
     setPhase('form')
+  }
+
+  // Helper : invalide le contexte fourni quand l'user modifie ses options.
+  // Sinon on garderait un contexte stale (ex: contexte donne pour "Marc vs Paul"
+  // mais l'user a maintenant tape "Sarah vs Lucas" -> faut re-checker).
+  const invalidateContext = () => {
+    if (contextProvided) {
+      setContextProvided(false)
+      setContextAttempts(0)
+    }
   }
 
   const addOption = () => {
     if (options.length < MAX_OPTIONS) {
       setOptions([...options, ''])
+      invalidateContext()
     }
   }
 
   const removeOption = (index: number) => {
     if (options.length > MIN_OPTIONS) {
       setOptions(options.filter((_, i) => i !== index))
+      invalidateContext()
     }
   }
 
@@ -296,6 +321,7 @@ export function DilemmePage() {
     const next = [...options]
     next[index] = value
     setOptions(next)
+    invalidateContext()
   }
 
   if (!profil) {
