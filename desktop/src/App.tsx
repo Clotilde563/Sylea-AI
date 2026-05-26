@@ -1256,203 +1256,388 @@ function App() {
 
   // ── LOGIN ──
   // ─── Gate plan free ─────────────────────────────────────────────────────
-  // Le desktop Syléa Agent est reserve aux abonnes payants. Un user free
-  // qui se connecte voit un ecran "Upgrade" avec lien vers /quotas, et un
-  // bouton pour se deconnecter.
+  // Design CALQUE sur frontend/src/pages/QuotasPage.tsx (web canonical) pour
+  // que la page d'abonnement desktop et web soient visuellement identiques.
+  // Le bouton "Passer a Avance" declenche le flow Stripe popup in-app.
   if (token && userPlan === 'free' && !planLoading) {
+    // Lance le paiement Stripe via popup Tauri (reutilise par le bouton CTA)
+    const launchStripeUpgrade = async () => {
+      setUpgradeLoading(true)
+      setUpgradeError('')
+      let succUnsub: (() => void) | undefined
+      let cancUnsub: (() => void) | undefined
+      const cleanup = () => {
+        try { succUnsub?.() } catch {}
+        try { cancUnsub?.() } catch {}
+      }
+      try {
+        const res = await apiFetch(API_BASE, '/api/agent3/stripe/checkout', {
+          method: 'POST',
+          body: JSON.stringify({ plan: 'advanced' }),
+        })
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}))
+          const msg = typeof err.detail === 'string' ? err.detail : (err.detail?.message || `Erreur ${res.status}`)
+          throw new Error(msg)
+        }
+        const data = await res.json()
+        if (!data.ok || !data.url) throw new Error(data.error || 'Stripe non configuré')
+
+        const settled = new Promise<'success' | 'cancelled'>((resolve) => {
+          listen<string>('stripe-checkout:success', () => { cleanup(); resolve('success') })
+            .then((fn) => { succUnsub = fn }).catch(() => {})
+          listen('stripe-checkout:cancelled', () => { cleanup(); resolve('cancelled') })
+            .then((fn) => { cancUnsub = fn }).catch(() => {})
+        })
+
+        await invoke('open_stripe_checkout_popup', { checkoutUrl: data.url })
+        const outcome = await settled
+        if (outcome === 'cancelled') {
+          setUpgradeLoading(false)
+          return
+        }
+
+        // Polling pour laisser le webhook Stripe update la DB (1-3s)
+        let attempts = 0
+        let newPlan: string = 'free'
+        while (attempts < 10 && newPlan === 'free') {
+          await new Promise(r => setTimeout(r, 800))
+          attempts++
+          try {
+            const pRes = await apiFetch(API_BASE, '/api/agent3/plan')
+            const pData = await pRes.json()
+            const planObj = pData?.plan || pData
+            newPlan = (planObj?.name || 'free').toLowerCase()
+          } catch { /* retry */ }
+        }
+        setUserPlan(newPlan)
+        setUpgradeLoading(false)
+      } catch (e) {
+        cleanup()
+        console.error('[stripe-upgrade]', e)
+        setUpgradeError(`Paiement impossible : ${e instanceof Error ? e.message : ''}`)
+        setUpgradeLoading(false)
+      }
+    }
+
+    // Features verbatim de QuotasPage.tsx ADVANCED_FEATURES (web canonical)
+    const FREE_FEATURES = [
+      { label: 'Agent Syléa 1 (compagnon personnel)', state: 'included' as const },
+      { label: 'Profil personnalisé + objectif de vie', state: 'included' as const },
+      { label: 'Analyse de choix, évènements et messages Agent 1 — limité à 10 actions / jour', state: 'included' as const },
+      { label: 'Suivi de progression simplifié', state: 'included' as const },
+      { label: '« Que faire ? » — plan d\'action IA quotidien', state: 'excluded' as const },
+      { label: 'Agent Syléa 2 (assistant exécutant)', state: 'excluded' as const },
+      { label: 'Syléa Desktop (mails, calendrier, notes…)', state: 'excluded' as const },
+      { label: 'Intégrations', state: 'excluded' as const },
+    ]
+    const ADVANCED_FEATURES = [
+      { label: 'Agent Syléa 1 + Agent Syléa 2 (assistant exécutant)', state: 'included' as const },
+      { label: '« Que faire ? » — plan d\'action IA quotidien', state: 'included' as const },
+      { label: 'Syléa Desktop (mails, calendrier, notes, prise de cours…)', state: 'included' as const },
+      { label: 'Analyses, évènements et messages — limité à 30 actions / jour', state: 'included' as const },
+      { label: 'Statistiques avancées + courbes de progression', state: 'included' as const },
+      { label: 'Notifications intelligentes & vérifications de tâches', state: 'included' as const },
+      { label: 'Intégrations', state: 'excluded' as const },
+    ]
+
+    // FeatureItem inline — meme look que QuotasPage
+    const FeatureItem = ({ label, state }: { label: string; state: 'included' | 'excluded' }) => {
+      const icon = state === 'included' ? '✓' : '✕'
+      const bg = state === 'included'
+        ? 'linear-gradient(135deg, rgba(124,58,237,0.25), rgba(212,160,23,0.25))'
+        : 'rgba(255,255,255,0.04)'
+      const border = state === 'included'
+        ? '1px solid rgba(212,160,23,0.4)'
+        : '1px solid rgba(255,255,255,0.08)'
+      return (
+        <li style={{
+          display: 'flex', alignItems: 'center', gap: '0.55rem',
+          padding: '0.4rem 0.55rem', borderRadius: 6,
+          background: state === 'included' ? 'rgba(255,255,255,0.02)' : 'transparent',
+          listStyle: 'none',
+        }}>
+          <span style={{
+            flexShrink: 0, width: 20, height: 20, borderRadius: '50%',
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            background: bg, border, fontSize: 10, fontWeight: 700,
+            color: state === 'included' ? '#fff' : 'rgba(255,255,255,0.45)',
+          }}>{icon}</span>
+          <span style={{
+            fontSize: 11.5,
+            color: state === 'included' ? '#e6f0ff' : 'rgba(230,240,255,0.45)',
+            textDecoration: state === 'excluded' ? 'line-through' : 'none',
+            opacity: state === 'excluded' ? 0.55 : 1,
+            lineHeight: 1.4,
+          }}>{label}</span>
+        </li>
+      )
+    }
+
     return (
       <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
         <DesktopTitlebar accent={SY.cyanSoft} />
+        {/* Animations + orbs (memes effets que QuotasPage web) */}
+        <style>{`
+          @keyframes shimmer-gold {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+          }
+          @keyframes pulse-glow-cta {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(212,160,23,0.4), 0 8px 32px rgba(124,58,237,0.25); }
+            50% { box-shadow: 0 0 0 8px rgba(212,160,23,0), 0 12px 40px rgba(212,160,23,0.35); }
+          }
+          @keyframes float-up-card {
+            from { opacity: 0; transform: translateY(16px); }
+            to { opacity: 1; transform: translateY(0); }
+          }
+          .desktop-gold-shimmer {
+            background: linear-gradient(90deg, #fbbf24, #fde68a, #fbbf24, #d4a017, #fbbf24);
+            background-size: 200% 100%;
+            -webkit-background-clip: text; background-clip: text;
+            -webkit-text-fill-color: transparent; color: transparent;
+            animation: shimmer-gold 4s ease-in-out infinite;
+          }
+          .desktop-advanced-card { animation: float-up-card 0.6s ease-out 0.1s both; }
+          .desktop-free-card { animation: float-up-card 0.5s ease-out; }
+          .desktop-advanced-cta { animation: pulse-glow-cta 2.4s ease-in-out infinite; }
+        `}</style>
         <div style={{
-          flex: 1, display: 'flex', flexDirection: 'column',
-          alignItems: 'center', justifyContent: 'center', padding: '2rem',
-          overflow: 'auto',
+          flex: 1, overflow: 'auto', position: 'relative',
+          background: '#0a0612',
         }}>
-        <SyleaWordmark logoSize={48} fontSize={20} gap={14} animated hover3d />
-        <div style={{
-          marginTop: 32,
-          background: SY.surface,
-          border: `1px solid ${SY.border}`,
-          borderRadius: 10,
-          padding: '32px 28px',
-          maxWidth: 440, width: '100%',
-          position: 'relative',
-          backdropFilter: 'blur(8px)',
-          boxShadow: `0 0 0 1px ${SY.border} inset, 0 8px 30px rgba(0,0,0,0.45)`,
-          textAlign: 'center',
-        }}>
-          <CornerBrackets color={SY.cyan} />
+          {/* Background orbs (violet + gold) */}
           <div style={{
-            fontFamily: SY.mono, fontSize: 10, letterSpacing: '0.2em',
-            color: SY.cyan, marginBottom: 18, textTransform: 'uppercase',
-          }}>
-            <span style={{ opacity: 0.6 }}>[</span> upgrade requis <span style={{ opacity: 0.6 }}>]</span>
-          </div>
-          <div style={{ fontSize: 32, marginBottom: 12 }}>🔒</div>
-          <h2 style={{
-            fontSize: 18, fontWeight: 700, marginBottom: 14,
-            color: SY.text, fontFamily: SY.mono, letterSpacing: '0.05em',
-          }}>
-            Syléa Desktop n'est pas inclus<br/>dans le plan Free
-          </h2>
-          <p style={{
-            fontSize: 13, color: SY.textDim, lineHeight: 1.55,
-            marginBottom: 22, fontFamily: SY.mono,
-          }}>
-            Le desktop est reserve aux abonnes <strong style={{ color: SY.cyan }}>Avancé</strong>.<br/>
-            <span style={{ color: SY.cyan, fontSize: 18, fontWeight: 700, display: 'inline-block', marginTop: 4 }}>
-              19,99 € / mois
-            </span>
-          </p>
-          {/* Features list — alignee verbatim avec frontend/src/pages/QuotasPage.tsx
-              (ADVANCED_FEATURES) pour eviter toute incoherence entre la
-              promesse desktop et la promesse web. */}
+            position: 'absolute', width: 360, height: 360, top: -100, right: -100,
+            borderRadius: '50%', filter: 'blur(80px)', opacity: 0.30,
+            background: 'radial-gradient(circle, rgba(124,58,237,0.5), transparent)',
+            pointerEvents: 'none',
+          }} />
           <div style={{
-            fontSize: 12, color: SY.text, fontFamily: SY.mono,
-            background: 'rgba(0,200,255,0.04)',
-            border: `1px solid rgba(0,200,255,0.15)`,
-            borderRadius: 8, padding: '12px 14px',
-            marginBottom: 22, textAlign: 'left', lineHeight: 1.7,
+            position: 'absolute', width: 440, height: 440, bottom: -150, left: -150,
+            borderRadius: '50%', filter: 'blur(80px)', opacity: 0.30,
+            background: 'radial-gradient(circle, rgba(212,160,23,0.4), transparent)',
+            pointerEvents: 'none',
+          }} />
+
+          <div style={{
+            position: 'relative', zIndex: 1,
+            maxWidth: 640, margin: '0 auto',
+            padding: '1.5rem 1.25rem 2rem',
           }}>
-            <div>✓ Agent Syléa 1 + Agent Syléa 2 (assistant exécutant)</div>
-            <div>✓ « Que faire ? » — plan d'action IA quotidien</div>
-            <div>✓ Syléa Desktop (mails, calendrier, notes, prise de cours…)</div>
-            <div>✓ Analyses, évènements et messages — 30 actions / jour</div>
-            <div>✓ Statistiques avancées + courbes de progression</div>
-            <div>✓ Notifications intelligentes & vérifications de tâches</div>
-          </div>
-          <button
-            onClick={async () => {
-              // Flow paiement Stripe in-app (popup Tauri) :
-              //   1. POST /api/agent3/stripe/checkout {plan:'advanced'}
-              //   2. Backend cree session Stripe + retourne url
-              //   3. invoke('open_stripe_checkout_popup', { checkoutUrl })
-              //      -> Rust ouvre une mini-fenetre 600x800 sur Stripe
-              //   4. User paie sur Stripe (in-app, jamais sorti de Sylea)
-              //   5. Stripe redirige vers /quotas?paid=1 -> Rust intercepte,
-              //      ferme la popup, emit 'stripe-checkout:success'
-              //   6. On refetch /api/agent3/plan -> 'advanced' -> gate disparait
-              //
-              // En parallele, le webhook Stripe (cote backend) update
-              // user_plans en DB. Donc le plan est confirme dans la source
-              // de verite avant meme qu'on refetch.
-              setUpgradeLoading(true)
-              setUpgradeError('')
-              let succUnsub: (() => void) | undefined
-              let cancUnsub: (() => void) | undefined
-              const cleanup = () => {
-                try { succUnsub?.() } catch {}
-                try { cancUnsub?.() } catch {}
-              }
-              try {
-                // 1. Cree la session Stripe
-                const res = await apiFetch(API_BASE, '/api/agent3/stripe/checkout', {
-                  method: 'POST',
-                  body: JSON.stringify({ plan: 'advanced' }),
-                })
-                if (!res.ok) {
-                  const err = await res.json().catch(() => ({}))
-                  const msg = typeof err.detail === 'string' ? err.detail : (err.detail?.message || `Erreur ${res.status}`)
-                  throw new Error(msg)
-                }
-                const data = await res.json()
-                if (!data.ok || !data.url) {
-                  throw new Error(data.error || 'Stripe non configuré')
-                }
-
-                // 2. Setup race promise : success | cancelled
-                const settled = new Promise<'success' | 'cancelled'>((resolve) => {
-                  listen<string>('stripe-checkout:success', () => {
-                    cleanup()
-                    resolve('success')
-                  }).then((fn) => { succUnsub = fn }).catch(() => {})
-                  listen('stripe-checkout:cancelled', () => {
-                    cleanup()
-                    resolve('cancelled')
-                  }).then((fn) => { cancUnsub = fn }).catch(() => {})
-                })
-
-                // 3. Ouvre la popup Stripe
-                await invoke('open_stripe_checkout_popup', { checkoutUrl: data.url })
-
-                // 4. Attend la resolution
-                const outcome = await settled
-                if (outcome === 'cancelled') {
-                  setUpgradeLoading(false)
-                  return  // pas d'erreur, l'user a juste annule
-                }
-
-                // 5. Succes : refetch le plan (polling pour laisser le temps
-                //    au webhook Stripe d'update la DB — peut prendre 1-3s)
-                let attempts = 0
-                let newPlan: string = 'free'
-                while (attempts < 10 && newPlan === 'free') {
-                  await new Promise(r => setTimeout(r, 800))
-                  attempts++
-                  try {
-                    const pRes = await apiFetch(API_BASE, '/api/agent3/plan')
-                    const pData = await pRes.json()
-                    const planObj = pData?.plan || pData
-                    newPlan = (planObj?.name || 'free').toLowerCase()
-                  } catch { /* retry */ }
-                }
-                // Update React state -> le gate disparait
-                setUserPlan(newPlan)
-                setUpgradeLoading(false)
-              } catch (e) {
-                cleanup()
-                console.error('[stripe-upgrade]', e)
-                setUpgradeError(`Paiement impossible : ${e instanceof Error ? e.message : ''}`)
-                setUpgradeLoading(false)
-              }
-            }}
-            disabled={upgradeLoading}
-            style={{
-              width: '100%', padding: '11px 14px', borderRadius: 8,
-              background: upgradeLoading
-                ? `linear-gradient(135deg, ${SY.violet}66 0%, ${SY.cyan}66 100%)`
-                : `linear-gradient(135deg, ${SY.violet} 0%, ${SY.indigo} 40%, ${SY.blue} 75%, ${SY.cyan} 100%)`,
-              color: '#fff',
-              fontWeight: 700, fontSize: 13, letterSpacing: '0.12em',
-              textTransform: 'uppercase',
-              cursor: upgradeLoading ? 'wait' : 'pointer',
-              boxShadow: `0 0 0 1px rgba(0,200,255,0.3), 0 6px 20px rgba(0,200,255,0.18)`,
-              fontFamily: SY.mono,
-              border: 'none',
-            }}
-          >
-            {upgradeLoading ? '▸ Ouverture du paiement…' : '▸ Passer à Sylea Avancé'}
-          </button>
-          {upgradeError && (
-            <div style={{
-              marginTop: 10, padding: '8px 10px',
-              background: 'rgba(239,68,68,0.08)',
-              border: '1px solid rgba(239,68,68,0.25)',
-              borderRadius: 6,
-              fontSize: 11, fontFamily: SY.mono, color: '#fca5a5',
-            }}>
-              ✗ {upgradeError}
+            {/* Hero */}
+            <div style={{ textAlign: 'center', marginBottom: '1.5rem' }}>
+              <div style={{
+                display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+                padding: '0.3rem 0.85rem', borderRadius: 999, marginBottom: '0.8rem',
+                background: 'rgba(124,58,237,0.12)',
+                border: '1px solid rgba(124,58,237,0.25)',
+                fontSize: 10, fontWeight: 600, letterSpacing: '0.08em',
+                color: '#a78bfa', textTransform: 'uppercase',
+              }}>
+                <span>◈</span> Choisis ton plan
+              </div>
+              <h1 style={{
+                fontSize: 22, fontWeight: 800,
+                margin: '0 0 0.5rem', lineHeight: 1.2, color: '#e6f0ff',
+              }}>
+                Débloque ton plein potentiel<br />
+                <span className="desktop-gold-shimmer">avec Sylea Avancé.</span>
+              </h1>
+              <p style={{
+                color: 'rgba(230,240,255,0.55)', fontSize: 12,
+                margin: '0 auto', lineHeight: 1.5, maxWidth: 440,
+              }}>
+                Sylea t'accompagne chaque jour vers tes objectifs avec un coach IA personnalisé.{' '}
+                <strong style={{ color: 'rgba(230,240,255,0.85)' }}>Sans engagement, annulable à tout moment.</strong>
+              </p>
             </div>
-          )}
-          <button
-            onClick={() => {
-              setToken(null)
-              localStorage.removeItem('sylea_desktop_token')
-              setUserPlan(null)
-            }}
-            style={{
-              marginTop: 14, width: '100%', padding: '9px 14px', borderRadius: 8,
-              background: 'transparent',
-              border: `1px solid ${SY.border}`,
-              color: SY.textDim,
-              fontWeight: 500, fontSize: 12, letterSpacing: '0.1em',
-              cursor: 'pointer',
-              fontFamily: SY.mono,
-            }}
-          >
-            Se déconnecter
-          </button>
-        </div>
+
+            {/* Card Gratuit (plan actuel) */}
+            <div className="desktop-free-card" style={{
+              background: 'rgba(255,255,255,0.02)',
+              border: '1px solid rgba(255,255,255,0.06)',
+              borderRadius: 14,
+              padding: '1.1rem 1.25rem',
+              marginBottom: '0.85rem',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 12 }}>
+                <div>
+                  <div style={{
+                    display: 'inline-flex', alignItems: 'center',
+                    padding: '0.2rem 0.55rem', borderRadius: 999,
+                    background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)',
+                    fontSize: 9, fontWeight: 600, color: 'rgba(230,240,255,0.55)',
+                    textTransform: 'uppercase', letterSpacing: '0.08em',
+                    marginBottom: 8,
+                  }}>Plan actuel</div>
+                  <h2 style={{ fontSize: 18, fontWeight: 700, margin: 0, color: '#e6f0ff' }}>Gratuit</h2>
+                  <p style={{ fontSize: 11, color: 'rgba(230,240,255,0.55)', margin: '2px 0 0' }}>
+                    Pour découvrir Sylea
+                  </p>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 3, justifyContent: 'flex-end' }}>
+                    <span style={{ fontSize: 28, fontWeight: 800, color: '#e6f0ff' }}>0</span>
+                    <span style={{ fontSize: 16, fontWeight: 600, color: 'rgba(230,240,255,0.65)' }}>€</span>
+                  </div>
+                  <div style={{ fontSize: 10, color: 'rgba(230,240,255,0.45)' }}>/mois</div>
+                </div>
+              </div>
+              <ul style={{ padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {FREE_FEATURES.map((f) => <FeatureItem key={f.label} label={f.label} state={f.state} />)}
+              </ul>
+            </div>
+
+            {/* Card Avancé (le plus complet) */}
+            <div className="desktop-advanced-card" style={{
+              background: 'linear-gradient(155deg, rgba(124,58,237,0.12) 0%, rgba(15,12,30,0.85) 35%, rgba(212,160,23,0.12) 100%)',
+              borderRadius: 14,
+              padding: '1.25rem 1.25rem 1.1rem',
+              position: 'relative',
+              boxShadow: '0 8px 32px rgba(124,58,237,0.18)',
+            }}>
+              {/* Border gradient overlay */}
+              <div style={{
+                position: 'absolute', inset: 0, borderRadius: 14,
+                padding: 1.5,
+                background: 'linear-gradient(135deg, rgba(124,58,237,0.6), rgba(212,160,23,0.6), rgba(124,58,237,0.6))',
+                WebkitMask: 'linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)',
+                WebkitMaskComposite: 'xor', maskComposite: 'exclude',
+                pointerEvents: 'none',
+              }} />
+              {/* Badge "Le plus complet" centre haut */}
+              <div style={{
+                position: 'absolute', top: -10, left: '50%', transform: 'translateX(-50%)',
+                background: 'linear-gradient(135deg, #7c3aed, #d4a017, #fbbf24)',
+                backgroundSize: '200% 100%',
+                animation: 'shimmer-gold 3s ease-in-out infinite',
+                color: '#fff', fontSize: 9, fontWeight: 700,
+                padding: '0.25rem 0.75rem', borderRadius: 999,
+                letterSpacing: '0.08em', textTransform: 'uppercase',
+                boxShadow: '0 4px 16px rgba(124,58,237,0.4)',
+                whiteSpace: 'nowrap', zIndex: 2,
+              }}>
+                ⭐ Le plus complet
+              </div>
+
+              <div style={{ position: 'relative', zIndex: 1 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 12, marginTop: 6 }}>
+                  <div>
+                    <div style={{
+                      display: 'inline-flex', alignItems: 'center',
+                      padding: '0.2rem 0.55rem', borderRadius: 999,
+                      background: 'rgba(212,160,23,0.12)', border: '1px solid rgba(212,160,23,0.3)',
+                      fontSize: 9, fontWeight: 600, color: '#fbbf24',
+                      textTransform: 'uppercase', letterSpacing: '0.08em',
+                      marginBottom: 8,
+                    }}>✨ Recommandé</div>
+                    <h2 className="desktop-gold-shimmer" style={{ fontSize: 20, fontWeight: 800, margin: 0 }}>Avancé</h2>
+                    <p style={{ fontSize: 11, color: 'rgba(230,240,255,0.55)', margin: '2px 0 0' }}>
+                      Pour exploiter Sylea à 100%
+                    </p>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 3, justifyContent: 'flex-end' }}>
+                      <span style={{
+                        fontSize: 28, fontWeight: 800,
+                        background: 'linear-gradient(135deg, #fbbf24, #d4a017)',
+                        WebkitBackgroundClip: 'text', backgroundClip: 'text',
+                        WebkitTextFillColor: 'transparent',
+                      }}>19,99</span>
+                      <span style={{ fontSize: 16, fontWeight: 600, color: '#d4a017' }}>€</span>
+                    </div>
+                    <div style={{ fontSize: 10, color: 'rgba(230,240,255,0.45)' }}>/mois</div>
+                  </div>
+                </div>
+                <p style={{ fontSize: 10.5, color: 'rgba(230,240,255,0.55)', margin: '0 0 12px' }}>
+                  Soit <strong style={{ color: '#d4a017' }}>moins d'1 café par semaine</strong>.
+                </p>
+                <ul style={{ padding: 0, margin: '0 0 14px', display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {ADVANCED_FEATURES.map((f) => <FeatureItem key={f.label} label={f.label} state={f.state} />)}
+                </ul>
+                <button
+                  onClick={launchStripeUpgrade}
+                  disabled={upgradeLoading}
+                  className="desktop-advanced-cta"
+                  style={{
+                    width: '100%', padding: '0.85rem 1rem',
+                    background: 'linear-gradient(135deg, #7c3aed 0%, #a855f7 30%, #d4a017 70%, #fbbf24 100%)',
+                    backgroundSize: '200% 100%',
+                    border: 'none', borderRadius: 10,
+                    color: '#fff', fontWeight: 700, fontSize: 13,
+                    cursor: upgradeLoading ? 'wait' : 'pointer',
+                    letterSpacing: '0.02em',
+                    transition: 'transform 0.15s, background-position 0.3s',
+                    opacity: upgradeLoading ? 0.7 : 1,
+                  }}
+                  onMouseEnter={e => { if (!upgradeLoading) { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.backgroundPosition = '100% 0' } }}
+                  onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.backgroundPosition = '0% 0' }}
+                >
+                  {upgradeLoading ? '⏳ Ouverture du paiement…' : '🚀 Passer à Avancé'}
+                </button>
+                <p style={{ fontSize: 10, color: 'rgba(230,240,255,0.55)', textAlign: 'center', margin: '8px 0 0' }}>
+                  ✓ Sans engagement &nbsp;·&nbsp; ✓ Annulable en 1 clic
+                </p>
+                {upgradeError && (
+                  <div style={{
+                    marginTop: 10, padding: '8px 10px',
+                    background: 'rgba(239,68,68,0.08)',
+                    border: '1px solid rgba(239,68,68,0.25)',
+                    borderRadius: 6, fontSize: 11, color: '#fca5a5',
+                  }}>✗ {upgradeError}</div>
+                )}
+              </div>
+            </div>
+
+            {/* Trust block (3 colonnes) */}
+            <div style={{
+              display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10,
+              marginTop: '1.2rem', padding: '1rem',
+              background: 'rgba(255,255,255,0.02)',
+              border: '1px solid rgba(255,255,255,0.05)',
+              borderRadius: 12,
+            }}>
+              {[
+                { icon: '🔒', title: 'Données chiffrées', desc: 'Tes infos restent sur ton compte.' },
+                { icon: '⚡', title: 'Annulation immédiate', desc: 'Pas d\'engagement, pas de question.' },
+                { icon: '💳', title: 'Paiement sécurisé', desc: 'Géré par Stripe.' },
+              ].map((b) => (
+                <div key={b.title} style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: 18, marginBottom: 3 }}>{b.icon}</div>
+                  <div style={{ fontSize: 10.5, fontWeight: 700, color: '#e6f0ff', marginBottom: 2 }}>
+                    {b.title}
+                  </div>
+                  <div style={{ fontSize: 9.5, color: 'rgba(230,240,255,0.55)', lineHeight: 1.4 }}>
+                    {b.desc}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Se deconnecter (discret en bas) */}
+            <div style={{ textAlign: 'center', marginTop: '1.2rem' }}>
+              <button
+                onClick={() => {
+                  setToken(null)
+                  localStorage.removeItem('sylea_desktop_token')
+                  setUserPlan(null)
+                }}
+                style={{
+                  padding: '0.4rem 0.8rem', borderRadius: 6,
+                  background: 'transparent',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  color: 'rgba(230,240,255,0.5)',
+                  fontWeight: 500, fontSize: 10.5, letterSpacing: '0.05em',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(230,240,255,0.8)' }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(230,240,255,0.5)' }}
+              >
+                Se déconnecter
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     )
