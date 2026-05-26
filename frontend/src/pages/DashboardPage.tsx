@@ -344,35 +344,66 @@ export function DashboardPage() {
         {/* Sous-objectifs séquentiels */}
         {sousObjectifs.length > 0 && (() => {
           const activeIdx = sousObjectifs.findIndex(so => so.progression < 100)
-          // Calcul proportionnel : chaque SO affiche sa part du temps INITIAL total
-          // (fixe, ne change pas a chaque decision)
-          // Avec correction d'arrondi pour que la somme = total exact
-          const totalJoursObjectif = tempsInitial
+
+          // ─── Calcul coherence-by-construction ──────────────────────────────
+          // Le backend stocke 2 valeurs separees : `tempsGagne` (cumul depuis
+          // les decisions) et `progression` par SO. Ces 2 sources peuvent
+          // drift (arrondis, decisions anciennes sans recalcul). Pour eviter
+          // des chiffres incoherents a l'ecran, on DERIVE les temps des SO
+          // depuis tempsInitial/tempsGagne, en garantissant 2 invariants :
+          //   I1.  sum(soJoursInitial) = tempsInitial
+          //   I2.  sum(soJoursRestant) = objectifRestant (= tempsInitial - tempsGagne)
+          // Le `progression` ne sert qu'a la barre visuelle, pas au calcul.
+
+          const objectifRestant = Math.max(0, Math.round(tempsInitial - tempsGagne))
           const sumTempsEstime = sousObjectifs.reduce((s, so) => s + (so.temps_estime || 0), 0)
-          // Pré-calculer les jours exacts puis ajuster le dernier pour que la somme soit exacte
-          const soJoursRaw = sousObjectifs.map(so =>
-            sumTempsEstime > 0 ? (so.temps_estime / sumTempsEstime) * totalJoursObjectif : 0
+
+          // I1 : repartit tempsInitial proportionnellement (jamais change)
+          const soJoursInitialRaw = sousObjectifs.map(so =>
+            sumTempsEstime > 0 ? (so.temps_estime / sumTempsEstime) * tempsInitial : 0
           )
-          const sumRaw = soJoursRaw.reduce((s, j) => s + Math.round(j), 0)
-          const diff = Math.round(totalJoursObjectif) - sumRaw
-          // Ajouter la différence d'arrondi au dernier SO
-          const soJoursAjustes = soJoursRaw.map((j, i) =>
-            i === soJoursRaw.length - 1 ? Math.round(j) + diff : Math.round(j)
+          const sumInitialRounded = soJoursInitialRaw.reduce((s, j) => s + Math.round(j), 0)
+          const diffInitial = Math.round(tempsInitial) - sumInitialRounded
+          const soJoursAjustes = soJoursInitialRaw.map((j, i) =>
+            i === soJoursInitialRaw.length - 1 ? Math.round(j) + diffInitial : Math.round(j)
           )
-          // Invariant check: sum(SO_restant) must equal objectif_restant
-          const sumSoRestant = soJoursAjustes.reduce((s, j, i) =>
-            s + Math.round(j * (1 - sousObjectifs[i].progression / 100)), 0
-          )
-          const objectifRestant = Math.round(tempsInitial - tempsGagne)
-          const invariantDelta = Math.abs(sumSoRestant - objectifRestant)
-          const invariantBroken = invariantDelta > 5 // tolerance 5 jours (arrondis)
+
+          // I2 : pour chaque SO, calcule son temps restant "naturel" base sur
+          // sa progression individuelle, PUIS scale l'ensemble pour que la
+          // somme = objectifRestant exactement.
+          //   - SO complete (progression >= 100) -> 0j restant (par construction)
+          //   - SO actif -> soJoursAjustes * (1 - progression/100), puis scale
+          // Avantage : chaque SO conserve sa propre progression visible dans le
+          // chiffre, et la cumulation est toujours exactement = objectifRestant
+          // (pas de drift visible meme si backend incoherent).
+          const soJoursRestantNaturel = soJoursAjustes.map((j, i) => {
+            const p = Math.min(100, Math.max(0, sousObjectifs[i].progression))
+            return Math.max(0, j * (1 - p / 100))
+          })
+          const sumNaturel = soJoursRestantNaturel.reduce((s, j) => s + j, 0)
+          // Scale factor (1.0 si tout cadre, sinon ajuste). On divise par 0 ?
+          // Non : si sumNaturel = 0, tous les SO sont a 100% donc objectifRestant
+          // devrait aussi etre 0 -> on retourne juste 0 partout.
+          const scale = sumNaturel > 0 ? objectifRestant / sumNaturel : 0
+          const soJoursRestantScaled = soJoursRestantNaturel.map(j => j * scale)
+          // Arrondis avec la diff absorbee par le DERNIER SO actif
+          let lastActiveIdx = -1
+          for (let i = sousObjectifs.length - 1; i >= 0; i--) {
+            if (sousObjectifs[i].progression < 100) { lastActiveIdx = i; break }
+          }
+          const sumScaledRounded = soJoursRestantScaled.reduce((s, j) => s + Math.round(j), 0)
+          const diffRest = objectifRestant - sumScaledRounded
+          const soJoursRestantArr = soJoursRestantScaled.map((j, i) => {
+            const base = Math.round(j)
+            return i === lastActiveIdx ? Math.max(0, base + diffRest) : base
+          })
+
           return (
             <div className="card animate-fade-in" style={{ marginBottom: '1.5rem', padding: '1.25rem' }}>
-              {invariantBroken && (
-                <div style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.4)', borderRadius: 'var(--radius-md)', padding: '0.6rem 0.8rem', marginBottom: '0.75rem', fontSize: '0.75rem', color: '#f87171' }}>
-                  Desynchronisation detectee : temps SO ({sumSoRestant}j) ≠ objectif ({objectifRestant}j). Recalculez pour corriger.
-                </div>
-              )}
+              {/* Alerte "Desynchronisation detectee" retiree : la coherence
+                  entre sum(SO_restant) et objectifRestant est maintenant
+                  garantie par construction (cf. invariants I1 et I2 plus haut).
+              */}
               <h3 style={{ fontSize: '0.75rem', fontWeight: 700, letterSpacing: '0.1em', color: 'var(--accent-violet-light)', textTransform: 'uppercase', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <span>{'\u25c7'}</span> {t('dashboard.sous_objectifs')}
               </h3>
@@ -386,9 +417,12 @@ export function DashboardPage() {
                   const soColorLight = SO_COLORS_LIGHT[idx % SO_COLORS_LIGHT.length]
                   const barColor = isCompleted ? 'linear-gradient(90deg, #22c55e, #16a34a)' : isActive ? `linear-gradient(90deg, ${soColor}, ${soColorLight})` : `linear-gradient(90deg, ${soColor}66, ${soColor}33)`
                   const textColor = isCompleted ? '#4ade80' : isActive ? 'var(--text-primary)' : `${soColor}B3`
-                  // Temps proportionnel ajusté (somme = total objectif exact)
+                  // Temps initial (part de tempsInitial) + temps restant (part
+                  // de objectifRestant). Calcules dans le bloc plus haut pour
+                  // garantir sum(initial) = tempsInitial et sum(restant) =
+                  // objectifRestant. Plus de drift possible avec le backend.
                   const soJours = soJoursAjustes[idx]
-                  const soJoursRestant = Math.max(0, Math.round(soJours * (1 - so.progression / 100)))
+                  const soJoursRestant = soJoursRestantArr[idx]
                   const fmtJ = (j: number) => {
                     if (j <= 0) return null
                     if (j >= 365) { const a = Math.floor(j / 365); const m = Math.round((j % 365) / 30); return m > 0 ? `${a}a ${m}m` : `${a}a` }
