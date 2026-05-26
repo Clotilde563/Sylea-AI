@@ -281,140 +281,107 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
         )
 
 
-        # Contexte temporel pour l'IA.
-        # L'unite et les EXEMPLES de calibration sont critiques : ils guident
-        # Claude sur l'ordre de grandeur attendu. La regle d'or :
-        #   plus le cadre est LONG, plus l'impact peut etre GROS pour les
-        #   choix qui sont au coeur de l'objectif de vie.
-        # Calibration : pour une decision PARFAITEMENT alignee avec l'objectif
-        # et un investissement TOTAL du cadre temporel, l'impact peut atteindre
-        # ~30-50% du cadre. Pour une decision totalement HORS-SUJET, l'impact
-        # peut etre tres negatif (~50% du cadre). Les decisions tiedes restent
-        # dans ~5-15% du cadre.
+        # Cadre temporel formate de maniere lisible pour Claude (sans fourchettes
+        # imposees — on lui laisse la liberte de raisonner sur l'amplitude).
         if impact_temporel_jours is not None and impact_temporel_jours > 0:
             cadre_jours = impact_temporel_jours
             if cadre_jours <= 1:
                 cadre_str = "1 jour (24 heures)"
-                unite_impact = "heures (ex: +2.5 = 2h30 gagnees, -1.0 = 1h perdue)"
+                unite_indication = "Pour ce cadre court, tu peux exprimer impact_jours en fractions de jour. Ex : 2h de productivite gagnees = 0.083 (=2/24)."
             elif cadre_jours <= 7:
                 cadre_str = f"{cadre_jours} jours"
-                unite_impact = "heures (ex: +8.0 = 8h gagnees, -3.5 = 3h30 perdues)"
+                unite_indication = "Pour ce cadre court, exprime impact_jours en fractions si necessaire. Ex : 3h gagnees = 0.125 (=3/24)."
             elif cadre_jours <= 30:
                 cadre_str = f"~1 mois ({cadre_jours} jours)"
-                # Pour 1 mois : un choix tres aligne peut faire gagner 10-15j,
-                # un choix tres mauvais peut faire perdre 10-15j.
-                unite_impact = "jours (ex: choix tres aligne objectif = +10 a +15j; choix neutre = ±3j; choix hors-sujet majeur = -10 a -15j)"
+                unite_indication = "Exprime impact_jours en jours."
             elif cadre_jours <= 365:
                 cadre_str = f"~{cadre_jours // 30} mois ({cadre_jours} jours)"
-                # CALIBRATION CRITIQUE pour 1 an : un engagement d'1 ANNEE entiere
-                # sur une activite directement alignee avec l'objectif de vie
-                # peut accelerer l'atteinte de l'objectif de ~100 a 200 jours.
-                # Une annee perdue sur du hors-sujet = -100 a -300j.
-                # Les decisions tiedes (impact secondaire) restent dans ±20-50j.
-                unite_impact = (
-                    "jours. CALIBRATION :\n"
-                    "  - Engagement d'1 AN TOTAL sur une activite au COEUR de l'objectif = +100 a +200j\n"
-                    "  - Choix neutre / impact secondaire = ±20 a ±50j\n"
-                    "  - Choix HORS-SUJET majeur (perte de temps) = -100 a -200j\n"
-                    "  - Choix DESTRUCTEUR (sabotage de l'objectif) = jusqu'a -300j\n"
-                    "  Exemple concret : pour un objectif freelance dev, apprendre l'anglais"
-                    " (langue tech universelle, marche x4) sur 1 an = +120 a +180j. "
-                    "Apprendre l'italien (zero valeur tech freelance) sur 1 an = -80 a -150j."
-                )
+                unite_indication = "Exprime impact_jours en jours."
             else:
-                cadre_str = f"TOUTE LA DUREE DE L'OBJECTIF ({temps_estime_str}, soit {_tj} jours)"
-                # Long terme = cadre = duree totale objectif. L'impact peut atteindre
-                # 30-50% du cadre pour les choix transformationnels.
-                unite_impact = (
-                    "jours. CALIBRATION LONG TERME :\n"
-                    "  - Choix transformationnel aligne objectif = +30 a +50% du cadre\n"
-                    "  - Choix tiede = ±5 a ±15% du cadre\n"
-                    "  - Choix destructeur = jusqu'a -50% du cadre\n"
-                    f"  Pour ce cadre de {_tj}j, ca donne :\n"
-                    f"    Aligne fort = +{_tj // 3} a +{_tj // 2}j\n"
-                    f"    Hors-sujet = -{_tj // 4} a -{_tj // 2}j"
-                )
+                cadre_str = f"long terme — {temps_estime_str} ({_tj} jours)"
+                unite_indication = "Exprime impact_jours en jours."
         else:
             cadre_jours = _tj
-            cadre_str = f"TOUTE LA DUREE DE L'OBJECTIF ({temps_estime_str}, soit {_tj} jours)"
-            unite_impact = f"jours. Calibration : impact transformationnel = ±{_tj // 3} a ±{_tj // 2}j, choix neutre = ±{_tj // 10}j"
+            cadre_str = f"long terme — {temps_estime_str} ({_tj} jours)"
+            unite_indication = "Exprime impact_jours en jours."
 
-        prompt = f"""Tu es un robot probabiliste froid et factuel. Tu analyses un dilemme de vie.
-ZERO emotion, ZERO encouragement. Tu raisonnes en TEMPS, pas en pourcentage.
+        prompt = f"""Tu es Syléa, un analyste de decisions de vie froid, factuel, intellectuellement honnete.
+Tu raisonnes comme un expert qui connait l'utilisateur : son profil complet, son etat
+neuro-physiologique, son objectif de vie, et le cadre temporel exact de la decision.
 
-PROFIL RESUME :
+═══════════ CONTEXTE COMPLET DE L'UTILISATEUR ═══════════
+
 {profil_resume}
 {device_context}
 {collected_context}
 
-OBJECTIF ULTIME : {objectif_desc}
-PROBABILITE ACTUELLE : {prob_totale:.2f}%
-TEMPS ESTIME RESTANT : {temps_estime_str} ({_tj} jours)
+OBJECTIF DE VIE : {objectif_desc}
+PROBABILITE ACTUELLE D'ATTEINDRE CET OBJECTIF : {prob_totale:.2f}%
+TEMPS ESTIME RESTANT POUR L'OBJECTIF : {temps_estime_str} ({_tj} jours)
 
-CADRE TEMPOREL DE CE CHOIX : {cadre_str}
+═══════════ CADRE TEMPOREL DE CE CHOIX ═══════════
+
+{cadre_str}
+
+C'est CRUCIAL : l'utilisateur s'engage sur ce cadre exact. Si c'est 1 jour, la
+decision impacte sa journee. Si c'est 1 an, c'est UNE ANNEE ENTIERE de sa vie
+qui est engagee. Si c'est long terme, c'est toute la duree restante de
+l'objectif. L'amplitude de l'impact_jours doit refleter cette realite.
+
+═══════════ DILEMME ═══════════
 
 QUESTION : {question}
 
 {options_text}
 
-METHODE DE CALCUL (OBLIGATOIRE) :
-1. PENSE EN TEMPS D'ABORD : combien de temps (heures ou jours) cette option fait-elle
-   REELLEMENT gagner ou perdre sur l'objectif, DANS LA LIMITE du cadre temporel ({cadre_str}) ?
-2. Le champ "impact_jours" doit contenir ce temps en {unite_impact}.
-3. L'impact ne peut JAMAIS depasser le cadre temporel ({cadre_jours} jours max en valeur absolue).
-4. REGLE CRITIQUE : Chaque option DOIT avoir un impact DIFFERENT et NON NUL.
-   Meme si l'impact est minime, il existe toujours une difference entre deux choix.
-   Si les deux options sont mauvaises, les deux impacts peuvent etre NEGATIFS.
-   Si les deux options sont bonnes, les deux impacts peuvent etre POSITIFS mais differents.
-   JAMAIS 0 pour les deux options. JAMAIS le meme impact pour deux options differentes.
-5. Exemples concrets pour un cadre de 1 jour :
-   - Soiree avec un ami motivant = +0.5h (energie positive le lendemain)
-   - Soiree avec un ami demotivant = -1.5h (energie drainee, perte de focus le lendemain)
-   - Dormir 8h au lieu de coder = +2.0 (heures de productivite gagnees)
-   - Aller courir 1h = +0.5 (heures de clarte mentale gagnees)
-6. Exemples concrets pour un cadre de 1 mois :
-   - Apprendre l'anglais vs l'espagnol pour freelance dev = anglais +12 a +18j / espagnol +2 a +5j
-   - Aller au gym 5x/sem vs rester sedentaire = +5j / -8j (sante & focus)
-7. Exemples concrets pour un cadre de 1 AN (CRITIQUE — l'engagement est massif) :
-   - Apprendre l'anglais 1 an pour freelance dev (langue tech universelle) = +120 a +180j
-   - Apprendre l'italien 1 an pour freelance dev (zero valeur tech) = -80 a -150j (1 an perdu)
-   - Faire un MBA 1 an si pertinent metier = +100 a +200j
-   - Passer 1 an a regarder Netflix au lieu de bosser objectif = -200 a -350j
-   - Aller au gym regulierement 1 an = +40 a +60j (sante & energie boostees)
-   IMPORTANT : pour 1 AN, n'aie PAS PEUR des grands chiffres. Un an
-   d'engagement total = transformation reelle de la trajectoire de vie.
-8. Sois REALISTE et FACTUEL. Pas d'impact par encouragement.
-9. CALIBRE l'amplitude en fonction de l'ALIGNEMENT avec l'objectif :
-   - Au coeur de l'objectif + bon timing = magnitude haute (haut de la
-     fourchette donnee dans `unite_impact`)
-   - Tangentiel a l'objectif = magnitude moyenne
-   - Hors-sujet = magnitude tres negative
+═══════════ TA MISSION ═══════════
 
-REGLE CRITIQUE POUR LES IMPACTS COURTS (1 jour, 1 semaine) :
-- Il DOIT y avoir une DIFFERENCE d'impact entre les options. Jamais 0 pour les deux.
-- Pour un cadre de 1 jour (24h), exprime l'impact en HEURES et FRACTIONS D'HEURES.
-  Exemple : si une option fait gagner 2h de productivite, impact_jours = 0.083 (2h/24h)
-- Pour un cadre de 1 semaine, exprime en jours et fractions.
-- L'option recommandee DOIT avoir un meilleur impact que les autres.
-- Si les deux options sont mauvaises, les deux impacts sont negatifs mais differents.
+Pour CHAQUE option, raisonne intellectuellement honnetement :
 
-ETUDE SCIENTIFIQUE :
-- Cite UNE etude scientifique REELLE et verifiable en rapport avec le dilemme pose.
-- Inclus : auteurs, annee, revue/institution, et lien avec le dilemme.
-- Varie l'etude selon le contexte. Sources : Nature, Science, The Lancet, PNAS, etc.
+1. **Pros / Cons** : 3-6 mots-cles concis chacun (PAS de phrases). Tiens compte de :
+   - L'alignement avec l'objectif de vie
+   - L'etat neuro-physiologique de l'user (sommeil, stress, sante, energie, bonheur)
+   - Sa situation concrete (revenu, charges, competences, temps disponible)
+   - Le cadre temporel ({cadre_str}) — un meme choix n'a pas le meme impact
+     sur 1 jour vs 1 an vs long terme
+   - Les facteurs scientifiques pertinents (neurosciences, economie, sante...)
 
-REGLES DE FORMAT STRICTES :
-- pros/cons : tableau de mots-cles de 3 a 6 mots MAXIMUM chacun. JAMAIS de phrase complete.
-- resume : 3 a 6 mots MAXIMUM
-- verdict : 1 seule phrase de 15 mots MAXIMUM
+2. **impact_jours** : combien de jours cette option fait-elle GAGNER (positif) ou
+   PERDRE (negatif) sur l'atteinte de l'objectif, DANS LE CADRE TEMPOREL donne.
+   {unite_indication}
 
-Reponds UNIQUEMENT avec ce JSON :
+   Tu es libre de l'amplitude. Reflechis avec ton bon sens :
+   - Sur 1 jour, l'impact ne peut pas etre de 100 jours.
+   - Sur 1 an entier d'engagement, l'impact peut etre tres significatif si
+     l'activite est au coeur (ou totalement hors-sujet) de l'objectif.
+   - L'impact est CAPE par le cadre : abs(impact_jours) <= {cadre_jours}.
+   - Deux options ne peuvent JAMAIS avoir le meme impact ni etre TOUTES DEUX a 0.
+
+3. **resume** : 3-6 mots qui synthetisent l'essence du choix.
+
+═══════════ ETUDE SCIENTIFIQUE ═══════════
+
+Cite UNE etude reelle et verifiable en lien direct avec le dilemme. Inclus :
+auteurs, annee, revue/institution. Varie selon le contexte (Nature, Science,
+PNAS, The Lancet, Journal of Applied Psychology, NEJM, etc.).
+
+═══════════ FORMAT REPONSE ═══════════
+
+JSON STRICT (aucun texte avant/apres, aucun bloc markdown) :
 {{
   {json_options},
-  "verdict": "2-3 phrases naturelles. NE PAS mentionner de pourcentage. Explique pourquoi cette option est meilleure.",
-  "etude_scientifique": "Selon l etude de [Auteurs] ([Annee], [Revue]) sur [sujet], [conclusion cle].",
+  "verdict": "2-3 phrases naturelles. NE PAS mentionner de pourcentage. Explique pourquoi l'option recommandee est meilleure pour CET utilisateur dans CE cadre temporel.",
+  "etude_scientifique": "Selon l etude de [Auteurs] ([Annee], [Revue]) sur [sujet], [conclusion cle en lien avec le dilemme].",
   "option_recommandee": "{lettres[0]}"
-}}"""
+}}
+
+RAPPELS :
+- pros/cons : mots-cles 3-6 mots MAX, JAMAIS de phrases
+- resume : 3-6 mots MAX
+- verdict : 2 phrases max, ton naturel et direct
+- impact_jours : ta meilleure estimation realiste, bornee par {cadre_jours}j en valeur absolue
+- Aucune option a impact 0 si l'autre est non-nulle, jamais deux impacts identiques
+- Pas d'encouragement gratuit — sois honnete sur les choix mediocres ou mauvais"""
 
         data = self._appeler_claude(prompt)
 
