@@ -7366,8 +7366,12 @@ export default function AgentsPage() {
             box-shadow: 0 0 0 2px rgba(37,99,235,0.15), 0 0 0 4px rgba(212,160,23,0.08) !important;
           }
         `}</style>
-        {/* Agent 3 verrouille — masque tant que la fonctionnalite n'est pas operationnelle */}
-        {AGENT3_ENABLED && (<div style={{
+        {/* Agent 3 — affiche en mode "grise/locked" (carte visible mais non
+            cliquable) tant que la fonctionnalite n'est pas operationnelle.
+            Decision produit : on prefere montrer ce qui arrive plutot que
+            de cacher la roadmap. Le badge "Bientot disponible" est rendu
+            via le style opacity + pointerEvents:none + badge ajoute ci-dessous. */}
+        {(<div style={{
           display: 'flex', alignItems: 'center', gap: '1rem',
           background: 'var(--bg-surface)',
           border: '1px solid rgba(255,255,255,0.06)',
@@ -7376,9 +7380,24 @@ export default function AgentsPage() {
           boxShadow: '0 1px 8px rgba(0,0,0,0.15)',
           transition: 'all 0.3s',
           marginBottom: '0.75rem',
-          opacity: 0.45,
-          pointerEvents: 'none',
+          opacity: AGENT3_ENABLED ? 1 : 0.45,
+          pointerEvents: AGENT3_ENABLED ? 'auto' : 'none',
+          position: 'relative',
         }}>
+          {!AGENT3_ENABLED && (
+            <div style={{
+              position: 'absolute', top: 10, right: 14,
+              fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.1em',
+              textTransform: 'uppercase',
+              color: '#a78bfa',
+              background: 'rgba(167,139,250,0.12)',
+              border: '1px solid rgba(167,139,250,0.35)',
+              borderRadius: 'var(--radius-pill)',
+              padding: '0.2rem 0.55rem',
+            }}>
+              ⧗ Bientôt disponible
+            </div>
+          )}
           {/* Logo — blue+gold shimmering */}
           <div style={{ flexShrink: 0 }}>
             <svg width={48} height={48} viewBox="0 0 380 380" style={{ overflow: 'visible' }}>

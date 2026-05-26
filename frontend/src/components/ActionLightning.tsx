@@ -24,7 +24,8 @@ interface ActionsStatus {
   used: number
   limit: number             // -1 = illimité
   remaining: number
-  plan: string              // 'free' | 'pro' | 'team' | ...
+  plan: string              // 'free' | 'advanced' | 'team' | ...
+                            // (alias backward-compat 'pro' = 'advanced')
   is_unlimited: boolean
   reset_at: string          // ISO timestamp
 }

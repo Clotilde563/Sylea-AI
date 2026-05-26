@@ -31,11 +31,13 @@ from sylea.core.storage.database import DatabaseManager
 
 
 # Limites quotidiennes par plan. Les plans inconnus tombent sur 'free'.
+# Note : 'pro' garde 30 en alias backward-compat (rows DB pre-rename).
 _DAILY_LIMITS: dict[str, int] = {
     'free': 10,
-    'pro': 30,
-    'team': -1,        # illimite
-    'enterprise': -1,  # alias illimite (futur)
+    'advanced': 30,     # Sylea Avance (19,99 EUR/mois) — nouveau nom
+    'pro': 30,          # ALIAS backward-compat — utiliser 'advanced'
+    'team': -1,         # illimite (49,99 EUR/mois)
+    'enterprise': -1,   # alias illimite (futur)
 }
 
 

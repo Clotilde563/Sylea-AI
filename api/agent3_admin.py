@@ -337,14 +337,17 @@ async def get_global_stats_async() -> dict[str, Any]:
             res = await session.execute(text("SELECT COUNT(*) FROM agent3_messages"))
             n_messages = res.scalar() or 0
 
-            # Plans distribution
-            plans_dist: dict[str, int] = {"free": 0, "pro": 0, "team": 0}
+            # Plans distribution. On accepte 'pro' en alias backward-compat
+            # (rows DB d'avant le rename) et on les comptabilise dans advanced.
+            plans_dist: dict[str, int] = {"free": 0, "advanced": 0, "team": 0}
             try:
                 p_res = await session.execute(
                     text("SELECT plan_name, COUNT(*) FROM user_plans GROUP BY plan_name"),
                 )
                 for row in p_res.all():
-                    plans_dist[row[0]] = row[1]
+                    key = "advanced" if row[0] == "pro" else row[0]
+                    if key in plans_dist:
+                        plans_dist[key] += row[1]
             except Exception:
                 pass
 

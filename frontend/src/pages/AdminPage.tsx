@@ -181,7 +181,7 @@ export default function AdminPage() {
                       }}
                     >
                       <option value="free">Free</option>
-                      <option value="pro">Pro</option>
+                      <option value="advanced">Avancé</option>
                       <option value="team">Team</option>
                     </select>
                   </td>

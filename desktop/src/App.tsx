@@ -238,9 +238,9 @@ function App() {
   //  1. activatedAgents (source de verite : toggle "Activer cet agent" du web)
   //  2. lastActivityByAgent (recent WS message → agent en train d'agir)
   // Un agent est 'active' s'il est ACTIVE dans le web OU s'il a recemment agi.
-  // agent4 est toujours 'locked' (Super Agent — bientot disponible).
+  // agent3 et agent4 sont 'locked' (Sylea 3 + Super Agent — bientot disponibles).
   const AGENTS: AgentInfo[] = AGENTS_BASE.map(base => {
-    if (base.id === 'agent4') {
+    if (base.id === 'agent3' || base.id === 'agent4') {
       return { ...base, status: 'locked', unread: 0 }
     }
     const explicitlyActivated = activatedAgents[base.id] === true
@@ -311,6 +311,9 @@ function App() {
   // Plan de l'utilisateur — null = pas encore chargé, 'free' = bloqué, autre = OK
   const [userPlan, setUserPlan] = useState<string | null>(null)
   const [planLoading, setPlanLoading] = useState(false)
+  // Etats du bouton "Passer a Sylea Avance" (popup Stripe in-app)
+  const [upgradeLoading, setUpgradeLoading] = useState(false)
+  const [upgradeError, setUpgradeError] = useState('')
   const [wsConnected, setWsConnected] = useState(false)
   // Agent selectionne. null = "auto" : suit l'agent le plus recemment actif.
   // Si l'utilisateur clique sur un agent dans la sidebar, on bascule en mode
@@ -1297,7 +1300,9 @@ function App() {
             marginBottom: 22, fontFamily: SY.mono,
           }}>
             Le desktop est reserve aux abonnes <strong style={{ color: SY.cyan }}>Avancé</strong>.<br/>
-            Mets à niveau ton compte pour debloquer :
+            <span style={{ color: SY.cyan, fontSize: 18, fontWeight: 700, display: 'inline-block', marginTop: 4 }}>
+              19,99 € / mois
+            </span>
           </p>
           <div style={{
             fontSize: 12, color: SY.text, fontFamily: SY.mono,
@@ -1306,28 +1311,130 @@ function App() {
             borderRadius: 8, padding: '12px 14px',
             marginBottom: 22, textAlign: 'left', lineHeight: 1.7,
           }}>
+            <div>✓ Accès complet à l'application Desktop</div>
             <div>✓ Agent Syléa 2 (assistant exécutant)</div>
             <div>✓ Skills OpenClaw (email, calendrier, notes…)</div>
-            <div>✓ Plan "Que faire ?" quotidien IA</div>
-            <div>✓ 30 actions/jour (vs 10 en Free)</div>
+            <div>✓ 30 actions IA / jour (vs 10 en Free)</div>
+            <div>✓ 1 million de tokens / mois</div>
+            <div>✓ 100 deep researches / mois</div>
+            <div>✓ 50 skills installables · 30 crons</div>
+            <div>✓ 1000 uploads / mois · 5 workspaces</div>
+            <div>✓ Plan "Que faire ?" quotidien personnalisé</div>
             <div>✓ Notifications & rappels intelligents</div>
           </div>
           <button
-            onClick={() => invoke('open_url', { url: 'https://sylea.ai/quotas' }).catch(() => {})}
+            onClick={async () => {
+              // Flow paiement Stripe in-app (popup Tauri) :
+              //   1. POST /api/agent3/stripe/checkout {plan:'advanced'}
+              //   2. Backend cree session Stripe + retourne url
+              //   3. invoke('open_stripe_checkout_popup', { checkoutUrl })
+              //      -> Rust ouvre une mini-fenetre 600x800 sur Stripe
+              //   4. User paie sur Stripe (in-app, jamais sorti de Sylea)
+              //   5. Stripe redirige vers /quotas?paid=1 -> Rust intercepte,
+              //      ferme la popup, emit 'stripe-checkout:success'
+              //   6. On refetch /api/agent3/plan -> 'advanced' -> gate disparait
+              //
+              // En parallele, le webhook Stripe (cote backend) update
+              // user_plans en DB. Donc le plan est confirme dans la source
+              // de verite avant meme qu'on refetch.
+              setUpgradeLoading(true)
+              setUpgradeError('')
+              let succUnsub: (() => void) | undefined
+              let cancUnsub: (() => void) | undefined
+              const cleanup = () => {
+                try { succUnsub?.() } catch {}
+                try { cancUnsub?.() } catch {}
+              }
+              try {
+                // 1. Cree la session Stripe
+                const res = await apiFetch(API_BASE, '/api/agent3/stripe/checkout', {
+                  method: 'POST',
+                  body: JSON.stringify({ plan: 'advanced' }),
+                })
+                if (!res.ok) {
+                  const err = await res.json().catch(() => ({}))
+                  const msg = typeof err.detail === 'string' ? err.detail : (err.detail?.message || `Erreur ${res.status}`)
+                  throw new Error(msg)
+                }
+                const data = await res.json()
+                if (!data.ok || !data.url) {
+                  throw new Error(data.error || 'Stripe non configuré')
+                }
+
+                // 2. Setup race promise : success | cancelled
+                const settled = new Promise<'success' | 'cancelled'>((resolve) => {
+                  listen<string>('stripe-checkout:success', () => {
+                    cleanup()
+                    resolve('success')
+                  }).then((fn) => { succUnsub = fn }).catch(() => {})
+                  listen('stripe-checkout:cancelled', () => {
+                    cleanup()
+                    resolve('cancelled')
+                  }).then((fn) => { cancUnsub = fn }).catch(() => {})
+                })
+
+                // 3. Ouvre la popup Stripe
+                await invoke('open_stripe_checkout_popup', { checkoutUrl: data.url })
+
+                // 4. Attend la resolution
+                const outcome = await settled
+                if (outcome === 'cancelled') {
+                  setUpgradeLoading(false)
+                  return  // pas d'erreur, l'user a juste annule
+                }
+
+                // 5. Succes : refetch le plan (polling pour laisser le temps
+                //    au webhook Stripe d'update la DB — peut prendre 1-3s)
+                let attempts = 0
+                let newPlan: string = 'free'
+                while (attempts < 10 && newPlan === 'free') {
+                  await new Promise(r => setTimeout(r, 800))
+                  attempts++
+                  try {
+                    const pRes = await apiFetch(API_BASE, '/api/agent3/plan')
+                    const pData = await pRes.json()
+                    const planObj = pData?.plan || pData
+                    newPlan = (planObj?.name || 'free').toLowerCase()
+                  } catch { /* retry */ }
+                }
+                // Update React state -> le gate disparait
+                setUserPlan(newPlan)
+                setUpgradeLoading(false)
+              } catch (e) {
+                cleanup()
+                console.error('[stripe-upgrade]', e)
+                setUpgradeError(`Paiement impossible : ${e instanceof Error ? e.message : ''}`)
+                setUpgradeLoading(false)
+              }
+            }}
+            disabled={upgradeLoading}
             style={{
               width: '100%', padding: '11px 14px', borderRadius: 8,
-              background: `linear-gradient(135deg, ${SY.violet} 0%, ${SY.indigo} 40%, ${SY.blue} 75%, ${SY.cyan} 100%)`,
+              background: upgradeLoading
+                ? `linear-gradient(135deg, ${SY.violet}66 0%, ${SY.cyan}66 100%)`
+                : `linear-gradient(135deg, ${SY.violet} 0%, ${SY.indigo} 40%, ${SY.blue} 75%, ${SY.cyan} 100%)`,
               color: '#fff',
               fontWeight: 700, fontSize: 13, letterSpacing: '0.12em',
               textTransform: 'uppercase',
-              cursor: 'pointer',
+              cursor: upgradeLoading ? 'wait' : 'pointer',
               boxShadow: `0 0 0 1px rgba(0,200,255,0.3), 0 6px 20px rgba(0,200,255,0.18)`,
               fontFamily: SY.mono,
               border: 'none',
             }}
           >
-            ▸ Passer à Sylea Avancé
+            {upgradeLoading ? '▸ Ouverture du paiement…' : '▸ Passer à Sylea Avancé'}
           </button>
+          {upgradeError && (
+            <div style={{
+              marginTop: 10, padding: '8px 10px',
+              background: 'rgba(239,68,68,0.08)',
+              border: '1px solid rgba(239,68,68,0.25)',
+              borderRadius: 6,
+              fontSize: 11, fontFamily: SY.mono, color: '#fca5a5',
+            }}>
+              ✗ {upgradeError}
+            </div>
+          )}
           <button
             onClick={() => {
               setToken(null)

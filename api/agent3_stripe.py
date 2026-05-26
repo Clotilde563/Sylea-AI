@@ -1,8 +1,8 @@
 """
-Agent 3 — Stripe checkout integration pour les plans pro/team.
+Agent 3 — Stripe checkout integration pour les plans advanced/team.
 
 Flow :
-  1. Frontend appelle POST /api/agent3/stripe/checkout {plan: 'pro'|'team'}
+  1. Frontend appelle POST /api/agent3/stripe/checkout {plan: 'advanced'|'team'}
   2. Backend cree une Stripe Checkout Session + retourne l'URL
   3. User redirige vers Stripe, paie, revient sur /success ou /cancel
   4. Webhook POST /api/agent3/stripe/webhook recoit `checkout.session.completed`
@@ -12,8 +12,9 @@ Flow :
 Configuration (env) :
   STRIPE_SECRET_KEY        : sk_test_... ou sk_live_...
   STRIPE_WEBHOOK_SECRET    : whsec_... (pour verifier les webhooks)
-  STRIPE_PRICE_PRO         : price_... (cree dans le dashboard Stripe)
-  STRIPE_PRICE_TEAM        : price_...
+  STRIPE_PRICE_ADVANCED    : price_... (Sylea Avance, 19,99 EUR/mois)
+                             Alias accepte : STRIPE_PRICE_PRO (pre-rename)
+  STRIPE_PRICE_TEAM        : price_... (Sylea Team, 49,99 EUR/mois)
   STRIPE_SUCCESS_URL       : https://app.sylea.ai/quotas?paid=1 (defaut)
   STRIPE_CANCEL_URL        : https://app.sylea.ai/quotas?cancelled=1 (defaut)
   FRONTEND_BASE_URL        : fallback pour success/cancel urls
@@ -38,11 +39,29 @@ from typing import Any
 logger = logging.getLogger("sylea.stripe")
 
 
-# Mapping plan -> env var avec le price_id Stripe
+# Mapping plan -> env var avec le price_id Stripe.
+# Note : pour "advanced" on accepte aussi l'ancien nom de var STRIPE_PRICE_PRO
+# (cf. _get_price_id ci-dessous) pour ne pas casser les .env existants.
 _PLAN_TO_PRICE_ENV: dict[str, str] = {
-    "pro": "STRIPE_PRICE_PRO",
+    "advanced": "STRIPE_PRICE_ADVANCED",
     "team": "STRIPE_PRICE_TEAM",
 }
+
+
+def _get_price_id(plan: str) -> str:
+    """Retourne le price_id Stripe pour un plan, avec fallback retrocompatible.
+
+    Pour "advanced", lit STRIPE_PRICE_ADVANCED puis (fallback) STRIPE_PRICE_PRO
+    pour rester compatible avec les .env d'avant le rename.
+    """
+    env_var = _PLAN_TO_PRICE_ENV.get(plan)
+    if not env_var:
+        return ""
+    price_id = os.environ.get(env_var, "").strip()
+    if not price_id and plan == "advanced":
+        # Fallback retrocompat : ancien nom de variable
+        price_id = os.environ.get("STRIPE_PRICE_PRO", "").strip()
+    return price_id
 
 
 def is_configured() -> bool:
@@ -109,10 +128,15 @@ async def create_checkout_session(
     if stripe is None:
         return {"ok": False, "error": "stripe python lib non installee (pip install stripe)"}
 
-    if plan not in _PLAN_TO_PRICE_ENV:
-        return {"ok": False, "error": f"Plan {plan} non payant (utilise pro ou team)"}
+    # Backward-compat : ancien plan "pro" -> nouveau "advanced"
+    if plan == "pro":
+        plan = "advanced"
 
-    price_id = os.environ.get(_PLAN_TO_PRICE_ENV[plan], "").strip()
+    if plan not in _PLAN_TO_PRICE_ENV:
+        return {"ok": False, "error": f"Plan {plan} non payant (utilise advanced ou team)"}
+
+    # Utilise le helper qui gere le fallback STRIPE_PRICE_PRO -> STRIPE_PRICE_ADVANCED
+    price_id = _get_price_id(plan)
     if not price_id:
         return {
             "ok": False,
@@ -334,6 +358,10 @@ def _handle_checkout_completed(db: Any, session: dict) -> dict[str, Any]:
     if not user_id or not plan:
         return {"ok": False, "error": "metadata manquante"}
 
+    # Backward-compat : subscription Stripe d'avant le rename pro -> advanced
+    if plan == "pro":
+        plan = "advanced"
+
     from api.agent3_quotas import set_user_plan_async
 
     async def _do_writes():
@@ -386,6 +414,9 @@ def _handle_subscription_updated(db: Any, sub: dict) -> dict[str, Any]:
         return {"ok": True, "event_type": "subscription.updated", "action": "downgraded to free"}
 
     if plan:
+        # Backward-compat : sub Stripe d'avant le rename pro -> advanced
+        if plan == "pro":
+            plan = "advanced"
         try:
             _asyncio.run(set_user_plan_async(user_id, plan))
         except Exception:

@@ -11,12 +11,15 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
 
-export type PlanName = 'free' | 'pro' | 'team' | string
+// Note : 'pro' garde sa place comme alias backward-compat pour les comptes
+// crees avant le rename pro -> advanced. Toute la logique d'app traite
+// 'pro' comme equivalent a 'advanced'.
+export type PlanName = 'free' | 'advanced' | 'pro' | 'team' | string
 
 export interface UsePlanResult {
   plan: PlanName | null
   isFree: boolean
-  isAdvanced: boolean   // pro ou team (toute souscription payante)
+  isAdvanced: boolean   // advanced/pro ou team (toute souscription payante)
   loading: boolean
 }
 
@@ -81,7 +84,7 @@ export function usePlan(): UsePlanResult {
   return {
     plan,
     isFree: plan === null || plan === 'free',
-    isAdvanced: plan === 'pro' || plan === 'team',
+    isAdvanced: plan === 'advanced' || plan === 'pro' || plan === 'team',
     loading,
   }
 }

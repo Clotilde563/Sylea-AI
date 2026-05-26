@@ -1995,9 +1995,9 @@ export const api = {
 
   getPlan: (): Promise<{
     plan: {
-      name: 'free' | 'pro' | 'team'
+      name: 'free' | 'advanced' | 'pro' | 'team'
       display_name: string
-      price_usd: number
+      price_eur: number
       limits: Record<string, number>
       started_at?: string
       expires_at?: string
@@ -2286,14 +2286,17 @@ export const api = {
   stripeConfig: (): Promise<{ configured: boolean }> =>
     request('/agent3/stripe/config'),
 
-  stripeCheckout: (plan: 'pro' | 'team'): Promise<{
+  stripeCheckout: (
+    plan: 'advanced' | 'team',
+    opts: { coupon?: string } = {},
+  ): Promise<{
     ok: boolean
     url?: string
     session_id?: string
     error?: string
   }> => request('/agent3/stripe/checkout', {
     method: 'POST',
-    body: JSON.stringify({ plan }),
+    body: JSON.stringify({ plan, ...opts }),
   }),
 
   stripePortal: (): Promise<{

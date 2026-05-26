@@ -38,7 +38,7 @@ PLANS: dict[str, dict[str, Any]] = {
     "free": {
         "name": "free",
         "display_name": "Free",
-        "price_usd": 0,
+        "price_eur": 0,
         "limits": {
             "tokens_per_month": 100_000,
             "skills_installed": 10,
@@ -49,10 +49,12 @@ PLANS: dict[str, dict[str, Any]] = {
             "team_members": 0,
         },
     },
-    "pro": {
-        "name": "pro",
-        "display_name": "Pro",
-        "price_usd": 20,
+    "advanced": {
+        "name": "advanced",
+        "display_name": "Avancé",
+        "price_eur": 19.99,
+        # Devise EUR (marche francais). Anciennement "pro" + price_usd=20 :
+        # rename effectue suite a decision produit "Avance" comme nom marketing.
         "limits": {
             "tokens_per_month": 1_000_000,
             "skills_installed": 50,
@@ -66,7 +68,7 @@ PLANS: dict[str, dict[str, Any]] = {
     "team": {
         "name": "team",
         "display_name": "Team",
-        "price_usd": 50,
+        "price_eur": 49.99,
         "limits": {
             "tokens_per_month": 10_000_000,
             "skills_installed": -1,    # unlimited
@@ -435,11 +437,16 @@ async def get_user_plan_async(user_id: str) -> dict[str, Any]:
         return PLANS["free"]
 
     plan_name = row["plan_name"] or "free"
+    # Backward-compat : ancien plan "pro" -> nouveau "advanced" (rename effectue
+    # apres decision produit "Avance" comme nom marketing). Si une ligne DB
+    # contient encore "pro", on la traite comme "advanced".
+    if plan_name == "pro":
+        plan_name = "advanced"
     base = PLANS.get(plan_name) or PLANS["free"]
     plan = {
         "name": base["name"],
         "display_name": base["display_name"],
-        "price_usd": base["price_usd"],
+        "price_eur": base.get("price_eur", 0),
         "limits": dict(base["limits"]),
         "started_at": row["started_at"],
         "expires_at": row["expires_at"],

@@ -826,6 +826,122 @@ async fn open_google_oauth_popup(app: AppHandle, oauth_url: String) -> Result<()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  Sprint 4 — Stripe Checkout popup (paiement in-app)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Permet a l'utilisateur de payer un abonnement Sylea SANS quitter le desktop.
+// On ouvre une mini-fenetre Tauri (600x800) sur l'URL Stripe Checkout retournee
+// par le backend (POST /api/agent3/stripe/checkout). L'user paie sur Stripe
+// (WebView2 partage le profil avec la fenetre principale donc les cookies de
+// session Stripe persistent entre les sessions).
+//
+// Stripe redirige vers success_url ou cancel_url (configurees backend via env
+// STRIPE_SUCCESS_URL / STRIPE_CANCEL_URL ou fallback localhost:5173/quotas).
+// On intercepte ces 2 URLs AVANT chargement, on extrait le session_id (succes)
+// ou rien (annule), et on emet l'event correspondant.
+//
+// Events emis :
+//   - "stripe-checkout:success"   payload = session_id  (paiement OK)
+//   - "stripe-checkout:cancelled" payload = ()           (user a annule)
+//
+// Cote JS, le desktop refetch /api/agent3/plan apres :success pour rafraichir
+// le plan de l'utilisateur (l'update est fait dans la DB par le webhook
+// Stripe declenche en parallele cote backend).
+#[tauri::command]
+async fn open_stripe_checkout_popup(app: AppHandle, checkout_url: String) -> Result<(), String> {
+    use tauri::WebviewUrl;
+
+    let parsed = checkout_url
+        .parse::<url::Url>()
+        .map_err(|e| format!("URL Stripe invalide : {}", e))?;
+
+    // Ferme une eventuelle popup precedente
+    if let Some(existing) = app.get_webview_window("stripe-checkout") {
+        let _ = existing.close();
+    }
+
+    let resolved_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let app_handle = app.clone();
+    let resolved_for_nav = resolved_flag.clone();
+    let app_handle_for_close = app.clone();
+    let resolved_for_close = resolved_flag.clone();
+
+    let popup = tauri::WebviewWindowBuilder::new(
+        &app,
+        "stripe-checkout",
+        WebviewUrl::External(parsed),
+    )
+    .title("Paiement Sylea — Sécurisé via Stripe")
+    .inner_size(600.0, 800.0)
+    .center()
+    .resizable(false)
+    .focused(true)
+    .decorations(true)
+    .on_navigation(move |url| {
+        let url_str = url.to_string();
+        // Log SANS query string (peut contenir des info sensibles type session_id)
+        let log_prefix: String = url_str.chars().take(60).collect();
+        eprintln!("[stripe-checkout] nav: {}...", log_prefix);
+
+        // Interception des URLs de retour. Le backend par defaut renvoie sur
+        // localhost:5173/quotas?paid=1&session_id=... ou ?cancelled=1, mais on
+        // accepte aussi sylea.ai/quotas pour la prod. Le path /quotas est le
+        // marqueur cle (Stripe ne navigue jamais vers /quotas avant la fin).
+        let is_return = url_str.contains("/quotas")
+            && (url_str.contains("paid=1") || url_str.contains("cancelled=1"));
+
+        if is_return {
+            // Mark resolved BEFORE close
+            resolved_for_nav.store(true, std::sync::atomic::Ordering::SeqCst);
+
+            // Extract session_id si succes
+            let mut session_id: Option<String> = None;
+            let mut is_paid = false;
+            if let Some(query) = url.query() {
+                for pair in query.split('&') {
+                    let mut parts = pair.splitn(2, '=');
+                    match (parts.next(), parts.next()) {
+                        (Some("paid"), Some("1")) => is_paid = true,
+                        (Some("session_id"), Some(v)) => session_id = Some(v.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+
+            if is_paid {
+                let sid = session_id.unwrap_or_default();
+                eprintln!("[stripe-checkout] paid (session_id length {})", sid.len());
+                let _ = app_handle.emit("stripe-checkout:success", sid);
+            } else {
+                eprintln!("[stripe-checkout] cancelled by user");
+                let _ = app_handle.emit("stripe-checkout:cancelled", ());
+            }
+
+            // Close popup
+            if let Some(popup) = app_handle.get_webview_window("stripe-checkout") {
+                let _ = popup.close();
+            }
+            return false; // Cancel navigation
+        }
+        true
+    })
+    .build()
+    .map_err(|e| format!("Impossible de creer la popup Stripe : {}", e))?;
+
+    // Detect "user ferme la popup avant la fin" -> emit cancelled
+    popup.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            if !resolved_for_close.load(std::sync::atomic::Ordering::SeqCst) {
+                eprintln!("[stripe-checkout] popup closed before resolution (cancelled)");
+                let _ = app_handle_for_close.emit("stripe-checkout:cancelled", ());
+            }
+        }
+    });
+
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  Sprint 1 — Commandes window/pill/autostart/updater
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1141,6 +1257,8 @@ fn main() {
             take_pending_deep_link,
             // Sprint 3 — OAuth Google natif (popup Tauri embarquee)
             open_google_oauth_popup,
+            // Sprint 4 — Stripe Checkout in-app
+            open_stripe_checkout_popup,
             // Sprint 1 — Window/pill/quit
             toggle_pill_mode,
             toggle_main_window,

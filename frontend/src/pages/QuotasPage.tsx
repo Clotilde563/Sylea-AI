@@ -90,13 +90,13 @@ export default function QuotasPage() {
   }, [])
 
   const upgradeToAdvanced = async () => {
-    setCheckoutLoading('pro')
+    setCheckoutLoading('advanced')
     try {
       if (!stripeConfigured) {
         alert('⚠ Les paiements ne sont pas encore activés. Contacte-nous pour démarrer.')
         return
       }
-      const r = await api.stripeCheckout('pro')
+      const r = await api.stripeCheckout('advanced')
       if (r.ok && r.url) {
         window.location.href = r.url
       } else {
@@ -536,7 +536,7 @@ function PromoCodeSection() {
     setApplying(true)
     setFeedback({ kind: 'idle', msg: '' })
     try {
-      const r = await api.stripeCheckout('pro', { coupon: trimmed })
+      const r = await api.stripeCheckout('advanced', { coupon: trimmed })
       if (r.ok && r.url) {
         // Le code est valide, on bascule sur la page de paiement Stripe.
         setFeedback({ kind: 'success', msg: 'Code appliqué — redirection vers le paiement…' })
