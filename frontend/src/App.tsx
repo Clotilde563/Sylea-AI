@@ -33,7 +33,6 @@ import NetworkPage          from './pages/NetworkPage'
 import OutilsPage           from './pages/OutilsPage'
 import AuthCallbackPage     from './pages/AuthCallbackPage'
 import AppleDesktopBridgePage from './pages/AppleDesktopBridgePage'
-import GoogleDesktopBridgePage from './pages/GoogleDesktopBridgePage'
 import QuotasPage           from './pages/QuotasPage'
 import AdminPage            from './pages/AdminPage'
 import WorkspacesPage       from './pages/WorkspacesPage'
@@ -64,7 +63,6 @@ function AppContent() {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/auth/callback" element={<AuthCallbackPage />} />
         <Route path="/auth/apple-desktop" element={<AppleDesktopBridgePage />} />
-        <Route path="/auth/google-desktop" element={<GoogleDesktopBridgePage />} />
         <Route path="/privacy" element={<PrivacyPolicyPage />} />
         <Route path="/terms" element={<TermsPage />} />
         <Route path="/help" element={<HelpPage />} />

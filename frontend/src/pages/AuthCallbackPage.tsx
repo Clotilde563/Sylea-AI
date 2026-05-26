@@ -93,53 +93,6 @@ export default function AuthCallbackPage() {
         .catch((e: any) => {
           setError(e.message || 'Erreur de connexion Apple')
         })
-    } else if (state.startsWith('desktop_google_')) {
-      // Flow 5 : login/register Google depuis le desktop (deep-link return).
-      //
-      // Le state contient le nonce genere cote desktop. 3 cas possibles :
-      //   1. Succes -> sylea://auth/callback?token=<JWT>&nonce=<NONCE>
-      //   2. 409 USE_PASSWORD (compte deja en email/mdp, refuse la liaison
-      //      Google) -> sylea://auth/callback?error=USE_PASSWORD&nonce=<NONCE>
-      //      Le desktop affiche "Utilise le formulaire email/mdp".
-      //   3. Autre erreur -> sylea://auth/callback?error=<msg>&nonce=<NONCE>
-      //
-      // Le desktop listener verifie le nonce dans tous les cas (anti-forge).
-      setStatus('Connexion à votre compte Google…')
-      const nonce = state.substring('desktop_google_'.length)
-
-      const sendToDesktop = (params: Record<string, string>) => {
-        const qs = new URLSearchParams({ ...params, nonce }).toString()
-        const deepLink = `sylea://auth/callback?${qs}`
-        setStatus("Retour vers l'application Syléa Desktop…")
-        setTimeout(() => {
-          window.location.href = deepLink
-          setTimeout(() => {
-            setStatus(
-              "Si l'application Syléa Desktop ne s'ouvre pas automatiquement, " +
-                "ferme cet onglet et reviens dans l'app.",
-            )
-          }, 2000)
-        }, 200)
-      }
-
-      handleGoogleCallback(code)
-        .then(() => {
-          const token = localStorage.getItem('sylea_auth_token') || ''
-          sendToDesktop({ token })
-        })
-        .catch((e: any) => {
-          // handleGoogleCallback throw une Error avec message extrait du
-          // detail.message du backend (cf. request() dans api/client.ts).
-          // Pour le 409 USE_PASSWORD, le message commence par "Ce compte
-          // ({email}) se connecte avec email/mot de passe...".
-          // On envoie un code generique au desktop qui affichera son propre
-          // message friendly base sur ce code.
-          const msg = e?.message || 'Erreur de connexion Google'
-          const errCode = msg.includes('email/mot de passe') || msg.includes('USE_PASSWORD')
-            ? 'USE_PASSWORD'
-            : 'OAUTH_FAILED'
-          sendToDesktop({ error: errCode, message: msg })
-        })
     } else {
       // Flow 1: login/register with Google
       setStatus('Connexion à votre compte Google...')
