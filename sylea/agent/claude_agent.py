@@ -281,7 +281,16 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
         )
 
 
-        # Contexte temporel pour l'IA
+        # Contexte temporel pour l'IA.
+        # L'unite et les EXEMPLES de calibration sont critiques : ils guident
+        # Claude sur l'ordre de grandeur attendu. La regle d'or :
+        #   plus le cadre est LONG, plus l'impact peut etre GROS pour les
+        #   choix qui sont au coeur de l'objectif de vie.
+        # Calibration : pour une decision PARFAITEMENT alignee avec l'objectif
+        # et un investissement TOTAL du cadre temporel, l'impact peut atteindre
+        # ~30-50% du cadre. Pour une decision totalement HORS-SUJET, l'impact
+        # peut etre tres negatif (~50% du cadre). Les decisions tiedes restent
+        # dans ~5-15% du cadre.
         if impact_temporel_jours is not None and impact_temporel_jours > 0:
             cadre_jours = impact_temporel_jours
             if cadre_jours <= 1:
@@ -292,17 +301,43 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
                 unite_impact = "heures (ex: +8.0 = 8h gagnees, -3.5 = 3h30 perdues)"
             elif cadre_jours <= 30:
                 cadre_str = f"~1 mois ({cadre_jours} jours)"
-                unite_impact = "jours (ex: +5.0 = 5 jours gagnes, -2.0 = 2 jours perdus)"
+                # Pour 1 mois : un choix tres aligne peut faire gagner 10-15j,
+                # un choix tres mauvais peut faire perdre 10-15j.
+                unite_impact = "jours (ex: choix tres aligne objectif = +10 a +15j; choix neutre = ±3j; choix hors-sujet majeur = -10 a -15j)"
             elif cadre_jours <= 365:
                 cadre_str = f"~{cadre_jours // 30} mois ({cadre_jours} jours)"
-                unite_impact = "jours (ex: +30.0 = 1 mois gagne, -15.0 = 15 jours perdus)"
+                # CALIBRATION CRITIQUE pour 1 an : un engagement d'1 ANNEE entiere
+                # sur une activite directement alignee avec l'objectif de vie
+                # peut accelerer l'atteinte de l'objectif de ~100 a 200 jours.
+                # Une annee perdue sur du hors-sujet = -100 a -300j.
+                # Les decisions tiedes (impact secondaire) restent dans ±20-50j.
+                unite_impact = (
+                    "jours. CALIBRATION :\n"
+                    "  - Engagement d'1 AN TOTAL sur une activite au COEUR de l'objectif = +100 a +200j\n"
+                    "  - Choix neutre / impact secondaire = ±20 a ±50j\n"
+                    "  - Choix HORS-SUJET majeur (perte de temps) = -100 a -200j\n"
+                    "  - Choix DESTRUCTEUR (sabotage de l'objectif) = jusqu'a -300j\n"
+                    "  Exemple concret : pour un objectif freelance dev, apprendre l'anglais"
+                    " (langue tech universelle, marche x4) sur 1 an = +120 a +180j. "
+                    "Apprendre l'italien (zero valeur tech freelance) sur 1 an = -80 a -150j."
+                )
             else:
                 cadre_str = f"TOUTE LA DUREE DE L'OBJECTIF ({temps_estime_str}, soit {_tj} jours)"
-                unite_impact = "jours (ex: +90.0 = 3 mois gagnes, -30.0 = 1 mois perdu)"
+                # Long terme = cadre = duree totale objectif. L'impact peut atteindre
+                # 30-50% du cadre pour les choix transformationnels.
+                unite_impact = (
+                    "jours. CALIBRATION LONG TERME :\n"
+                    "  - Choix transformationnel aligne objectif = +30 a +50% du cadre\n"
+                    "  - Choix tiede = ±5 a ±15% du cadre\n"
+                    "  - Choix destructeur = jusqu'a -50% du cadre\n"
+                    f"  Pour ce cadre de {_tj}j, ca donne :\n"
+                    f"    Aligne fort = +{_tj // 3} a +{_tj // 2}j\n"
+                    f"    Hors-sujet = -{_tj // 4} a -{_tj // 2}j"
+                )
         else:
             cadre_jours = _tj
             cadre_str = f"TOUTE LA DUREE DE L'OBJECTIF ({temps_estime_str}, soit {_tj} jours)"
-            unite_impact = "jours (ex: +90.0 = 3 mois gagnes, -30.0 = 1 mois perdu)"
+            unite_impact = f"jours. Calibration : impact transformationnel = ±{_tj // 3} a ±{_tj // 2}j, choix neutre = ±{_tj // 10}j"
 
         prompt = f"""Tu es un robot probabiliste froid et factuel. Tu analyses un dilemme de vie.
 ZERO emotion, ZERO encouragement. Tu raisonnes en TEMPS, pas en pourcentage.
@@ -338,8 +373,22 @@ METHODE DE CALCUL (OBLIGATOIRE) :
    - Dormir 8h au lieu de coder = +2.0 (heures de productivite gagnees)
    - Aller courir 1h = +0.5 (heures de clarte mentale gagnees)
 6. Exemples concrets pour un cadre de 1 mois :
-   - Apprendre l'anglais vs l'espagnol = l'anglais fait gagner ~5-10 jours, l'espagnol ~1-3 jours
-7. Sois REALISTE et FACTUEL. Pas d'impact par encouragement.
+   - Apprendre l'anglais vs l'espagnol pour freelance dev = anglais +12 a +18j / espagnol +2 a +5j
+   - Aller au gym 5x/sem vs rester sedentaire = +5j / -8j (sante & focus)
+7. Exemples concrets pour un cadre de 1 AN (CRITIQUE — l'engagement est massif) :
+   - Apprendre l'anglais 1 an pour freelance dev (langue tech universelle) = +120 a +180j
+   - Apprendre l'italien 1 an pour freelance dev (zero valeur tech) = -80 a -150j (1 an perdu)
+   - Faire un MBA 1 an si pertinent metier = +100 a +200j
+   - Passer 1 an a regarder Netflix au lieu de bosser objectif = -200 a -350j
+   - Aller au gym regulierement 1 an = +40 a +60j (sante & energie boostees)
+   IMPORTANT : pour 1 AN, n'aie PAS PEUR des grands chiffres. Un an
+   d'engagement total = transformation reelle de la trajectoire de vie.
+8. Sois REALISTE et FACTUEL. Pas d'impact par encouragement.
+9. CALIBRE l'amplitude en fonction de l'ALIGNEMENT avec l'objectif :
+   - Au coeur de l'objectif + bon timing = magnitude haute (haut de la
+     fourchette donnee dans `unite_impact`)
+   - Tangentiel a l'objectif = magnitude moyenne
+   - Hors-sujet = magnitude tres negative
 
 REGLE CRITIQUE POUR LES IMPACTS COURTS (1 jour, 1 semaine) :
 - Il DOIT y avoir une DIFFERENCE d'impact entre les options. Jamais 0 pour les deux.
