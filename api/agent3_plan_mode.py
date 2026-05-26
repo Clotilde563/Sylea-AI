@@ -133,7 +133,9 @@ PLAN_SYSTEM_PROMPT = """Tu es un planificateur d'agent IA. On te donne une tache
 dans un navigateur web. Tu dois la decouper en etapes concretes, numerotees, et courtes.
 
 REGLES :
-1. Entre 3 et 12 etapes maximum. Pas moins de 3, pas plus de 12.
+1. Le nombre d'etapes s'adapte a la complexite reelle de la tache. Une tache simple
+   peut tenir en 2-3 etapes, une tache complexe en necessiter plus. Ne force PAS un
+   nombre artificiel — decompose ce qui doit l'etre, fusionne ce qui peut l'etre.
 2. Chaque etape est ATOMIQUE (une seule action logique : naviguer, cliquer, taper, verifier).
 3. Tu dois reformuler l'OBJECTIF final en une phrase claire.
 4. Pour chaque etape, classe son risque :
@@ -144,7 +146,8 @@ REGLES :
 5. Pour chaque etape : action_hint = un des verbes { "goto", "click", "type", "press",
                                                      "scroll", "select_all_and_type", "verify",
                                                      "wait", "compile", "need_user" }
-6. Estime le temps en secondes (entre 2 et 30 par etape).
+6. Estime le temps en secondes — sois realiste selon la complexite de l'etape
+   (une nav simple = quelques secondes, une compilation ou attente reseau peut etre plus longue).
 7. Indique dependances via "depends_on" (liste d'IDs d'etapes precedentes).
 8. Si une etape demande une intervention utilisateur (login, captcha, paiement) :
    requires_user = true ET action_hint = "need_user".
@@ -290,10 +293,12 @@ class PlanGenerator:
                 logger.warning(f"Skipping invalid step {s}: {e}")
                 continue
 
-        # Garde-fou : entre 3 et 12 etapes (le modele peut deraper)
-        if len(steps) < 3:
-            steps.extend(self._minimum_safety_steps(task, url)[len(steps):3])
-        steps = steps[:12]
+        # Garde-fou contre les plans aberrants. Plus permissif qu'avant pour
+        # laisser Claude adapter le nombre d'etapes a la complexite reelle.
+        # Minimum 1 (taches triviales valides), max 30 (cap anti-runaway).
+        if len(steps) < 1:
+            steps.extend(self._minimum_safety_steps(task, url)[:3])
+        steps = steps[:30]
 
         # Renumeroter proprement si le modele a saute des IDs
         for i, s in enumerate(steps, start=1):

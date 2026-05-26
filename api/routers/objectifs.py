@@ -181,9 +181,12 @@ async def generer_sous_objectifs(
     ctx = await build_full_user_context_async(db, user_id, profil)
     prompt = (
         "Tu es un coach de vie strategique. Analyse ce profil et son objectif de vie, "
-        "puis genere exactement 4 sous-objectifs LARGES et strategiques pour atteindre "
-        "l'objectif principal. Chaque sous-objectif doit representer une GRANDE PHASE "
-        "du parcours.\n\n"
+        "puis genere les sous-objectifs LARGES et strategiques pour atteindre l'objectif "
+        "principal. Chaque sous-objectif doit representer une GRANDE PHASE du parcours.\n\n"
+        "NOMBRE DE SOUS-OBJECTIFS : libre de choisir le nombre pertinent selon la "
+        "complexite de l'objectif. Generalement entre 3 et 6 sous-objectifs. Un objectif "
+        "simple peut tenir en 3 phases, un objectif tres complexe peut en necessiter 5-6. "
+        "Ne force PAS un nombre arbitraire — adapte au reel.\n\n"
         "PERSONNALISATION:\n"
         "Le profil contient les reponses de l'utilisateur a des questions personnalisees "
         "(section apres '--- Contexte personnalise ---'). "
@@ -198,7 +201,7 @@ async def generer_sous_objectifs(
         f"PROFIL:\n{ctx}\n\n"
         "Reponds UNIQUEMENT avec du JSON valide (pas de markdown):\n"
         '[{"titre": "...", "description": "...", "temps_estime_jours": <int>}, ...]\n'
-        "Exactement 4 sous-objectifs, du plus immediat au plus lointain. "
+        "Du plus immediat au plus lointain. "
         "temps_estime_jours est le nombre de jours estimes pour accomplir ce sous-objectif. "
         "Les titres doivent etre courts et larges (phase strategique, pas micro-tache)."
         + format_device_context(data.contexte_appareil)

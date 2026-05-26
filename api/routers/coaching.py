@@ -191,11 +191,14 @@ def _build_coaching_user_prompt(session_type: str, user_context: str, extra_data
         "yearly_recap": (
             "Genere une retrospective annuelle complete. "
             "Analyse toute l'annee : evolution globale, decisions cles, moments forts et difficiles. "
-            "Genere 3 scenarios pour l'annee prochaine : "
-            "1) Optimiste (si tout va bien, +20% effort), "
-            "2) Attendu (rythme actuel), "
-            "3) Pessimiste (si relachement, -20% effort). "
-            "Pour chaque scenario, donne une probabilite estimee et les consequences. "
+            "Genere 3 scenarios realistes pour l'annee prochaine, calibres a partir des "
+            "tendances reellement observees dans le profil et l'historique : "
+            "1) Optimiste — si les leviers positifs identifies sont actionnes pleinement, "
+            "2) Attendu — projection du rythme actuel sans changement majeur, "
+            "3) Pessimiste — si les freins identifies persistent ou s'aggravent. "
+            "Pour chaque scenario, estime la probabilite et decris les consequences concretes. "
+            "Tu es libre de l'amplitude entre les scenarios — adapte-la aux leviers reels "
+            "observes (pas de fourchette imposee).\n\n"
             "Reponds avec une section JSON a la fin au format : "
             '```json\n{"trajectory_data": {"optimistic": {"probability": X, "description": "..."}, '
             '"expected": {"probability": Y, "description": "..."}, '
