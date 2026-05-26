@@ -1527,6 +1527,104 @@ class SaveContextOut(BaseModel):
     feedback: str | None = None  # If not sufficient, explain what's missing
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Pre-filtre heuristique : court-circuite l'appel Claude pour les patterns
+# UNIVERSELS qui ne necessitent JAMAIS de contexte additionnel.
+#
+# Rationale : les LLMs (meme Sonnet 4.5) sont RLHF-trained pour etre "helpful"
+# et ont tendance a demander des clarifications meme quand ce n'est pas
+# necessaire. Pour des cas tres clairs (marathon, vacances, sport, ...),
+# on prefere appliquer une regle deterministique en Python plutot que de
+# faire confiance au LLM.
+#
+# Si la question matche un de ces patterns ET ne contient PAS de prenom
+# specifique (heuristique : mot capitalise qui n'est pas un debut de phrase
+# ni dans une liste de mots communs), on retourne directement FALSE.
+# ──────────────────────────────────────────────────────────────────────────
+
+# Patterns regex (case-insensitive) qui indiquent une activite/situation
+# universelle ne necessitant pas de contexte supplementaire.
+_UNIVERSAL_PATTERNS = [
+    # Sport / activite physique
+    r'\b(marathon|semi[\s-]?marathon|course|courir|jogging|footing|trail|10\s*km)\b',
+    r'\b(gym|salle\s*de\s*sport|musculation|fitness|yoga|pilates|natation|velo|cyclisme)\b',
+    r'\b(randonnee|escalade|ski|surf|tennis|football|basket|boxe|judo)\b',
+    r'\b(faire\s*du\s*sport|me\s*remettre\s*au\s*sport|reprendre\s*le\s*sport)\b',
+    # Vacances / voyages (sans personne specifique)
+    r'\b(vacances|voyage|partir\s*en|destination|sejour|escapade|weekend)\b',
+    # Langues / apprentissage generique
+    r'\b(apprendre|etudier)\s+(l\'|le|la|du)?\s*(anglais|espagnol|allemand|italien|chinois|japonais|arabe|russe|portugais)\b',
+    r'\b(cours\s*de|prendre\s*des\s*cours)\b',
+    # Metiers / professions generiques (sans nom propre)
+    r'\b(devenir|me\s*reconvertir\s*en|changer\s*de\s*metier\s*pour)\s+(developpeur|avocat|medecin|infirmier|professeur|ingenieur|consultant|freelance)\b',
+    r'\b(travailler\s*dans|me\s*lancer\s*dans)\s+(la\s*tech|la\s*finance|le\s*marketing|la\s*sante|l\'education|l\'industrie)\b',
+    # Lecture / divertissement
+    r'\b(lire\s*un\s*livre|regarder\s*un\s*film|regarder\s*une\s*serie|jouer\s*aux?\s*jeux)\b',
+    # Routine quotidienne
+    r'\b(manger\s*(sain|equilibre|vegan|bio)|dormir\s*(tot|plus|mieux)|me\s*coucher\s*plus\s*tot)\b',
+    r'\b(arreter\s*(de\s*)?(fumer|boire|le\s*sucre)|reduire\s*le\s*sucre|manger\s*moins)\b',
+    # Pret / financement (type DEJA dans la question)
+    r'\b(pret\s*(bancaire|familial|etudiant|immobilier|personnel|a\s*la\s*consommation))\b',
+    # Famille generique (sans prenom)
+    r'\b(mes?\s*parents|mes?\s*enfants|ma\s*famille|mon\s*conjoint|mon\s*partenaire|mon\s*frere|ma\s*soeur)\b',
+]
+
+# Pattern pour detecter un PRENOM specifique : mot capitalise qui n'est pas
+# un debut de phrase ET qui n'est pas dans une liste de mots communs/lieux.
+# Heuristique simple : on cherche " X " ou X[a-z]{2,} apres minuscule.
+_CAPITALIZED_NAME_PATTERN = re.compile(
+    r'(?<![\.!?]\s)(?<!^)(?<!\d)\b([A-Z][a-z]{2,15})\b'
+)
+
+# Mots communs qui sont capitalises mais ne sont PAS des prenoms
+# (jours, mois, lieux, langues, etc.)
+_NOT_A_NAME = {
+    'janvier', 'fevrier', 'mars', 'avril', 'mai', 'juin', 'juillet',
+    'aout', 'septembre', 'octobre', 'novembre', 'decembre',
+    'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche',
+    'paris', 'lyon', 'marseille', 'bordeaux', 'toulouse', 'nice', 'nantes',
+    'strasbourg', 'lille', 'rennes', 'reims', 'montpellier', 'grenoble',
+    'france', 'espagne', 'italie', 'portugal', 'allemagne', 'belgique',
+    'angleterre', 'suisse', 'maroc', 'tunisie', 'algerie', 'usa',
+    'europe', 'asie', 'afrique', 'amerique',
+    'noel', 'paques', 'toussaint',
+    'autre', 'oui', 'non',
+}
+
+
+def _looks_universal(question: str, options: list[str] | None) -> bool:
+    """Retourne True si la question matche un pattern universel ET ne contient
+    pas de prenom propre specifique. Court-circuite alors l'appel Claude.
+
+    L'idee : on accepte un faux negatif (laisser passer un cas qui aurait
+    eu besoin de contexte) plutot qu'un faux positif (demander du contexte
+    pour rien) -> meilleure UX selon les principes user.
+    """
+    text = question.lower()
+    if options:
+        text += " " + " ".join(o.lower() for o in options)
+
+    # Match au moins un pattern universel
+    has_universal = any(re.search(p, text, re.IGNORECASE) for p in _UNIVERSAL_PATTERNS)
+    if not has_universal:
+        return False
+
+    # Detecte les prenoms (capitalises). Si la question contient un prenom
+    # NON connu (lieu/jour/etc.), on appelle quand meme Claude pour traiter
+    # le cas hybride "Aller au mariage de Pauline" (vacances + prenom).
+    full_text = question
+    if options:
+        full_text += " " + " ".join(options)
+    for match in _CAPITALIZED_NAME_PATTERN.finditer(full_text):
+        candidate = match.group(1).lower()
+        if candidate not in _NOT_A_NAME:
+            # On a trouve un prenom potentiel -> on laisse Claude trancher
+            return False
+
+    # Pattern universel + pas de prenom inconnu -> on bypass Claude
+    return True
+
+
 @router.post("/check-context", response_model=CheckContextOut)
 async def check_context(
     data: CheckContextIn,
@@ -1534,6 +1632,13 @@ async def check_context(
     user_id: str | None = Depends(get_optional_user),
 ):
     """Check if enough context is available to analyze a dilemma or event."""
+    # FAST-PATH : si la question matche un pattern universel (marathon,
+    # vacances, sport, etc.) sans prenom inconnu, on saute l'appel Claude
+    # et on retourne FALSE directement. Plus rapide + plus fiable que de
+    # faire confiance au LLM pour ces cas evidents.
+    if _looks_universal(data.question, data.options):
+        return CheckContextOut(needs_context=False)
+
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         return CheckContextOut(needs_context=False)
