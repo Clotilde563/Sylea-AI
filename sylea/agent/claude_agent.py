@@ -18,6 +18,102 @@ from sylea.core.models.user import ProfilUtilisateur
 from sylea.core.models.decision import OptionDilemme
 
 
+# ── Helper : parser JSON robuste ──────────────────────────────────────────────
+#
+# Claude renvoie parfois du JSON casse :
+#   - Wrapping markdown (```json ... ```)
+#   - Smart quotes (« » " ") au lieu des straight quotes
+#   - Trailing commas dans objets/arrays
+#   - Newlines non-echappes dans les string values
+#   - Texte explicatif avant/apres le JSON
+# Cette fonction tente plusieurs strategies de reparation. Retourne None
+# si aucune ne marche (le caller decidera quoi faire : retry, fallback, etc.).
+
+def _try_parse_json_robust(content: str) -> dict | None:
+    """Tente de parser le JSON de la reponse Claude avec plusieurs strategies.
+    Retourne le dict parse ou None si echec total."""
+    if not content or not content.strip():
+        return None
+
+    # Strategie 1 : strip markdown code blocks
+    cleaned = content.strip()
+    # Retire ```json ... ``` ou ``` ... ```
+    cleaned = re.sub(r'^```(?:json)?\s*\n?', '', cleaned)
+    cleaned = re.sub(r'\n?```\s*$', '', cleaned)
+    cleaned = cleaned.strip()
+
+    # Strategie 2 : normalise les smart quotes (peuvent venir d'un copier-coller
+    # ou d'un LLM qui auto-corrige le francais).
+    smart_quote_map = {
+        '“': '"', '”': '"',  # double smart quotes
+        '‘': "'", '’': "'",  # single smart quotes
+        '«': '"', '»': '"',  # french guillemets
+        '…': '...',  # ellipsis
+    }
+    for smart, straight in smart_quote_map.items():
+        cleaned = cleaned.replace(smart, straight)
+
+    # Strategie 3 : extraire le block JSON (entre { ... }) si du texte
+    # entoure encore
+    json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    if not json_match:
+        return None
+    raw = json_match.group()
+
+    # Strategie 4 : trailing commas
+    raw_no_trail = re.sub(r',\s*}', '}', raw)
+    raw_no_trail = re.sub(r',\s*]', ']', raw_no_trail)
+
+    # 1ere tentative : tel quel
+    try:
+        return json.loads(raw_no_trail)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategie 5 : echapper les newlines bruts DANS les string values.
+    # Erreur frequente de Claude : il met des vrais \n au lieu de \\n.
+    # On detecte les strings via regex tres approximative et on echappe.
+    try:
+        # Approche simple : remplace les \n et \r dans les valeurs string.
+        # On parcourt char par char en tracking si on est dans une string.
+        escaped = []
+        in_string = False
+        prev = ''
+        for ch in raw_no_trail:
+            if ch == '"' and prev != '\\':
+                in_string = not in_string
+            if in_string and ch == '\n':
+                escaped.append('\\n')
+            elif in_string and ch == '\r':
+                escaped.append('\\r')
+            elif in_string and ch == '\t':
+                escaped.append('\\t')
+            else:
+                escaped.append(ch)
+            prev = ch
+        repaired = ''.join(escaped)
+        return json.loads(repaired)
+    except (json.JSONDecodeError, Exception):
+        pass
+
+    # Strategie 6 : derniere chance — tente d'extraire le plus grand prefixe
+    # parsable (pour gerer un JSON tronque). On reduit progressivement la
+    # chaine et on rajoute les fermetures `}` manquantes.
+    for cut in range(len(raw_no_trail), max(50, len(raw_no_trail) // 2), -50):
+        partial = raw_no_trail[:cut]
+        # Compte les accolades ouvertes
+        opens = partial.count('{') - partial.count('}')
+        opens_arr = partial.count('[') - partial.count(']')
+        if opens > 0 or opens_arr > 0:
+            partial += ']' * opens_arr + '}' * opens
+        try:
+            return json.loads(partial)
+        except json.JSONDecodeError:
+            continue
+
+    return None
+
+
 # ── Prompts système ──────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """Tu es SYLÉA, un assistant de vie IA bienveillant, direct et précis.
@@ -367,11 +463,16 @@ Reponds UNIQUEMENT avec ce JSON :
 
     def _appeler_claude(self, prompt: str) -> dict:
         """
-        Appelle l'API Claude et parse la réponse JSON.
+        Appelle l'API Claude et parse la reponse JSON.
+
+        Strategie defensive : si le JSON est mal forme, on tente plusieurs
+        reparations (trailing commas, smart quotes, markdown blocks, newlines
+        non-echappes dans strings) avant d'abandonner. En dernier recours,
+        on retry une fois avec une instruction explicite "JSON UNIQUEMENT".
 
         Raises:
-            ValueError: si la réponse n'est pas du JSON valide
-            anthropic.APIError: si l'appel API échoue
+            ValueError: si la reponse n'est pas du JSON valide apres tous les retries
+            anthropic.APIError: si l'appel API echoue
         """
         message = self._client.messages.create(
             model=CLAUDE_MODEL,
@@ -380,17 +481,37 @@ Reponds UNIQUEMENT avec ce JSON :
             messages=[{"role": "user", "content": prompt}],
         )
         content = message.content[0].text.strip()
+        parsed = _try_parse_json_robust(content)
+        if parsed is not None:
+            return parsed
 
-        # Extraire le JSON même si Claude ajoute du texte autour
-        json_match = re.search(r"\{.*\}", content, re.DOTALL)
-        if not json_match:
-            raise ValueError(f"Réponse Claude non parsable : {content[:200]}")
+        # Retry une fois avec instruction explicite "JSON ONLY"
+        import logging as _lg
+        _lg.getLogger("sylea.claude").warning(
+            "[claude_agent] JSON invalide a la 1ere tentative, retry avec instruction stricte. "
+            "Reponse initiale (200 chars) : %s",
+            content[:200],
+        )
 
-        raw_json = json_match.group()
-        # Nettoyer les trailing commas (erreur frequente de Claude)
-        raw_json = re.sub(r',\s*}', '}', raw_json)
-        raw_json = re.sub(r',\s*]', ']', raw_json)
-        try:
-            return json.loads(raw_json)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"JSON invalide dans la réponse Claude : {e}") from e
+        retry_prompt = (
+            prompt
+            + "\n\nIMPORTANT : Reponds UNIQUEMENT en JSON valide. "
+            + "Aucun texte avant ni apres. Aucun bloc markdown. "
+            + "Toute valeur de string doit echapper les guillemets internes et "
+            + "remplacer les retours a la ligne par \\n."
+        )
+        message2 = self._client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1500,
+            system=_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": retry_prompt}],
+        )
+        content2 = message2.content[0].text.strip()
+        parsed2 = _try_parse_json_robust(content2)
+        if parsed2 is not None:
+            return parsed2
+
+        raise ValueError(
+            f"JSON invalide dans la reponse Claude apres retry. "
+            f"Debut de la 2e reponse : {content2[:200]}"
+        )
