@@ -49,6 +49,7 @@ init_sentry()
 from api.dependencies import get_optional_user
 from api.routers import profil, dilemme, historique, evenement, bilan, objectifs, service_client
 from api.routers import actions as actions_router
+from api.routers.dilemmes_tracking import router as dilemmes_tracking_router
 from api.routers.agent_companion import router as agent_companion_router
 from api.routers.agent_assistant import router as agent_assistant_router
 from api.routers.agent3_openclaw import router as agent3_router
@@ -92,13 +93,15 @@ def _init_db_schema():
         try:
             from sylea.core.storage.database import DatabaseManager
             from api.routers.agent3_openclaw import _ensure_agent3_tables
+            from api.dilemmes_tracking import ensure_tracking_tables
             db = DatabaseManager()
             db.connect()
             try:
                 _ensure_agent3_tables(db)
+                ensure_tracking_tables(db)
             finally:
                 db.disconnect()
-            print("[main] SQLite: tables Agent 3 initialisees (DDL idempotent)")
+            print("[main] SQLite: tables Agent 3 + dilemmes_tracking initialisees (DDL idempotent)")
         except Exception:
             pass  # DB not available yet or import error — tables will be created on first use
 
@@ -112,6 +115,14 @@ if _scheduler_enabled in ("1", "true", "yes", "on"):
     from api.scheduler import scheduler as cron_scheduler
     cron_scheduler.start()
     print("[main] Scheduler cron ACTIVE (SYLEA_SCHEDULER_ENABLED=true)")
+    # Le scheduler dilemmes tracking est aligne sur la meme env var pour
+    # eviter d'avoir 2 flags qui divergent. Cout : zero appel LLM.
+    try:
+        from api.dilemmes_tracking_scheduler import scheduler as tracking_scheduler
+        tracking_scheduler.start()
+        print("[main] Scheduler dilemmes tracking ACTIVE")
+    except Exception as e:
+        print(f"[main] Scheduler dilemmes tracking erreur: {e}")
 else:
     print("[main] Scheduler cron INACTIF (set SYLEA_SCHEDULER_ENABLED=true pour activer)")
 
@@ -131,6 +142,12 @@ async def _close_agent3_http_pool():
     try:
         from api.agent3_http import close_http_client
         await close_http_client()
+    except Exception:
+        pass
+    # Stop scheduler dilemmes tracking si lance.
+    try:
+        from api.dilemmes_tracking_scheduler import scheduler as tracking_scheduler
+        tracking_scheduler.stop()
     except Exception:
         pass
 
@@ -216,6 +233,7 @@ app.add_middleware(RequestContextMiddleware)
 
 app.include_router(profil.router)
 app.include_router(dilemme.router)
+app.include_router(dilemmes_tracking_router)
 app.include_router(historique.router)
 app.include_router(evenement.router)
 app.include_router(bilan.router)
