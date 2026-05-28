@@ -261,6 +261,68 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  // ── Dilemme tracking (nouveau systeme avec notifications) ────────────────
+
+  // Cree un tracking : pas d'impact immediat, l'user repondra via notifs
+  trackingCreate: (data: {
+    question: string
+    options: {
+      lettre: string
+      description: string
+      impact_jours: number
+      pros: string[]
+      cons: string[]
+      resume: string
+    }[]
+    impact_temporel_jours: number
+    verdict?: string
+    etude_scientifique?: string
+    device_tz?: string
+  }): Promise<{ ok: boolean; tracking: TrackingItem }> =>
+    request('/dilemme/tracking/create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  // Liste les trackings de l'user (filtrable par status)
+  trackingList: (status?: TrackingStatus): Promise<{ ok: boolean; items: TrackingItem[] }> =>
+    request(`/dilemme/tracking${status ? `?status=${status}` : ''}`),
+
+  // Detail d'un tracking
+  trackingGet: (id: string): Promise<{ ok: boolean; tracking: TrackingItem }> =>
+    request(`/dilemme/tracking/${id}`),
+
+  // Repondre a une periode (depuis notif OS, banner in-app, ou Mes dilemmes)
+  trackingRespond: (id: string, periode_idx: number, choice: string): Promise<{
+    ok: boolean; all_responded: boolean; nb_responded: number; nb_total: number;
+    next_notif_at: string | null;
+  }> =>
+    request(`/dilemme/tracking/${id}/respond`, {
+      method: 'POST',
+      body: JSON.stringify({ periode_idx, choice }),
+    }),
+
+  // Recuperer le recap pondere avant validation finale
+  trackingRecap: (id: string): Promise<TrackingRecap> =>
+    request(`/dilemme/tracking/${id}/recap`),
+
+  // Valider definitivement -> applique impact sur profil + cascade SO
+  trackingValidate: (id: string): Promise<{
+    ok: boolean; impact_jours_applique: number; delta_probabilite: number;
+    so_impactes: { titre: string; progression_avant: number; progression_apres: number; est_cible: boolean }[];
+    recap?: TrackingRecap['recap'];
+  }> =>
+    request(`/dilemme/tracking/${id}/validate`, { method: 'POST' }),
+
+  // Annuler (zero = aucun impact, partial = applique l'impact deja accumule)
+  trackingCancel: (id: string, mode: 'zero' | 'partial'): Promise<{
+    ok: boolean; mode: string; impact_jours_applique: number; delta_probabilite: number;
+  }> =>
+    request(`/dilemme/tracking/${id}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
+
   // ── Historique ────────────────────────────────────────────────────────────
 
   // Liste des décisions

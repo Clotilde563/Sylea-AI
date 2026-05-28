@@ -9,7 +9,7 @@ import { useT } from '../i18n/LanguageContext'
 import { useDeviceContext } from '../contexts/DeviceContext'
 import { AgentSyleaLogo } from '../components/AgentSyleaLogo'
 import { AGENT_COLORS } from '../constants/agentColors'
-import type { AnalyseDilemme, Decision } from '../types'
+import type { AnalyseDilemme, Decision, TrackingItem } from '../types'
 
 type Phase = 'form' | 'loading' | 'result' | 'done'
 
@@ -49,10 +49,11 @@ export function DilemmePage() {
 
   const [phase, setPhase] = useState<Phase>(analyse ? 'result' : 'form')
   const [options, setOptions] = useState<string[]>(['', ''])
-  const [choixSelectionne, setChoixSelectionne] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
-  const [sousObjectifImpacte, setSousObjectifImpacte] = useState<string | null>(null)
+  // Phase 'done' : tracking cree, on affiche l'ID + nb_periodes pour rassurer
+  // l'user que les notifs vont arriver.
+  const [trackingCree, setTrackingCree] = useState<TrackingItem | null>(null)
   const [impactTemporel, setImpactTemporel] = useState<string>('1_mois')
   const [customYears, setCustomYears] = useState(0)
   const [customMonths, setCustomMonths] = useState(0)
@@ -246,25 +247,37 @@ export function DilemmePage() {
     }
   }
 
-  const handleChoisir = async () => {
-    if (!analyse || !choixSelectionne) return
+  // NOUVEAU FLOW (commit 2/3 tracking) : au lieu de choisir une option et
+  // d'appliquer l'impact immediatement, on demarre un TRACKING. L'utilisateur
+  // ne choisit PAS de A/B/C maintenant — c'est via les notifs periodiques
+  // (J+30, J+60, ...) qu'on lui demande ce qu'il a REELLEMENT fait. A la fin
+  // du tracking, un recap pondere applique l'impact reel.
+  const handleConfirmer = async () => {
+    if (!analyse) return
     setSubmitting(true)
     setError(null)
     try {
-      const choixResult = await api.choisirOption({
+      const impactJours = getImpactDays() || 30
+      // Timezone du device (Europe/Paris, America/New_York, ...)
+      const deviceTz = (() => {
+        try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' } catch { return 'UTC' }
+      })()
+      const r = await api.trackingCreate({
         question: analyse.question,
-        options: analyse.options,
-        choix: choixSelectionne,
-        impact_temporel_jours: getImpactDays(),
-        contexte_appareil: deviceCtx ?? undefined,
+        options: analyse.options.map(o => ({
+          lettre: o.lettre,
+          description: o.description,
+          impact_jours: o.impact_jours,
+          pros: o.pros,
+          cons: o.cons,
+          resume: o.resume,
+        })),
+        impact_temporel_jours: impactJours,
+        verdict: analyse.verdict,
+        etude_scientifique: analyse.etude_scientifique || '',
+        device_tz: deviceTz,
       })
-      if (choixResult?.sous_objectif_impacte) {
-        setSousObjectifImpacte(choixResult.sous_objectif_impacte)
-      }
-      // Recharger le profil pour la probabilité mise à jour
-      const updated = await api.getProfil()
-      setProfil(updated)
-      await refreshSousObjectifs()
+      setTrackingCree(r.tracking)
       setAnalyse(null)
       setPhase('done')
     } catch (e: unknown) {
@@ -276,10 +289,9 @@ export function DilemmePage() {
 
   const handleReset = () => {
     setOptions(['', ''])
-    setChoixSelectionne(null)
     setAnalyse(null)
     setError(null)
-    setSousObjectifImpacte(null)
+    setTrackingCree(null)
     setImpactTemporel('1_mois')
     setCustomYears(0)
     setCustomMonths(0)
@@ -731,18 +743,29 @@ export function DilemmePage() {
         )}
 
         {/* Phase : Résultat */}
-        {phase === 'result' && analyse && (
+        {phase === 'result' && analyse && (() => {
+          // NOUVEAU FLOW : OptionCards DISPLAY-ONLY (pas de choix immediat).
+          // L'utilisateur ne sait pas a l'avance ce qu'il fera reellement →
+          // on lui demandera periode par periode via les notifs (J+30 etc).
+          //
+          // Le badge "Recommande" est masque si l'option dite recommandee a
+          // un impact_jours NEGATIF : dire "Recommande" alors que Claude
+          // estime le choix destructeur est trompeur. Dans ce cas, le verdict
+          // explique la nuance ("moins pire des deux", etc).
+          const recommandee = analyse.options.find(o => o.lettre === analyse.option_recommandee)
+          const recommandedHasPositiveImpact = (recommandee?.impact_jours ?? 0) > 0
+          return (
           <div className="animate-fade-in">
-            {/* Options */}
+            {/* Options - display only */}
             <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
               {analyse.options.map((opt) => (
                 <OptionCard
                   key={opt.lettre}
                   lettre={opt.lettre}
                   option={opt}
-                  recommandee={analyse.option_recommandee === opt.lettre}
-                  selected={choixSelectionne === opt.lettre}
-                  onSelect={() => setChoixSelectionne(choixSelectionne === opt.lettre ? null : opt.lettre)}
+                  recommandee={recommandedHasPositiveImpact && analyse.option_recommandee === opt.lettre}
+                  selected={false}
+                  onSelect={undefined /* display-only */}
                 />
               ))}
             </div>
@@ -787,50 +810,98 @@ export function DilemmePage() {
               <p style={{ color: 'var(--danger)', fontSize: '0.875rem', marginBottom: '1rem' }}>{'\u26A0'} {error}</p>
             )}
 
-            {/* Actions */}
+            {/* Explication tracking pour rassurer l'user */}
+            <div
+              style={{
+                background: 'rgba(96,165,250,0.06)',
+                border: '1px solid rgba(96,165,250,0.2)',
+                borderRadius: 'var(--radius-md)',
+                padding: '0.85rem 1rem',
+                marginBottom: '1.25rem',
+                fontSize: '0.85rem',
+                color: '#93c5fd',
+                lineHeight: 1.5,
+              }}
+            >
+              <strong style={{ color: '#60a5fa' }}>{'\u25C8'} Suivi sur la dur\u00E9e&nbsp;: </strong>
+              Sylea ne vous demande pas de choisir maintenant. En confirmant,
+              vous d\u00E9marrez un suivi qui vous demandera p\u00E9riodiquement
+              (par notification) ce que vous avez <em>r\u00E9ellement</em> fait.
+              L'impact sur votre objectif sera calcul\u00E9 \u00E0 la fin, en fonction
+              de vos vraies actions.
+            </div>
+
+            {/* Actions : Confirmer (demarre tracking) | Nouveau dilemme */}
             <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
               <button className="btn btn-outline" onClick={handleReset}>
                 {'\u2190'} {t('dilemme.nouveau_dilemme')}
               </button>
               <button
                 className="btn btn-gold"
-                onClick={handleChoisir}
-                disabled={!choixSelectionne || submitting}
+                onClick={handleConfirmer}
+                disabled={submitting}
               >
-                {submitting
-                  ? t('dilemme.enregistrement')
-                  : choixSelectionne
-                  ? `\u2713 ${t('dilemme.valider_option')} ${choixSelectionne}`
-                  : t('dilemme.selectionnez_option')}
+                {submitting ? t('dilemme.enregistrement') : `\u2713 Confirmer et d\u00E9marrer le suivi`}
               </button>
             </div>
           </div>
-        )}
+          )
+        })()}
 
-        {/* Phase : Confirmation */}
-        {phase === 'done' && (
+        {/* Phase : Confirmation (tracking demarre) */}
+        {phase === 'done' && trackingCree && (() => {
+          // Calcule la date de la 1ere notif au format lisible
+          const nextNotif = trackingCree.next_notif_at
+            ? new Date(trackingCree.next_notif_at).toLocaleString('fr-FR', {
+                day: '2-digit', month: 'long', year: 'numeric',
+                hour: '2-digit', minute: '2-digit',
+              })
+            : '\u2014'
+          const nbPeriodes = trackingCree.nb_periodes
+          const dureeJours = trackingCree.impact_temporel_jours
+          const cadence = dureeJours <= 30 ? '1 notification \u00E0 la fin' : `${nbPeriodes} notifications mensuelles`
+          return (
           <div
             className="card animate-fade-in-scale"
             style={{
-              maxWidth: '480px',
+              maxWidth: '540px',
               margin: '0 auto',
-              textAlign: 'center',
-              padding: '2.5rem',
+              padding: '2.25rem 2rem',
               border: '1px solid var(--success)',
               boxShadow: '0 0 32px rgba(34,197,94,0.15)',
+              textAlign: 'center',
             }}
           >
-            <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>{'\u2713'}</div>
-            <h3 style={{ color: 'var(--success)', marginBottom: '0.75rem' }}>{t('dilemme.decision_enregistree')}</h3>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1rem', lineHeight: '1.5' }}>
-              {t('dilemme.choix_sauvegarde')}
+            <div style={{ fontSize: '3rem', marginBottom: '0.75rem' }}>{'\u25C7'}</div>
+            <h3 style={{ color: 'var(--success)', marginBottom: '0.5rem' }}>
+              Suivi d\u00E9marr\u00E9
+            </h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem', marginBottom: '1.5rem', lineHeight: 1.55 }}>
+              Aucun impact appliqu\u00E9 pour l'instant. Sylea vous notifiera
+              <strong style={{ color: '#fbbf24' }}> {cadence}</strong> pour
+              vous demander ce que vous avez r\u00E9ellement fait.
             </p>
-            {sousObjectifImpacte && (
-              <div style={{ background: 'rgba(96,165,250,0.08)', border: '1px solid rgba(96,165,250,0.25)', borderRadius: 'var(--radius-md)', padding: '0.6rem 1rem', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <span style={{ color: '#60a5fa', fontSize: '0.8rem' }}>{'\u21B3'}</span>
-                <span style={{ color: '#93c5fd', fontSize: '0.82rem' }}>{t('dilemme.sous_objectif_impacte')} : <strong>{sousObjectifImpacte}</strong></span>
+            <div style={{
+              background: 'rgba(96,165,250,0.08)',
+              border: '1px solid rgba(96,165,250,0.25)',
+              borderRadius: 'var(--radius-md)',
+              padding: '0.85rem 1rem',
+              marginBottom: '1.5rem',
+              textAlign: 'left',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: '#93c5fd', marginBottom: '0.35rem' }}>
+                <span>Dur\u00E9e du suivi&nbsp;:</span>
+                <strong>{dureeJours} jours</strong>
               </div>
-            )}
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: '#93c5fd', marginBottom: '0.35rem' }}>
+                <span>Nombre de p\u00E9riodes&nbsp;:</span>
+                <strong>{nbPeriodes}</strong>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: '#93c5fd' }}>
+                <span>Premi\u00E8re notification&nbsp;:</span>
+                <strong>{nextNotif}</strong>
+              </div>
+            </div>
             <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
               <button className="btn btn-outline btn-sm" onClick={handleReset}>
                 {t('dilemme.nouveau_dilemme')}
@@ -840,7 +911,8 @@ export function DilemmePage() {
               </button>
             </div>
           </div>
-        )}
+          )
+        })()}
 
       </div>
     </div>
