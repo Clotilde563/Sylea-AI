@@ -63,6 +63,7 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
   const links = profil ? [
     { to: '/', label: t('nav.dashboard') },
     { to: '/statistiques', label: t('nav.statistiques') || 'Statistiques' },
+    { to: '/tracking', label: 'Mes dilemmes' },
     { to: '/progression-decisions', label: t('nav.progression_decisions') || 'Progression des décisions' },
   ] : []
 

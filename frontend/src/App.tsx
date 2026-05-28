@@ -8,12 +8,15 @@ import { SplashPage }        from './pages/SplashPage'
 import { DashboardPage }     from './pages/DashboardPage'
 import { ProfilWizardPage }  from './pages/ProfilWizardPage'
 import { DilemmePage }       from './pages/DilemmePage'
+import { TrackingsPage }     from './pages/TrackingsPage'
+import { TrackingRecapPage } from './pages/TrackingRecapPage'
 import { StatistiquesPage }  from './pages/StatistiquesPage'
 import { EvenementPage }    from './pages/EvenementPage'
 import { BilanPage }        from './pages/BilanPage'
 import { HistoriquePage }   from './pages/HistoriquePage'
 import { ServiceChatbot }   from './components/ServiceChatbot'
 import { DesktopStatusBanner } from './components/DesktopStatusBanner'
+import { TrackingNotifBanner } from './components/TrackingNotifBanner'
 import ParametresPage       from './pages/ParametresPage'
 import AgentsPage           from './pages/AgentsPage'
 import LoginPage            from './pages/LoginPage'
@@ -80,11 +83,15 @@ function AppContent() {
                 <NavBar onOpenChatbot={() => setChatbotOpen(true)} />
                 {/* Phase 2c — bandeau pont desktop <-> web (vert si OK, rouge sinon) */}
                 <DesktopStatusBanner />
+                {/* Banner global : alerte si periodes de tracking dues OU recap a valider */}
+                <TrackingNotifBanner />
                 <main style={{ flex: 1 }}>
                   <Routes>
                     <Route path="/"             element={<DashboardPage />} />
                     <Route path="/profil"       element={<ProfilWizardPage />} />
                     <Route path="/dilemme"      element={<DilemmePage />} />
+                    <Route path="/tracking"     element={<TrackingsPage />} />
+                    <Route path="/tracking/:id/recap" element={<TrackingRecapPage />} />
                     <Route path="/statistiques" element={<StatistiquesPage />} />
                     <Route path="/historique"   element={<HistoriquePage />} />
                     <Route path="/evenement"    element={<EvenementPage />} />
