@@ -1,13 +1,18 @@
 // Banner global qui scanne les trackings actifs et affiche une alerte
 // quand au moins une période est due (= notif arrivée à échéance).
 //
-// Polling toutes les 30s. Design tech-addictive avec compteur de periodes
-// dues + accès direct à la page Mes dilemmes.
+// MISE A JOUR : combine 2 mecanismes pour la reactivite
+//   1. WebSocket : push instantane depuis le scheduler backend (J+30,
+//      D+3, D+7) -> refresh immediat de la liste
+//   2. Polling 60s en fallback : couvre les cas WS down (changement
+//      reseau, serveur redemarre, etc.)
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { api } from '../api/client'
 import { useStore } from '../store/useStore'
+import { useTrackingWebSocket } from '../hooks/useTrackingWebSocket'
+import { notify, requestNotificationPermission } from '../utils/osNotification'
 import type { TrackingItem } from '../types'
 
 interface DueItem {
@@ -21,7 +26,7 @@ export function TrackingNotifBanner() {
   const [due, setDue] = useState<DueItem[]>([])
   const [dismissed, setDismissed] = useState(false)
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     if (!profil) return
     try {
       const [trackingList, awaitingList] = await Promise.all([
@@ -48,14 +53,46 @@ export function TrackingNotifBanner() {
     } catch {
       // Silent fail : c'est un banner, pas critique
     }
-  }
+  }, [profil])
 
+  // Polling fallback (60s) en plus du WS, pour couvrir les cas ou la connexion
+  // tombe (changement reseau, serveur redemarre, etc.).
   useEffect(() => {
     if (!profil) return
     refresh()
-    const id = setInterval(refresh, 30_000)
+    const id = setInterval(refresh, 60_000)
     return () => clearInterval(id)
-  }, [profil?.id])
+  }, [profil?.id, refresh])
+
+  // WebSocket : refresh INSTANTANE des qu'un event tracking arrive du backend.
+  // C'est ce qui rend la fonctionnalite "temps reel" (J+30, D+3, D+7 sans
+  // attendre le polling).
+  const token = typeof window !== 'undefined' ? localStorage.getItem('sylea_auth_token') : null
+  useTrackingWebSocket({
+    token,
+    onEvent: (event) => {
+      if (event.type === 'dilemme_tracking_period'
+        || event.type === 'dilemme_tracking_validation_reminder'
+        || event.type === 'dilemme_tracking_auto_validated') {
+        refresh()
+        // Notif OS native (Tauri toast Windows/macOS, ou Notification API web)
+        const titles: Record<string, string> = {
+          dilemme_tracking_period: 'Sylea — une période à renseigner',
+          dilemme_tracking_validation_reminder: 'Sylea — récap à valider',
+          dilemme_tracking_auto_validated: 'Sylea — suivi auto-validé',
+        }
+        const e = event as { question?: string }
+        const body = (e.question || '').slice(0, 120)
+        void notify(titles[event.type] || 'Sylea', body, { icon: '/logo192.png', tag: event.type })
+      }
+    },
+  })
+
+  // Demande la permission de notifier au 1er load (silent si deja
+  // granted/denied — on ne harcele pas l'utilisateur).
+  useEffect(() => {
+    void requestNotificationPermission()
+  }, [])
 
   // Pas afficher si :
   // - sur la page tracking déjà (visible naturellement)

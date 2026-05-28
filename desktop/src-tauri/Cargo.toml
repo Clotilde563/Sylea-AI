@@ -12,6 +12,10 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-window-state = "2"
+# Notifications OS natives : Windows toast (Action Center), macOS NSUserNotification.
+# Utilise pour le systeme tracking des dilemmes : J+30/60/90 reminders +
+# D+3/7 validation reminders. Le frontend appelle `notify` via API JS.
+tauri-plugin-notification = "2"
 # Deep-link : recoit sylea://auth/callback?token=... apres Sign in with Google
 # /Apple via le navigateur systeme. Enregistre automatiquement le scheme
 # sylea:// au boot de l'app.

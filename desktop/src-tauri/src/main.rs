@@ -1101,6 +1101,11 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        // Notifications OS natives : Windows toast (Action Center) +
+        // macOS UserNotifications. Le frontend (TrackingNotifBanner) appelle
+        // sendNotification() de @tauri-apps/plugin-notification quand un
+        // event WS de tracking arrive (dilemme_tracking_period, etc.).
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Deep-link : permet a sylea://auth/callback?token=... d'arriver dans

@@ -10,6 +10,7 @@ import { useDeviceContext } from '../contexts/DeviceContext'
 import { AgentSyleaLogo } from '../components/AgentSyleaLogo'
 import { AGENT_COLORS } from '../constants/agentColors'
 import type { AnalyseDilemme, Decision, TrackingItem } from '../types'
+import { shouldShowRecommendation } from '../utils/tracking'
 
 type Phase = 'form' | 'loading' | 'result' | 'done'
 
@@ -753,8 +754,8 @@ export function DilemmePage() {
           // une option destructrice (meme la moins pire) revient a pousser
           // l'utilisateur dans une direction que Claude lui-meme estime mauvaise.
           // Dans ce cas, on affiche un encart "Aucune option recommandee".
-          const aucuneOptionPositive = analyse.options.every(o => (o.impact_jours ?? 0) <= 0)
-          const showRecoBadge = !aucuneOptionPositive
+          const showRecoBadge = shouldShowRecommendation(analyse.options)
+          const aucuneOptionPositive = !showRecoBadge
           return (
           <div className="animate-fade-in">
             {/* Options - display only */}
@@ -845,7 +846,7 @@ export function DilemmePage() {
                 onClick={handleConfirmer}
                 disabled={submitting}
               >
-                {submitting ? t('dilemme.enregistrement') : `\u2713 Confirmer et d\u00E9marrer le suivi`}
+                {submitting ? t('dilemme.enregistrement') : '\u2713 Confirmer et d\u00E9marrer le suivi'}
               </button>
             </div>
           </div>
@@ -878,12 +879,12 @@ export function DilemmePage() {
           >
             <div style={{ fontSize: '3rem', marginBottom: '0.75rem' }}>{'\u25C7'}</div>
             <h3 style={{ color: 'var(--success)', marginBottom: '0.5rem' }}>
-              Suivi d\u00E9marr\u00E9
+              {'Suivi d\u00E9marr\u00E9'}
             </h3>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem', marginBottom: '1.5rem', lineHeight: 1.55 }}>
-              Aucun impact appliqu\u00E9 pour l'instant. Sylea vous notifiera
-              <strong style={{ color: '#fbbf24' }}> {cadence}</strong> pour
-              vous demander ce que vous avez r\u00E9ellement fait.
+              {`Aucun impact appliqu\u00E9 pour l'instant. Sylea vous notifiera `}
+              <strong style={{ color: '#fbbf24' }}> {cadence}</strong>
+              {' pour vous demander ce que vous avez r\u00E9ellement fait.'}
             </p>
             <div style={{
               background: 'rgba(96,165,250,0.08)',
