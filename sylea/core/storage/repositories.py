@@ -91,15 +91,27 @@ class ProfilRepository:
             self._db.conn.execute(sql, data)
 
     def _align_temps_gagne_from_progressions(self, profil: ProfilUtilisateur) -> None:
-        """Calcule temps_gagne_jours depuis sum(te × prog) des SOs en DB.
+        """Aligne temps_gagne_jours sur sum(te × prog) des SOs en DB, MAIS
+        seulement quand le save courant n'est PAS une mutation de temps_gagne
+        (sinon on ecraserait l'intention du route appelant).
 
-        Si abs(stored - derived) > 0.5j, on ajuste temps_gagne pour matcher
-        les progressions (= source de verite). Aucun appel SQL pour modifier
-        les SOs eux-memes : on ne fausse JAMAIS les progressions.
+        Cas d'usage :
+          - Save profil "neutre" (upload photo, modif objectif sans
+            recompute, etc.) : on en profite pour corriger un drift
+            historique eventuel sur les SOs (cf. cas Lucas 213j)
+          - Save profil "mutation" (decision/evenement qui modifie
+            temps_gagne) : on ne touche a rien, le route gere la
+            coherence via apply_impact_invariant_safe_async
+
+        Detection mutation : on lit le temps_gagne_jours actuel en DB.
+        Si abs(in_memory - in_db) > 0.001, le route est en train de muter
+        temps_gagne → on laisse passer.
 
         No-op si :
           - pas de sous-objectifs (creation du profil avant generation SO)
           - profil.temps_initial_jours <= 0
+          - profil n'existe pas encore en DB (creation)
+          - mutation en cours (delta in_memory vs in_db > 0.001)
         """
         if not profil.id or profil.temps_initial_jours <= 0:
             return
@@ -108,7 +120,24 @@ class ProfilRepository:
         if _is_pg():
             return  # TODO : impl async equivalent quand on bascule en PG
 
-        # Mode SQLite : lecture directe des SOs
+        # Mode SQLite : lecture du temps_gagne actuel en DB pour detecter
+        # une mutation en cours
+        db_row = self._db.conn.execute(
+            "SELECT temps_gagne_jours FROM profil_utilisateur WHERE id = ?",
+            (profil.id,),
+        ).fetchone()
+        if db_row is None:
+            return  # creation : pas d'alignement
+
+        db_tg = float(db_row["temps_gagne_jours"] or 0)
+        # Mutation en cours = le caller veut changer temps_gagne -> ne pas
+        # interferer (le route est responsable de cascader via
+        # apply_impact_invariant_safe pour garder l'invariant).
+        if abs(float(profil.temps_gagne_jours) - db_tg) > 0.001:
+            return
+
+        # Save neutre (pas de mutation prevue de temps_gagne). On peut
+        # absorber un eventuel drift historique sur les SOs.
         rows = self._db.conn.execute(
             "SELECT temps_estime, progression FROM sous_objectifs "
             "WHERE user_id = ?", (profil.id,),
@@ -120,7 +149,6 @@ class ProfilRepository:
         if sum_te <= 0:
             return
 
-        # Derive : temps_gagne = sum(te × prog / 100) × temps_initial / sum_te
         weighted = sum(
             float(r["temps_estime"] or 0) * float(r["progression"] or 0) / 100.0
             for r in rows
@@ -130,8 +158,7 @@ class ProfilRepository:
             0.0, min(float(profil.temps_initial_jours), derived_temps_gagne)
         )
 
-        # Tolerance 0.5j pour ignorer les arrondis (la mutation en cours peut
-        # justement etre un delta < 0.5j legitime, on ne le bloque pas).
+        # Tolerance 0.5j pour ignorer les arrondis
         if abs(profil.temps_gagne_jours - derived_temps_gagne) > 0.5:
             import logging
             logger = logging.getLogger("sylea.invariant")
