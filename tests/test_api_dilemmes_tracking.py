@@ -454,3 +454,54 @@ def test_cancel_already_validated_returns_409(client_with_profil: TestClient):
         json={"mode": "zero"},
     )
     assert resp.status_code == 409
+
+
+# ── Tests : validation temporelle (anti-bypass) ──────────────────────────────
+
+def test_respond_periode_not_yet_due_returns_425(client_with_profil: TestClient, monkeypatch):
+    """Sans SYLEA_TRACKING_BYPASS_TIME, l'API doit refuser de repondre a une
+    periode avant son echeance (425 Too Early). Garantit qu'on ne peut pas
+    'completer' un engagement de 90j en quelques secondes via DevTools."""
+    # On retire le bypass temporel pour ce test specifique
+    monkeypatch.delenv("SYLEA_TRACKING_BYPASS_TIME", raising=False)
+
+    create_resp = client_with_profil.post(
+        "/api/dilemme/tracking/create",
+        json=_create_tracking_payload(impact_jours=90),  # 3 periodes mensuelles
+    )
+    assert create_resp.status_code == 200
+    tracking_id = create_resp.json()["tracking"]["id"]
+
+    # La periode 0 est due a J+30 (au plus tot). On tente immediatement.
+    resp = client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/respond",
+        json={"periode_idx": 0, "choice": "0"},
+    )
+    assert resp.status_code == 425, (
+        f"Expected 425 Too Early, got {resp.status_code}: {resp.text}"
+    )
+    body = resp.json()
+    detail = body["detail"]
+    assert detail["error"] == "periode_not_yet_due"
+    assert detail["periode_idx"] == 0
+    assert "expected_notif_at" in detail
+
+
+def test_respond_with_bypass_env_var_succeeds(client_with_profil: TestClient, monkeypatch):
+    """Avec SYLEA_TRACKING_BYPASS_TIME=true, le check temporel est skip
+    (utile pour les tests E2E). Le conftest.py active deja ce flag, on le
+    re-confirme explicitement ici."""
+    monkeypatch.setenv("SYLEA_TRACKING_BYPASS_TIME", "true")
+
+    create_resp = client_with_profil.post(
+        "/api/dilemme/tracking/create",
+        json=_create_tracking_payload(impact_jours=90),
+    )
+    tracking_id = create_resp.json()["tracking"]["id"]
+
+    resp = client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/respond",
+        json={"periode_idx": 0, "choice": "0"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["ok"] is True

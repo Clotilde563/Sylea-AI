@@ -249,6 +249,17 @@ async def respond_period(
             raise HTTPException(status_code=404, detail=err)
         if err == "periode_idx_out_of_range":
             raise HTTPException(status_code=400, detail=err)
+        if err == "periode_not_yet_due":
+            # 425 Too Early : reponse refusee parce que la periode n'est
+            # pas encore arrivee a echeance (anti-bypass scheduler).
+            raise HTTPException(
+                status_code=425,
+                detail={
+                    "error": err,
+                    "periode_idx": result.get("periode_idx"),
+                    "expected_notif_at": result.get("expected_notif_at"),
+                },
+            )
         if err.startswith("status_invalid"):
             raise HTTPException(status_code=409, detail=err)
         raise HTTPException(status_code=500, detail=err)

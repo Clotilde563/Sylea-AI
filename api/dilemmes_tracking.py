@@ -347,9 +347,16 @@ async def respond_to_period_async(
     user_id: str,
     periode_idx: int,
     choice: str,  # "0", "1", ..., ou "none"
+    allow_early: bool = False,  # True = bypass time check (scheduler/auto_overdue)
 ) -> dict:
     """
     Enregistre une reponse de l'user pour une periode donnee.
+
+    SECURITE TEMPORELLE : refuse de repondre a une periode dont la date de
+    notification n'est PAS encore atteinte. Un user ne peut pas "completer"
+    son engagement en quelques secondes via l'API. Override possible :
+      - allow_early=True (parametre interne, scheduler)
+      - env var SYLEA_TRACKING_BYPASS_TIME=true (tests E2E)
 
     Si toutes les periodes sont remplies, bascule le status a
     'awaiting_validation' et retourne all_responded=True.
@@ -363,8 +370,10 @@ async def respond_to_period_async(
         nb_responded: int,
         nb_total: int,
         next_notif_at: ISO timestamp ou null si plus rien a notifier,
+        error: 'periode_not_yet_due' si validation temporelle echoue,
     }
     """
+    import os
     from api.database import get_session_factory
 
     factory = get_session_factory()
@@ -386,6 +395,25 @@ async def respond_to_period_async(
         choices = json.loads(row["choices_json"])
         if not (0 <= periode_idx < row["nb_periodes"]):
             return {"ok": False, "error": "periode_idx_out_of_range"}
+
+        # ── Validation temporelle : la periode doit etre arrivee a echeance ──
+        bypass_env = os.environ.get("SYLEA_TRACKING_BYPASS_TIME", "").strip().lower() in ("1", "true", "yes", "on")
+        if not allow_early and not bypass_env:
+            created_at_raw = datetime.fromisoformat(row["created_at"])
+            if created_at_raw.tzinfo is None:
+                created_at_raw = created_at_raw.replace(tzinfo=timezone.utc)
+            expected_notif = _next_notif_at_utc(
+                created_at_raw, periode_idx,
+                row["impact_temporel_jours"], row["nb_periodes"], row["device_tz"],
+            )
+            now_utc = datetime.now(timezone.utc)
+            if now_utc < expected_notif:
+                return {
+                    "ok": False,
+                    "error": "periode_not_yet_due",
+                    "expected_notif_at": expected_notif.isoformat(),
+                    "periode_idx": periode_idx,
+                }
 
         # Update du choix (idempotent — overwrite si deja set)
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -915,8 +943,11 @@ async def auto_overdue_async(tracking_id: str, user_id: str) -> dict:
     # Trouve la premiere periode pending et la marque 'none'
     for c in choices:
         if c["choice"] is None:
+            # Scheduler legitime : bypass validation temporelle (le scheduler
+            # a deja verifie que la periode etait due + retry 7j sans reponse).
             return await respond_to_period_async(
-                tracking_id, user_id, c["periode_idx"], "none"
+                tracking_id, user_id, c["periode_idx"], "none",
+                allow_early=True,
             )
 
     return {"ok": True, "all_responded": True}

@@ -32,6 +32,10 @@ import pytest
 os.environ.setdefault("SYLEA_DISABLE_CSRF", "true")
 os.environ.setdefault("SYLEA_DISABLE_IP_RATELIMIT", "true")
 os.environ.setdefault("SYLEA_DISABLE_SECURITY_HEADERS", "true")
+# Tests E2E des dilemmes en mode tracking : sans ce flag, les tests doivent
+# attendre J+30 entre chaque /respond. Override permet de tester la chaine
+# complete en quelques secondes.
+os.environ.setdefault("SYLEA_TRACKING_BYPASS_TIME", "true")
 
 
 def pytest_configure(config):
