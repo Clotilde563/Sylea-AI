@@ -748,12 +748,13 @@ export function DilemmePage() {
           // L'utilisateur ne sait pas a l'avance ce qu'il fera reellement →
           // on lui demandera periode par periode via les notifs (J+30 etc).
           //
-          // Le badge "Recommande" est masque si l'option dite recommandee a
-          // un impact_jours NEGATIF : dire "Recommande" alors que Claude
-          // estime le choix destructeur est trompeur. Dans ce cas, le verdict
-          // explique la nuance ("moins pire des deux", etc).
-          const recommandee = analyse.options.find(o => o.lettre === analyse.option_recommandee)
-          const recommandedHasPositiveImpact = (recommandee?.impact_jours ?? 0) > 0
+          // RECOMMANDATION INTELLIGENTE : on ne marque PAS d'option comme
+          // "Recommandee" si toutes les options ont un impact <= 0. Recommander
+          // une option destructrice (meme la moins pire) revient a pousser
+          // l'utilisateur dans une direction que Claude lui-meme estime mauvaise.
+          // Dans ce cas, on affiche un encart "Aucune option recommandee".
+          const aucuneOptionPositive = analyse.options.every(o => (o.impact_jours ?? 0) <= 0)
+          const showRecoBadge = !aucuneOptionPositive
           return (
           <div className="animate-fade-in">
             {/* Options - display only */}
@@ -763,12 +764,36 @@ export function DilemmePage() {
                   key={opt.lettre}
                   lettre={opt.lettre}
                   option={opt}
-                  recommandee={recommandedHasPositiveImpact && analyse.option_recommandee === opt.lettre}
+                  recommandee={showRecoBadge && analyse.option_recommandee === opt.lettre}
                   selected={false}
                   onSelect={undefined /* display-only */}
                 />
               ))}
             </div>
+
+            {/* Notice : aucune recommandation positive */}
+            {aucuneOptionPositive && (
+              <div
+                style={{
+                  background: 'rgba(245,158,11,0.06)',
+                  border: '1px solid rgba(245,158,11,0.3)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '0.7rem 1rem',
+                  marginBottom: '1rem',
+                  fontSize: '0.85rem',
+                  color: '#fbbf24',
+                  lineHeight: 1.45,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.6rem',
+                }}
+              >
+                <span style={{ fontSize: '1rem' }}>⚠</span>
+                <span>
+                  <strong>Aucune option recommandée.</strong> Toutes les options présentées ont un impact négatif sur votre objectif. Sylea suggère implicitement de ne rien faire et de rester sur votre trajectoire actuelle. Lisez le verdict pour la nuance.
+                </span>
+              </div>
+            )}
 
             {/* Verdict */}
             <div
@@ -809,27 +834,6 @@ export function DilemmePage() {
             {error && (
               <p style={{ color: 'var(--danger)', fontSize: '0.875rem', marginBottom: '1rem' }}>{'\u26A0'} {error}</p>
             )}
-
-            {/* Explication tracking pour rassurer l'user */}
-            <div
-              style={{
-                background: 'rgba(96,165,250,0.06)',
-                border: '1px solid rgba(96,165,250,0.2)',
-                borderRadius: 'var(--radius-md)',
-                padding: '0.85rem 1rem',
-                marginBottom: '1.25rem',
-                fontSize: '0.85rem',
-                color: '#93c5fd',
-                lineHeight: 1.5,
-              }}
-            >
-              <strong style={{ color: '#60a5fa' }}>{'\u25C8'} Suivi sur la dur\u00E9e&nbsp;: </strong>
-              Sylea ne vous demande pas de choisir maintenant. En confirmant,
-              vous d\u00E9marrez un suivi qui vous demandera p\u00E9riodiquement
-              (par notification) ce que vous avez <em>r\u00E9ellement</em> fait.
-              L'impact sur votre objectif sera calcul\u00E9 \u00E0 la fin, en fonction
-              de vos vraies actions.
-            </div>
 
             {/* Actions : Confirmer (demarre tracking) | Nouveau dilemme */}
             <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
