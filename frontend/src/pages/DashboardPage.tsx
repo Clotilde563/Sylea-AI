@@ -398,70 +398,12 @@ export function DashboardPage() {
             return i === lastActiveIdx ? Math.max(0, base + diffRest) : base
           })
 
-          // \u2500\u2500\u2500 Detection du drift backend (transparence) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-          // Meme si l'affichage est coherent par construction (cf. invariants
-          // I1/I2), le BACKEND stocke des progressions SO qui peuvent ne pas
-          // matcher temps_gagne (drift accumule via arrondis, decisions
-          // anciennes, cap-100 mal redistribue). On le DETECTE et on permet
-          // a l'utilisateur de re-aligner via /recompute-so-progressions.
-          //
-          // temps_SO_backend = sum(te_prop \u00d7 (1 - prog/100))
-          //   ou te_prop = (te_i / sum_te) \u00d7 tempsInitial
-          // objectif_backend = tempsInitial - tempsGagne (= objectifRestant)
-          // drift = |temps_SO_backend - objectif_backend|
-          const tempsSOBackend = sumNaturel  // calcule plus haut, c'est exactement ca
-          const driftJours = Math.round(Math.abs(tempsSOBackend - objectifRestant))
-          // Seuil 5 jours : en dessous c'est juste de l'arrondi, pas un vrai drift
-          const DRIFT_THRESHOLD = 5
-
           return (
             <div className="card animate-fade-in" style={{ marginBottom: '1.5rem', padding: '1.25rem' }}>
-              {driftJours >= DRIFT_THRESHOLD && (
-                <div
-                  role="alert"
-                  style={{
-                    marginBottom: '1rem',
-                    padding: '0.75rem 1rem',
-                    background: 'rgba(248, 113, 113, 0.08)',
-                    border: '1px solid rgba(248, 113, 113, 0.35)',
-                    borderRadius: '8px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.75rem',
-                    fontSize: '0.85rem',
-                    color: '#fca5a5',
-                  }}
-                >
-                  <span style={{ flex: 1 }}>
-                    {`D\u00e9synchronisation d\u00e9tect\u00e9e\u00a0: temps SO (${Math.round(tempsSOBackend)}j) \u2260 objectif (${objectifRestant}j). Recalculez pour corriger.`}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        await api.recomputeSoProgressions()
-                        window.location.reload()
-                      } catch (e) {
-                        console.error('recompute SO failed:', e)
-                        alert('Recalcul echoue : ' + (e instanceof Error ? e.message : String(e)))
-                      }
-                    }}
-                    style={{
-                      padding: '0.35rem 0.85rem',
-                      background: 'rgba(248, 113, 113, 0.18)',
-                      border: '1px solid rgba(248, 113, 113, 0.5)',
-                      borderRadius: '6px',
-                      color: '#fecaca',
-                      fontSize: '0.78rem',
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    Recalculer
-                  </button>
-                </div>
-              )}
+              {/* Alerte "Desynchronisation detectee" retiree : la coherence
+                  entre sum(SO_restant) et objectifRestant est maintenant
+                  garantie par construction (cf. invariants I1 et I2 plus haut).
+              */}
               <h3 style={{ fontSize: '0.75rem', fontWeight: 700, letterSpacing: '0.1em', color: 'var(--accent-violet-light)', textTransform: 'uppercase', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <span>{'\u25c7'}</span> {t('dashboard.sous_objectifs')}
               </h3>
