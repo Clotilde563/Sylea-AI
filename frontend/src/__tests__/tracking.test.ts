@@ -3,6 +3,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   shouldShowRecommendation,
+  bestOptionByImpact,
   countDuePeriodsForTracking,
   formatCountdown,
   trackingProgress,
@@ -52,23 +53,23 @@ describe('shouldShowRecommendation', () => {
     expect(shouldShowRecommendation([])).toBe(false)
   })
 
-  it('false when all options have impact <= 0', () => {
+  it('true when all options have negative impact (recommandation = moins pire)', () => {
     const opts = [
       baseOption({ lettre: 'A', impact_jours: -40 }),
       baseOption({ lettre: 'B', impact_jours: -180 }),
     ]
-    expect(shouldShowRecommendation(opts)).toBe(false)
+    expect(shouldShowRecommendation(opts)).toBe(true)
   })
 
-  it('false when all options have impact = 0 exactly', () => {
+  it('true even when all impacts are 0', () => {
     const opts = [
       baseOption({ lettre: 'A', impact_jours: 0 }),
       baseOption({ lettre: 'B', impact_jours: 0 }),
     ]
-    expect(shouldShowRecommendation(opts)).toBe(false)
+    expect(shouldShowRecommendation(opts)).toBe(true)
   })
 
-  it('true when at least one option has positive impact', () => {
+  it('true when mixed positive and negative impacts', () => {
     const opts = [
       baseOption({ lettre: 'A', impact_jours: 10 }),
       baseOption({ lettre: 'B', impact_jours: -50 }),
@@ -76,9 +77,46 @@ describe('shouldShowRecommendation', () => {
     expect(shouldShowRecommendation(opts)).toBe(true)
   })
 
-  it('true when single positive option', () => {
+  it('true for single option', () => {
     const opts = [baseOption({ lettre: 'A', impact_jours: 5 })]
     expect(shouldShowRecommendation(opts)).toBe(true)
+  })
+})
+
+describe('bestOptionByImpact', () => {
+  it('null when no options', () => {
+    expect(bestOptionByImpact([])).toBeNull()
+  })
+
+  it('returns the only option when 1 option', () => {
+    expect(bestOptionByImpact([baseOption({ lettre: 'A', impact_jours: -10 })])).toBe('A')
+  })
+
+  it('returns the option with highest positive impact', () => {
+    const opts = [
+      baseOption({ lettre: 'A', impact_jours: 5 }),
+      baseOption({ lettre: 'B', impact_jours: 50 }),
+      baseOption({ lettre: 'C', impact_jours: 10 }),
+    ]
+    expect(bestOptionByImpact(opts)).toBe('B')
+  })
+
+  it('returns the least negative when all are negative', () => {
+    const opts = [
+      baseOption({ lettre: 'A', impact_jours: -40 }),  // moins pire
+      baseOption({ lettre: 'B', impact_jours: -180 }),
+      baseOption({ lettre: 'C', impact_jours: -90 }),
+    ]
+    expect(bestOptionByImpact(opts)).toBe('A')
+  })
+
+  it('returns positive over negative even if more options exist', () => {
+    const opts = [
+      baseOption({ lettre: 'A', impact_jours: -10 }),
+      baseOption({ lettre: 'B', impact_jours: 1 }),  // best
+      baseOption({ lettre: 'C', impact_jours: -5 }),
+    ]
+    expect(bestOptionByImpact(opts)).toBe('B')
   })
 })
 

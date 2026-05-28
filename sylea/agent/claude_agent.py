@@ -262,13 +262,25 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
         objectif_desc = (
             profil.objectif.description if profil.objectif else "Non défini"
         )
-        prob_calculee = getattr(profil.objectif, 'probabilite_calculee', 0) if profil.objectif else 0
-        prob_totale = profil.probabilite_actuelle + prob_calculee
-        prob_totale = max(0.01, min(99.99, prob_totale))
-        # Calculer le temps estime
-        _tj = min(73000, max(1, round(900 * ((100 - prob_totale) / prob_totale) ** 0.675)))
+
+        # FIX (2026-05-28) : on derive temps_restant DIRECTEMENT depuis
+        # temps_initial - temps_gagne au lieu de la formule probabiliste basee
+        # sur prob_actuelle + prob_calculee. Raison : depuis l'invariant
+        # Dashboard (cf. ProfilRepository.sauvegarder), probabilite_actuelle
+        # est dej la progression reelle des SO. L'ancienne formule sommait
+        # cette progression a une prob_calculee orpheline -> 81% -> 11 mois
+        # de temps_restant -> Claude propageait ce nombre erronne dans le
+        # verdict ("Lucas n'a que 11 mois restants").
+        temps_initial = max(1, int(profil.temps_initial_jours or 0))
+        temps_gagne = min(temps_initial, max(0.0, float(profil.temps_gagne_jours or 0)))
+        _tj = max(1, int(round(temps_initial - temps_gagne)))
         _ta, _rm = _tj // 365, (_tj % 365) // 30
         temps_estime_str = f"{_ta} ans {_rm} mois" if _ta > 0 else f"{_rm} mois"
+
+        # prob_totale = progression reelle (% temps_gagne / temps_initial),
+        # utilisee par d'autres parties du prompt (facteurs neuro etc).
+        prob_totale = round(temps_gagne / temps_initial * 100, 2)
+        prob_totale = max(0.01, min(99.99, prob_totale))
 
         # Construire la liste d'options dynamiquement
         lettres = [chr(65 + i) for i in range(len(options))]
@@ -318,6 +330,19 @@ neuro-physiologique, son objectif de vie, et le cadre temporel exact de la decis
 OBJECTIF DE VIE : {objectif_desc}
 PROBABILITE ACTUELLE D'ATTEINDRE CET OBJECTIF : {prob_totale:.2f}%
 TEMPS ESTIME RESTANT POUR L'OBJECTIF : {temps_estime_str} ({_tj} jours)
+
+═══════════ DONNEES NUMERIQUES VERIFIEES (a citer telles quelles) ═══════════
+
+Tu N'INVENTES JAMAIS de nombre de jours/mois/annees concernant l'utilisateur.
+Si tu mentionnes une duree, c'est UNIQUEMENT depuis cette liste verifiee :
+- Temps restant pour l'objectif : {temps_estime_str} ({_tj} jours)
+- Probabilite actuelle : {prob_totale:.2f}%
+- Cadre temporel de ce choix : {cadre_str if impact_temporel_jours else "long terme"}
+- Age de l'utilisateur : {profil.age} ans
+
+Toute autre duree ou statistique chiffree doit etre tiree du contexte ci-dessus
+ou citee comme estimation explicite ("environ", "approximativement"). NE PAS
+fabriquer de nombres precis qui n'apparaissent pas dans les sources.
 
 ═══════════ CADRE TEMPOREL DE CE CHOIX ═══════════
 
@@ -370,7 +395,7 @@ PNAS, The Lancet, Journal of Applied Psychology, NEJM, etc.).
 JSON STRICT (aucun texte avant/apres, aucun bloc markdown) :
 {{
   {json_options},
-  "verdict": "2-3 phrases naturelles. NE PAS mentionner de pourcentage. Explique pourquoi l'option recommandee est meilleure pour CET utilisateur dans CE cadre temporel.",
+  "verdict": "2-3 phrases naturelles. INTERDIT : (1) mentionner un pourcentage de probabilite, (2) inventer un nombre de mois/jours/annees. Cite uniquement '{temps_estime_str}' si tu evoques le temps restant. Explique pourquoi l'option recommandee est la meilleure pour CET utilisateur dans CE cadre temporel.",
   "etude_scientifique": "Selon l etude de [Auteurs] ([Annee], [Revue]) sur [sujet], [conclusion cle en lien avec le dilemme].",
   "option_recommandee": "{lettres[0]}"
 }}
@@ -385,20 +410,85 @@ RAPPELS :
 
         data = self._appeler_claude(prompt)
 
-        def _clean_verdict(v: str) -> str:
-            """Nettoyer le verdict: supprimer %, limiter longueur."""
+        def _clean_verdict(v: str, ref_temps_estime: str = "") -> str:
+            """Nettoyer le verdict : supprimer pourcentages + corriger les
+            durees hallucinees + nettoyer phrases bancales.
+
+            Probleme historique :
+              - Supression naive de "45.57%" creait "et  de probabilite" -> fix par
+                pattern enveloppant "et X% de probabilite"
+              - Claude continue d'halluciner "N mois restants" qui ne matchent
+                pas temps_estime_str -> remplace par la valeur reelle
+              - Cleanup naif gobait trop d'espaces -> "absorberait 80% de" -> "absorberaitde"
+                Fix : preserver un espace de chaque cote du nombre supprime.
+            """
             import re as _re
-            v = " ".join(v.split()[:50])
-            # Supprimer les pourcentages
-            v = _re.sub(r'\d+[.,]?\d*\s*%', '', v)
-            # Nettoyer les artefacts
-            v = v.replace('À  sur', 'Sur').replace('A  sur', 'Sur')
-            v = v.replace('Avec et ', 'Sur un horizon de ').replace('Avec  et ', 'Sur un horizon de ')
-            v = v.replace('À et ', 'Sur ').replace('A et ', 'Sur ')
-            v = v.replace('À sur', 'Sur').replace('A sur ', 'Sur ')
-            # Nettoyer les doubles espaces
+            v = " ".join(v.split()[:55])  # marge pour ne pas couper en plein mot
+
+            # 1. Supprimer expressions completes "et X% de probabilite",
+            #    "avec X% de probabilite", "X% de probabilite", etc.
+            v = _re.sub(
+                r'\s+(?:et|avec)\s+\d+[.,]?\d*\s*%\s*(?:de\s+probabilite|probabilite)\b',
+                '',
+                v,
+                flags=_re.IGNORECASE,
+            )
+            v = _re.sub(
+                r'\b\d+[.,]?\d*\s*%\s+de\s+probabilite\b',
+                '',
+                v,
+                flags=_re.IGNORECASE,
+            )
+            # 2. Supprimer pourcentages isoles en preservant les espaces autour
+            #    "elle absorberait 80% de son temps" -> "elle absorberait de son temps"
+            v = _re.sub(r'\s*\d+[.,]?\d*\s*%\s*', ' ', v)
+            # 3. Supprimer "et de probabilite" / "avec de probabilite" residuels
+            v = _re.sub(
+                r'\s+(?:et|avec|de)\s+de\s+probabilite\b',
+                '',
+                v,
+                flags=_re.IGNORECASE,
+            )
+            v = _re.sub(
+                r'\s+(?:et|avec)\s+de\s+(?=,|\.|$)',
+                '',
+                v,
+                flags=_re.IGNORECASE,
+            )
+
+            # 4. CORRIGER LES HALLUCINATIONS DE DUREE. Claude invente parfois
+            #    "11 mois restants", "8 mois", etc. qui ne correspondent pas
+            #    au temps reel. On detecte les patterns "N mois (restant|s|
+            #    devant)" et on remplace par la duree verifiee.
+            #
+            #    Idempotent : si le verdict contient deja ref_temps_estime,
+            #    on ne touche pas (evite "2 ans 2 ans 11 mois").
+            if ref_temps_estime and ref_temps_estime.lower() not in v.lower():
+                # "N mois restants/devant lui/devant moi" -> remplace
+                # Mais PAS si precede de "ans " (= deja correct comme
+                # "2 ans 11 mois restants")
+                v = _re.sub(
+                    r'(?<!ans\s)\b(?:que\s+)?\d+\s*mois\s+(?:restants?|devant\s+(?:lui|moi|nous)|qui\s+restent?)\b',
+                    ref_temps_estime + ' restants',
+                    v,
+                    flags=_re.IGNORECASE,
+                )
+                # "avec N mois pour", "n'a que N mois pour" -> remplace
+                v = _re.sub(
+                    r'(?:avec|que)\s+\d+\s*mois\s+(?=pour\s)',
+                    'avec ' + ref_temps_estime + ' ',
+                    v,
+                    flags=_re.IGNORECASE,
+                )
+
+            # 5. Nettoyer artefacts ponctuation/espaces
+            v = _re.sub(r'\s+([,.;:])', r'\1', v)
             v = _re.sub(r'\s+', ' ', v).strip()
-            # Si commence par "de" ou "sur" en minuscule, capitaliser
+            # Tronquer a 50 mots SANS couper au milieu d'un mot
+            words = v.split()
+            if len(words) > 50:
+                v = " ".join(words[:50])
+            # Capitaliser si commence par minuscule
             if v and v[0].islower():
                 v = v[0].upper() + v[1:]
             return v
@@ -444,7 +534,7 @@ RAPPELS :
 
         return AnalyseDilemme(
             options=parsed_options,
-            verdict=_clean_verdict(data.get('verdict', '')),
+            verdict=_clean_verdict(data.get('verdict', ''), ref_temps_estime=temps_estime_str),
             option_recommandee=data.get("option_recommandee", lettres[0]),
             etude_scientifique=data.get("etude_scientifique", ""),
         )

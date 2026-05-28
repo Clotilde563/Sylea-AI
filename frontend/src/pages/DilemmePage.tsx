@@ -749,13 +749,13 @@ export function DilemmePage() {
           // L'utilisateur ne sait pas a l'avance ce qu'il fera reellement →
           // on lui demandera periode par periode via les notifs (J+30 etc).
           //
-          // RECOMMANDATION INTELLIGENTE : on ne marque PAS d'option comme
-          // "Recommandee" si toutes les options ont un impact <= 0. Recommander
-          // une option destructrice (meme la moins pire) revient a pousser
-          // l'utilisateur dans une direction que Claude lui-meme estime mauvaise.
-          // Dans ce cas, on affiche un encart "Aucune option recommandee".
+          // RECOMMANDATION : on affiche TOUJOURS le badge "Recommande" sur
+          // l'option choisie par Claude. C'est l'option avec le MEILLEUR
+          // impact (positif OU le moins negatif). Recommander "la moins pire"
+          // donne un signal d'arbitrage utile a l'utilisateur quand toutes
+          // les options sont mauvaises. Le verdict apporte la nuance ("aucune
+          // n'est vraiment alignee, mais si tu dois en choisir une, prends A").
           const showRecoBadge = shouldShowRecommendation(analyse.options)
-          const aucuneOptionPositive = !showRecoBadge
           return (
           <div className="animate-fade-in">
             {/* Options - display only */}
@@ -771,30 +771,6 @@ export function DilemmePage() {
                 />
               ))}
             </div>
-
-            {/* Notice : aucune recommandation positive */}
-            {aucuneOptionPositive && (
-              <div
-                style={{
-                  background: 'rgba(245,158,11,0.06)',
-                  border: '1px solid rgba(245,158,11,0.3)',
-                  borderRadius: 'var(--radius-md)',
-                  padding: '0.7rem 1rem',
-                  marginBottom: '1rem',
-                  fontSize: '0.85rem',
-                  color: '#fbbf24',
-                  lineHeight: 1.45,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.6rem',
-                }}
-              >
-                <span style={{ fontSize: '1rem' }}>⚠</span>
-                <span>
-                  <strong>Aucune option recommandée.</strong> Toutes les options présentées ont un impact négatif sur votre objectif. Sylea suggère implicitement de ne rien faire et de rester sur votre trajectoire actuelle. Lisez le verdict pour la nuance.
-                </span>
-              </div>
-            )}
 
             {/* Verdict */}
             <div

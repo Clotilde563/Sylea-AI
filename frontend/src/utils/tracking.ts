@@ -5,13 +5,28 @@ import type { TrackingItem, AnalyseOption } from '../types'
 /**
  * Decide si on doit afficher un badge "Recommande" sur une option.
  *
- * Regle : on ne recommande JAMAIS une option si toutes les options ont un
- * impact <= 0. Recommander la "moins pire" reviendrait a pousser l'utilisateur
- * dans une direction destructrice — Claude lui-meme dirait "ne fais rien".
+ * Regle (revisitee 2026-05-28) : on recommande TOUJOURS une option si il y
+ * en a au moins une. C'est la option avec le MEILLEUR impact, meme si toutes
+ * sont negatives. Recommander "la moins pire" donne un signal d'arbitrage
+ * utile a l'utilisateur. Le verdict apporte la nuance (ex: "aucune n'est
+ * vraiment alignee, mais si tu dois en choisir une, prends A").
  */
 export function shouldShowRecommendation(options: AnalyseOption[]): boolean {
-  if (options.length === 0) return false
-  return options.some(o => (o.impact_jours ?? 0) > 0)
+  return options.length > 0
+}
+
+/**
+ * Retourne la lettre de l'option avec le meilleur impact (= impact_jours
+ * le plus eleve). Sert de fallback si analyse.option_recommandee est absent
+ * ou incoherent.
+ */
+export function bestOptionByImpact(options: AnalyseOption[]): string | null {
+  if (options.length === 0) return null
+  let best = options[0]
+  for (const o of options.slice(1)) {
+    if ((o.impact_jours ?? 0) > (best.impact_jours ?? 0)) best = o
+  }
+  return best.lettre
 }
 
 /**
