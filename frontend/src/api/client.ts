@@ -262,6 +262,11 @@ export const api = {
   deleteDecision: (id: string): Promise<void> =>
     request<void>(`/historique/${id}`, { method: 'DELETE' }),
 
+  // Recalcule les progressions des sous-objectifs en alignant sur
+  // temps_gagne (backend dé-driftage). Appelé par le banner de désync.
+  recomputeSoProgressions: (): Promise<{ ok: boolean }> =>
+    request('/historique/recompute-so-progressions', { method: 'POST' }),
+
   getHistoriquePagine: (params: {
     page?: number; par_page?: number; tri?: string; recherche?: string
   } = {}): Promise<{
