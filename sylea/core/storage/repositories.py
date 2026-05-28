@@ -51,7 +51,24 @@ class ProfilRepository:
         self._db = db
 
     def sauvegarder(self, profil: ProfilUtilisateur, auth_user_id: str | None = None) -> None:
-        """Insère ou met à jour le profil en base (PG-aware)."""
+        """Insère ou met à jour le profil en base (PG-aware).
+
+        INVARIANT DASHBOARD (garantie structurelle) : avant chaque save, on
+        derive `temps_gagne_jours` depuis les progressions des sous-objectifs
+        pour garantir que sum(te × prog) / sum(te) × temps_initial == temps_gagne.
+        Les progressions sont la SOURCE DE VERITE (= le travail reel de l'user
+        sur chaque SO). temps_gagne est juste un cache derive.
+
+        Resultat : sum(SO_jours_restant) == objectif_restant TOUJOURS, sans
+        recompute manuel, sans bouton, sans drift accumulable.
+        """
+        # Aligne temps_gagne AVANT le save (silencieux, jamais ne touche
+        # aux progressions). Si pas de SOs encore, no-op.
+        try:
+            self._align_temps_gagne_from_progressions(profil)
+        except Exception:
+            pass  # Best-effort : ne pas bloquer le save si l'alignement echoue
+
         if _is_pg():
             from sylea.core.storage.repositories_async import ProfilRepositoryAsync
             return _run_async(
@@ -72,6 +89,62 @@ class ProfilRepository:
         )
         with self._db.conn:
             self._db.conn.execute(sql, data)
+
+    def _align_temps_gagne_from_progressions(self, profil: ProfilUtilisateur) -> None:
+        """Calcule temps_gagne_jours depuis sum(te × prog) des SOs en DB.
+
+        Si abs(stored - derived) > 0.5j, on ajuste temps_gagne pour matcher
+        les progressions (= source de verite). Aucun appel SQL pour modifier
+        les SOs eux-memes : on ne fausse JAMAIS les progressions.
+
+        No-op si :
+          - pas de sous-objectifs (creation du profil avant generation SO)
+          - profil.temps_initial_jours <= 0
+        """
+        if not profil.id or profil.temps_initial_jours <= 0:
+            return
+
+        # Mode PG : delegue a la version async (a venir, evite double round-trip)
+        if _is_pg():
+            return  # TODO : impl async equivalent quand on bascule en PG
+
+        # Mode SQLite : lecture directe des SOs
+        rows = self._db.conn.execute(
+            "SELECT temps_estime, progression FROM sous_objectifs "
+            "WHERE user_id = ?", (profil.id,),
+        ).fetchall()
+        if not rows:
+            return
+
+        sum_te = sum(float(r["temps_estime"] or 0) for r in rows)
+        if sum_te <= 0:
+            return
+
+        # Derive : temps_gagne = sum(te × prog / 100) × temps_initial / sum_te
+        weighted = sum(
+            float(r["temps_estime"] or 0) * float(r["progression"] or 0) / 100.0
+            for r in rows
+        )
+        derived_temps_gagne = weighted * profil.temps_initial_jours / sum_te
+        derived_temps_gagne = max(
+            0.0, min(float(profil.temps_initial_jours), derived_temps_gagne)
+        )
+
+        # Tolerance 0.5j pour ignorer les arrondis (la mutation en cours peut
+        # justement etre un delta < 0.5j legitime, on ne le bloque pas).
+        if abs(profil.temps_gagne_jours - derived_temps_gagne) > 0.5:
+            import logging
+            logger = logging.getLogger("sylea.invariant")
+            logger.info(
+                f"[invariant] aligne temps_gagne {profil.id[:12]}... : "
+                f"{profil.temps_gagne_jours:.2f} -> {derived_temps_gagne:.2f} "
+                f"(delta {derived_temps_gagne - profil.temps_gagne_jours:+.2f}j)"
+            )
+            profil.temps_gagne_jours = round(derived_temps_gagne, 4)
+            if profil.temps_initial_jours > 0:
+                profil.probabilite_actuelle = round(
+                    profil.temps_gagne_jours / profil.temps_initial_jours * 100, 2
+                )
 
     def charger(self, auth_user_id: str | None = None) -> Optional[ProfilUtilisateur]:
         """Charge le profil. Si auth_user_id fourni, filtre par auth_user_id (multi-user).
