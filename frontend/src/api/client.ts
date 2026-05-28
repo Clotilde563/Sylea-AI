@@ -204,10 +204,18 @@ export const api = {
     const token = localStorage.getItem(AUTH_TOKEN_KEY)
     const fd = new FormData()
     fd.append('file', file)
+    // FIX (2026-05-28) : ajouter le header CSRF (POST est dans UNSAFE_METHODS,
+    // sinon le backend renvoie 403 csrf_missing). Idem credentials:'include'
+    // pour envoyer le cookie de session.
+    const headers: Record<string, string> = {}
+    if (token) headers.Authorization = `Bearer ${token}`
+    const csrf = getCsrfToken()
+    if (csrf) headers[CSRF_HEADER_NAME] = csrf
     const r = await fetch(`${BASE}/profil/photo`, {
       method: 'POST',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      headers,
       body: fd,
+      credentials: 'include',
     })
     if (!r.ok) {
       const err = await r.json().catch(() => ({}))
