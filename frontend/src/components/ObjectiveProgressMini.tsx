@@ -51,6 +51,11 @@ export function ObjectiveProgressMini({
 
   let pathD = ''
   let areaD = ''
+  // Coords du PREMIER point reellement echantillonne par la sigmoide :
+  // important pour ancrer le dot de depart SUR la courbe (sinon le sigmoide
+  // melange les deltas futurs et la courbe demarre au-dessus de baseY).
+  let firstX = leftX
+  let firstY = baseY
   let lastX = rightX
   let lastY = baseY
   let progressionActuelle = 0
@@ -113,6 +118,8 @@ export function ObjectiveProgressMini({
         ` L ${lastPt.x.toFixed(1)} ${baseY.toFixed(1)}` +
         ` L ${firstPt.x.toFixed(1)} ${baseY.toFixed(1)} Z`
 
+      firstX = firstPt.x
+      firstY = firstPt.y
       lastX = lastPt.x
       lastY = lastPt.y
       progressionActuelle = last.prob
@@ -121,6 +128,8 @@ export function ObjectiveProgressMini({
     // Baseline plate à prob=0 sur toute la largeur.
     pathD = `M ${leftX} ${baseY} L ${rightX} ${baseY}`
     areaD = ''
+    firstX = leftX
+    firstY = baseY
     lastX = rightX
     lastY = baseY
     progressionActuelle = 0
@@ -177,10 +186,12 @@ export function ObjectiveProgressMini({
         strokeLinejoin="round"
       />
 
-      {/* Dot de départ (origine, prob=0) — petit repère gauche cyan */}
+      {/* Dot de depart — ancre SUR la courbe (pas au coin bas-gauche), pour
+          que la sigmoide qui peut demarrer au-dessus de baseY ne cree pas
+          un decalage visuel entre le dot et l'amorce de la ligne. */}
       <circle
-        cx={leftX}
-        cy={baseY}
+        cx={firstX}
+        cy={firstY}
         r={3}
         fill="#22d3ee"
         opacity={0.85}
