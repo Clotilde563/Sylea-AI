@@ -953,6 +953,36 @@ async def auto_overdue_async(tracking_id: str, user_id: str) -> dict:
     return {"ok": True, "all_responded": True}
 
 
+async def delete_tracking_async(tracking_id: str, user_id: str) -> dict:
+    """
+    Supprime DEFINITIVEMENT un tracking de la DB.
+
+    Difference avec cancel(mode='zero') :
+      - cancel : status='cancelled' (trace conservee dans l'historique)
+      - delete : DELETE de la row (aucune trace, comme s'il n'avait jamais existe)
+
+    Aucun impact applique sur le profil/SO. Si l'user veut conserver l'impact
+    partiel des periodes deja repondues, il doit utiliser cancel('partial')
+    AVANT de pouvoir delete (ou simplement ne pas appeler delete et garder
+    l'historique 'cancelled').
+    """
+    from api.database import get_session_factory
+
+    tracking = await get_tracking_async(tracking_id, user_id)
+    if not tracking:
+        return {"ok": False, "error": "tracking_not_found"}
+
+    factory = get_session_factory()
+    async with factory() as session:
+        await session.execute(
+            text("DELETE FROM dilemmes_tracking WHERE id = :id AND user_id = :uid"),
+            {"id": tracking_id, "uid": user_id},
+        )
+        await session.commit()
+
+    return {"ok": True, "deleted": True, "tracking_id": tracking_id}
+
+
 __all__ = [
     "ensure_tracking_tables",
     "create_tracking_async",
@@ -962,6 +992,7 @@ __all__ = [
     "compute_recap",
     "validate_tracking_async",
     "cancel_tracking_async",
+    "delete_tracking_async",
     "find_pending_notifications_async",
     "mark_notif_sent_async",
     "auto_overdue_async",

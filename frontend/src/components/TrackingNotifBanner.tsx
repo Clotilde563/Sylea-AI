@@ -12,7 +12,8 @@ import { Link, useLocation } from 'react-router-dom'
 import { api } from '../api/client'
 import { useStore } from '../store/useStore'
 import { useTrackingWebSocket } from '../hooks/useTrackingWebSocket'
-import { notify, requestNotificationPermission } from '../utils/osNotification'
+import { notify, notifyTrackingPeriod, requestNotificationPermission } from '../utils/osNotification'
+import { TrackingPeriodModal, type TrackingPeriodPayload } from './TrackingPeriodModal'
 import type { TrackingItem } from '../types'
 
 interface DueItem {
@@ -25,6 +26,10 @@ export function TrackingNotifBanner() {
   const profil = useStore((s) => s.profil)
   const [due, setDue] = useState<DueItem[]>([])
   const [dismissed, setDismissed] = useState(false)
+  // Modal in-app affiche quand un event WS de tracking arrive ET que l'app
+  // est focus (= visible). Pour les events recus pendant que l'app est
+  // background/minimisee, on s'appuie sur la notif OS (qui ouvre l'app au clic).
+  const [modalPayload, setModalPayload] = useState<TrackingPeriodPayload | null>(null)
 
   const refresh = useCallback(async () => {
     if (!profil) return
@@ -71,30 +76,70 @@ export function TrackingNotifBanner() {
   useTrackingWebSocket({
     token,
     onEvent: (event) => {
-      if (event.type === 'dilemme_tracking_period'
-        || event.type === 'dilemme_tracking_validation_reminder'
-        || event.type === 'dilemme_tracking_auto_validated') {
+      if (event.type === 'dilemme_tracking_period') {
         refresh()
-        // Notif OS native (Tauri toast Windows/macOS, ou Notification API web)
+        const e = event as { tracking_id: string; periode_idx: number; question: string; actions: { id: string; label: string }[]; is_retry: boolean; nb_periodes: number }
+        const csrf = decodeURIComponent((document.cookie.match(/sylea_csrf=([^;]+)/) || [])[1] || '')
+        // Si app focus (= visible et user actif) -> on ouvre le MODAL in-app
+        // tech-addictif (meilleur UX, design custom, animations).
+        // Sinon -> notif OS avec actions cliquables (le user repond depuis
+        // le Action Center sans ouvrir l'app).
+        if (typeof document !== 'undefined' && !document.hidden && document.hasFocus()) {
+          setModalPayload({
+            tracking_id: e.tracking_id,
+            periode_idx: e.periode_idx,
+            question: e.question,
+            actions: e.actions,
+            is_retry: e.is_retry,
+            nb_periodes: e.nb_periodes,
+          })
+        } else {
+          void notifyTrackingPeriod({
+            tracking_id: e.tracking_id,
+            periode_idx: e.periode_idx,
+            question: e.question,
+            actions: e.actions,
+            is_retry: e.is_retry,
+            token: token || undefined,
+            csrf: csrf || undefined,
+          })
+        }
+      } else if (event.type === 'dilemme_tracking_validation_reminder'
+              || event.type === 'dilemme_tracking_auto_validated') {
+        refresh()
         const titles: Record<string, string> = {
-          dilemme_tracking_period: 'Sylea — une période à renseigner',
           dilemme_tracking_validation_reminder: 'Sylea — récap à valider',
           dilemme_tracking_auto_validated: 'Sylea — suivi auto-validé',
         }
         const e = event as { question?: string }
-        const body = (e.question || '').slice(0, 120)
-        void notify(titles[event.type] || 'Sylea', body, { icon: '/logo192.png', tag: event.type })
+        void notify(titles[event.type] || 'Sylea', (e.question || '').slice(0, 120), { icon: '/sylea-logo.svg', tag: event.type })
       }
     },
   })
 
-  // Demande la permission de notifier au 1er load (silent si deja
-  // granted/denied — on ne harcele pas l'utilisateur).
+  // Demande la permission de notifier + register le service worker au 1er load
+  // (silent si deja granted/denied — on ne harcele pas l'utilisateur).
   useEffect(() => {
     void requestNotificationPermission()
+    // Service Worker enable les notifs OS RICHES avec actions cliquables
+    // (boutons A/B/Aucun directement dans la notif). Sans ca, notif degradee
+    // (juste body sans actions).
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sylea-sw.js', { scope: '/' }).catch(() => { /* ignore */ })
+    }
   }, [])
 
-  // Pas afficher si :
+  // Le modal in-app doit etre rendu MEME si le banner est cache (= peut
+  // s'ouvrir depuis n'importe quelle page, pas seulement le dashboard).
+  const modalEl = modalPayload ? (
+    <TrackingPeriodModal
+      payload={modalPayload}
+      onClose={() => setModalPayload(null)}
+      onResponded={refresh}
+    />
+  ) : null
+
+  // Pas afficher le BANNER si :
   // - sur la page tracking déjà (visible naturellement)
   // - sur le wizard profil
   // - dismissed manuellement (réapparaitra dans 30s si toujours pertinent)
@@ -106,13 +151,15 @@ export function TrackingNotifBanner() {
     || pathname.startsWith('/profil')
     || pathname.startsWith('/login')
   ) {
-    return null
+    return modalEl  // modal seul, sans banner
   }
 
   const nbValidation = due.filter(d => d.periodeIdx < 0).length
   const nbPeriodes = due.length - nbValidation
 
   return (
+    <>
+    {modalEl}
     <div
       role="alert"
       className="animate-fade-in"
@@ -221,5 +268,6 @@ export function TrackingNotifBanner() {
         </div>
       </div>
     </div>
+    </>
   )
 }

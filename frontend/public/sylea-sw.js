@@ -37,17 +37,52 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()
-  const url = (event.notification.data && event.notification.data.url) || '/tracking'
-  event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
-      // Reuse une fenetre Sylea ouverte si possible
-      for (const client of list) {
-        if (client.url.includes(self.registration.scope) && 'focus' in client) {
-          client.navigate(url)
-          return client.focus()
+  const data = event.notification.data || {}
+
+  // Cas 1 : click sur une ACTION (bouton A/B/Aucun de la notif tracking)
+  // -> POST /respond directement depuis le SW, puis navigate /tracking
+  if (event.action && data.tracking_id && typeof data.periode_idx === 'number') {
+    const url = '/tracking?notif=responded'
+    event.waitUntil((async () => {
+      try {
+        const r = await fetch(`/api/dilemme/tracking/${data.tracking_id}/respond`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(data.csrf ? { 'X-CSRF-Token': data.csrf } : {}),
+            ...(data.token ? { Authorization: `Bearer ${data.token}` } : {}),
+          },
+          body: JSON.stringify({ periode_idx: data.periode_idx, choice: event.action }),
+        })
+        // confirmation toast (ne bloque pas si fail)
+        if (r.ok) {
+          self.registration.showNotification('Sylea — réponse enregistrée', {
+            body: 'Votre choix a été pris en compte. Merci !',
+            icon: '/sylea-logo.svg',
+            tag: 'sylea-response-ack',
+            silent: true,
+          })
         }
-      }
-      if (self.clients.openWindow) return self.clients.openWindow(url)
-    })
-  )
+      } catch (e) { /* swallow */ }
+      // Open / focus app
+      return openOrFocus(url)
+    })())
+    return
+  }
+
+  // Cas 2 : click sur le corps de la notif (pas d'action) -> juste open /tracking
+  const url = data.url || '/tracking'
+  event.waitUntil(openOrFocus(url))
 })
+
+async function openOrFocus(url) {
+  const list = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+  for (const client of list) {
+    if (client.url.includes(self.registration.scope) && 'focus' in client) {
+      try { client.navigate(url) } catch (e) { /* fail silently */ }
+      return client.focus()
+    }
+  }
+  if (self.clients.openWindow) return self.clients.openWindow(url)
+}

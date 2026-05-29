@@ -227,7 +227,10 @@ function TrackingCard({
 
   const [responding, setResponding] = useState<string | null>(null) // choice id being submitted
   const [respondError, setRespondError] = useState<string | null>(null)
-  const [showCancel, setShowCancel] = useState(false)
+  const [showAbandon, setShowAbandon] = useState(false)
+  const [showDelete, setShowDelete] = useState(false)
+  const [actionLoading, setActionLoading] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const handleRespond = async (choice: string) => {
     if (currentPendingIdx < 0) return
@@ -244,14 +247,34 @@ function TrackingCard({
     }
   }
 
-  const handleCancel = async (mode: 'zero' | 'partial') => {
+  // ABANDONNER : applique l'impact partiel (compute_recap des choix deja faits)
+  // et marque status='cancelled' (conserve dans l'historique)
+  const handleAbandon = async () => {
+    setActionLoading(true)
+    setActionError(null)
     try {
-      await api.trackingCancel(tr.id, mode)
+      await api.trackingCancel(tr.id, 'partial')
       onChanged()
-    } catch {
-      // ignore
+      setShowAbandon(false)
+    } catch (e: unknown) {
+      setActionError(e instanceof Error ? e.message : 'Erreur abandon')
     } finally {
-      setShowCancel(false)
+      setActionLoading(false)
+    }
+  }
+
+  // SUPPRIMER : retire de la DB completement, aucune trace, aucun impact
+  const handleDelete = async () => {
+    setActionLoading(true)
+    setActionError(null)
+    try {
+      await api.trackingDelete(tr.id)
+      onChanged()
+      setShowDelete(false)
+    } catch (e: unknown) {
+      setActionError(e instanceof Error ? e.message : 'Erreur suppression')
+    } finally {
+      setActionLoading(false)
     }
   }
 
@@ -460,28 +483,66 @@ function TrackingCard({
         </div>
       )}
 
-      {/* Actions secondaires */}
+      {/* Actions secondaires : 2 boutons distincts */}
       {(tr.status === 'tracking' || tr.status === 'awaiting_validation') && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '0.5rem' }}>
+          <button
+            type="button"
+            onClick={() => setShowAbandon(true)}
+            style={{
+              background: 'transparent',
+              border: '1px solid rgba(251,191,36,0.25)',
+              color: '#fbbf24',
+              fontSize: '0.75rem',
+              cursor: 'pointer',
+              padding: '0.35rem 0.75rem',
+              borderRadius: 'var(--radius-sm)',
+            }}
+          >
+            ◯ Abandonner
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowDelete(true)}
+            style={{
+              background: 'transparent',
+              border: '1px solid rgba(239,68,68,0.25)',
+              color: '#f87171',
+              fontSize: '0.75rem',
+              cursor: 'pointer',
+              padding: '0.35rem 0.75rem',
+              borderRadius: 'var(--radius-sm)',
+            }}
+          >
+            ✕ Supprimer
+          </button>
+        </div>
+      )}
+      {/* Cas particulier : tracking deja cancelled ou validated, on autorise
+          seulement la Suppression definitive de l'historique */}
+      {(tr.status === 'cancelled' || tr.status === 'validated') && (
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '0.5rem' }}>
           <button
             type="button"
-            onClick={() => setShowCancel(true)}
+            onClick={() => setShowDelete(true)}
             style={{
               background: 'transparent',
-              border: 'none',
-              color: 'var(--text-muted)',
-              fontSize: '0.75rem',
+              border: '1px solid rgba(239,68,68,0.2)',
+              color: '#f87171',
+              fontSize: '0.7rem',
               cursor: 'pointer',
-              padding: '0.25rem 0.5rem',
+              padding: '0.3rem 0.65rem',
+              borderRadius: 'var(--radius-sm)',
+              opacity: 0.7,
             }}
           >
-            Annuler ce suivi
+            ✕ Supprimer de l'historique
           </button>
         </div>
       )}
 
-      {/* Modal cancel */}
-      {showCancel && (
+      {/* Modal ABANDONNER : applique impact partiel */}
+      {showAbandon && (
         <div
           style={{
             position: 'fixed', inset: 0,
@@ -491,44 +552,131 @@ function TrackingCard({
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             padding: '1rem',
           }}
-          onClick={e => { if (e.target === e.currentTarget) setShowCancel(false) }}
+          onClick={e => { if (e.target === e.currentTarget) setShowAbandon(false) }}
         >
-          <div className="card" style={{ maxWidth: '440px', width: '100%', padding: '1.75rem' }}>
-            <h3 style={{ marginBottom: '0.75rem', color: 'var(--text-primary)' }}>
-              Annuler ce suivi ?
-            </h3>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginBottom: '1.25rem', lineHeight: 1.5 }}>
-              Choisissez si l'impact partiel déjà accumulé ({nbResponded} période{nbResponded > 1 ? 's' : ''} renseignée{nbResponded > 1 ? 's' : ''}) doit être appliqué ou non.
+          <div className="card" style={{ maxWidth: '460px', width: '100%', padding: '1.75rem', border: '1px solid rgba(251,191,36,0.35)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', marginBottom: '0.85rem' }}>
+              <div style={{
+                width: '34px', height: '34px',
+                background: 'rgba(251,191,36,0.18)',
+                border: '1px solid rgba(251,191,36,0.35)',
+                borderRadius: '50%',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: '#fbbf24', fontSize: '1.05rem',
+              }}>◯</div>
+              <h3 style={{ color: '#fbbf24', margin: 0 }}>Abandonner ce suivi&nbsp;?</h3>
+            </div>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginBottom: '1rem', lineHeight: 1.55 }}>
+              L'impact partiel basé sur vos <strong>{nbResponded}/{tr.nb_periodes}</strong> période{nbResponded > 1 ? 's' : ''} déjà renseignée{nbResponded > 1 ? 's' : ''} sera appliqué à votre objectif. Le suivi sera marqué comme abandonné dans votre historique.
             </p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            {nbResponded === 0 && (
+              <div style={{ background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.25)', borderRadius: 'var(--radius-md)', padding: '0.55rem 0.85rem', marginBottom: '1rem', color: '#fca5a5', fontSize: '0.82rem' }}>
+                ⚠ Aucune période renseignée. L'abandon n'appliquera aucun impact. Pour effacer ce dilemme, utilisez plutôt "Supprimer".
+              </div>
+            )}
+            {actionError && (
+              <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 'var(--radius-md)', padding: '0.55rem 0.85rem', marginBottom: '1rem', color: '#fca5a5', fontSize: '0.82rem' }}>
+                {actionError}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
               <button
-                className="btn btn-outline"
-                onClick={() => handleCancel('zero')}
+                type="button"
+                onClick={() => { setShowAbandon(false); setActionError(null) }}
+                disabled={actionLoading}
+                style={{
+                  flex: 1, padding: '0.6rem',
+                  background: 'transparent', border: '1px solid var(--border)',
+                  color: 'var(--text-muted)', borderRadius: 'var(--radius-md)',
+                  cursor: actionLoading ? 'wait' : 'pointer', fontSize: '0.85rem',
+                }}
               >
-                Annuler sans impact (zéro)
-              </button>
-              <button
-                className="btn btn-primary"
-                onClick={() => handleCancel('partial')}
-                disabled={nbResponded === 0}
-              >
-                Appliquer l'impact partiel
+                Retour
               </button>
               <button
                 type="button"
-                onClick={() => setShowCancel(false)}
+                onClick={handleAbandon}
+                disabled={actionLoading}
                 style={{
-                  marginTop: '0.5rem',
-                  padding: '0.5rem',
-                  background: 'transparent',
-                  border: '1px solid var(--border)',
-                  color: 'var(--text-muted)',
-                  borderRadius: 'var(--radius-md)',
-                  cursor: 'pointer',
-                  fontSize: '0.85rem',
+                  flex: 1, padding: '0.6rem',
+                  background: 'linear-gradient(135deg, #d97706, #f59e0b)',
+                  border: 'none', color: 'white', borderRadius: 'var(--radius-md)',
+                  cursor: actionLoading ? 'wait' : 'pointer', fontSize: '0.85rem', fontWeight: 600,
+                  opacity: actionLoading ? 0.6 : 1,
                 }}
               >
-                Fermer
+                {actionLoading ? 'En cours…' : 'Abandonner et appliquer'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal SUPPRIMER : delete complet */}
+      {showDelete && (
+        <div
+          style={{
+            position: 'fixed', inset: 0,
+            background: 'rgba(0,0,0,0.75)',
+            backdropFilter: 'blur(6px)',
+            zIndex: 4000,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '1rem',
+          }}
+          onClick={e => { if (e.target === e.currentTarget) setShowDelete(false) }}
+        >
+          <div className="card" style={{ maxWidth: '460px', width: '100%', padding: '1.75rem', border: '1px solid rgba(239,68,68,0.35)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', marginBottom: '0.85rem' }}>
+              <div style={{
+                width: '34px', height: '34px',
+                background: 'rgba(239,68,68,0.18)',
+                border: '1px solid rgba(239,68,68,0.35)',
+                borderRadius: '50%',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: '#f87171', fontSize: '1.1rem',
+              }}>✕</div>
+              <h3 style={{ color: '#f87171', margin: 0 }}>Supprimer ce dilemme&nbsp;?</h3>
+            </div>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', marginBottom: '1rem', lineHeight: 1.55 }}>
+              Le dilemme sera <strong>complètement effacé</strong> — aucune trace ne sera conservée dans votre historique. <strong>Aucun impact</strong> ne sera appliqué à votre objectif. Cette action est <strong>irréversible</strong>.
+            </p>
+            {tr.status === 'validated' && tr.impact_final_jours !== null && (
+              <div style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.25)', borderRadius: 'var(--radius-md)', padding: '0.55rem 0.85rem', marginBottom: '1rem', color: '#93c5fd', fontSize: '0.82rem' }}>
+                ℹ L'impact de {tr.impact_final_jours.toFixed(1)} j déjà appliqué à votre profil <strong>ne sera pas reversé</strong>. Seul l'enregistrement du dilemme disparaît.
+              </div>
+            )}
+            {actionError && (
+              <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', borderRadius: 'var(--radius-md)', padding: '0.55rem 0.85rem', marginBottom: '1rem', color: '#fca5a5', fontSize: '0.82rem' }}>
+                {actionError}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button
+                type="button"
+                onClick={() => { setShowDelete(false); setActionError(null) }}
+                disabled={actionLoading}
+                style={{
+                  flex: 1, padding: '0.6rem',
+                  background: 'transparent', border: '1px solid var(--border)',
+                  color: 'var(--text-muted)', borderRadius: 'var(--radius-md)',
+                  cursor: actionLoading ? 'wait' : 'pointer', fontSize: '0.85rem',
+                }}
+              >
+                Retour
+              </button>
+              <button
+                type="button"
+                onClick={handleDelete}
+                disabled={actionLoading}
+                style={{
+                  flex: 1, padding: '0.6rem',
+                  background: 'linear-gradient(135deg, #dc2626, #ef4444)',
+                  border: 'none', color: 'white', borderRadius: 'var(--radius-md)',
+                  cursor: actionLoading ? 'wait' : 'pointer', fontSize: '0.85rem', fontWeight: 600,
+                  opacity: actionLoading ? 0.6 : 1,
+                }}
+              >
+                {actionLoading ? 'Suppression…' : 'Supprimer définitivement'}
               </button>
             </div>
           </div>

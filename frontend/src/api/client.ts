@@ -315,6 +315,7 @@ export const api = {
     request(`/dilemme/tracking/${id}/validate`, { method: 'POST' }),
 
   // Annuler (zero = aucun impact, partial = applique l'impact deja accumule)
+  // = "Abandonner" cote UI : conserve dans l'historique avec status='cancelled'
   trackingCancel: (id: string, mode: 'zero' | 'partial'): Promise<{
     ok: boolean; mode: string; impact_jours_applique: number; delta_probabilite: number;
   }> =>
@@ -322,6 +323,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ mode }),
     }),
+
+  // Supprimer = "Supprimer" cote UI : retire completement de la DB, aucune
+  // trace dans l'historique. Aucun impact applique. Pour les dilemmes
+  // crees par erreur ou regrettes.
+  trackingDelete: (id: string): Promise<{ ok: boolean; deleted: boolean; tracking_id: string }> =>
+    request(`/dilemme/tracking/${id}`, { method: 'DELETE' }),
 
   // ── Historique ────────────────────────────────────────────────────────────
 

@@ -505,3 +505,116 @@ def test_respond_with_bypass_env_var_succeeds(client_with_profil: TestClient, mo
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["ok"] is True
+
+
+# ── Tests : DELETE /:id (suppression definitive) ────────────────────────────
+
+def test_delete_tracking_removes_from_db(client_with_profil: TestClient):
+    """DELETE retire completement le tracking de la DB (pas de trace)."""
+    create_resp = client_with_profil.post(
+        "/api/dilemme/tracking/create",
+        json=_create_tracking_payload(impact_jours=30),
+    )
+    assert create_resp.status_code == 200
+    tracking_id = create_resp.json()["tracking"]["id"]
+
+    # Verifier qu'il est listable avant
+    listing = client_with_profil.get("/api/dilemme/tracking")
+    assert any(t["id"] == tracking_id for t in listing.json()["items"])
+
+    # Delete
+    del_resp = client_with_profil.delete(f"/api/dilemme/tracking/{tracking_id}")
+    assert del_resp.status_code == 200, del_resp.text
+    assert del_resp.json()["ok"] is True
+    assert del_resp.json()["deleted"] is True
+
+    # Verifier qu'il n'est plus listable
+    listing2 = client_with_profil.get("/api/dilemme/tracking")
+    assert not any(t["id"] == tracking_id for t in listing2.json()["items"])
+
+
+def test_delete_unknown_tracking_returns_404(client_with_profil: TestClient):
+    resp = client_with_profil.delete("/api/dilemme/tracking/does-not-exist")
+    assert resp.status_code == 404
+
+
+def test_delete_does_not_apply_impact_on_profil(client_with_profil: TestClient):
+    """DELETE ne touche jamais au profil ni aux sous-objectifs."""
+    # Snapshot profil avant
+    profil_before = client_with_profil.get("/api/profil").json()
+    prob_before = profil_before["probabilite_actuelle"]
+    tg_before = profil_before["temps_gagne_jours"]
+
+    create_resp = client_with_profil.post(
+        "/api/dilemme/tracking/create",
+        json=_create_tracking_payload(impact_jours=30),
+    )
+    tracking_id = create_resp.json()["tracking"]["id"]
+
+    # Repondre a la periode (= aurait impact si on validait)
+    client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/respond",
+        json={"periode_idx": 0, "choice": "0"},
+    )
+
+    # Delete sans valider
+    del_resp = client_with_profil.delete(f"/api/dilemme/tracking/{tracking_id}")
+    assert del_resp.status_code == 200
+
+    # Profil inchange
+    profil_after = client_with_profil.get("/api/profil").json()
+    assert profil_after["probabilite_actuelle"] == prob_before
+    assert profil_after["temps_gagne_jours"] == tg_before
+
+
+def test_delete_validated_tracking_also_removes(client_with_profil: TestClient):
+    """On peut delete meme un tracking deja valide (= retire de l'historique).
+    L'impact deja applique au profil NE sera PAS reverse par delete."""
+    create_resp = client_with_profil.post(
+        "/api/dilemme/tracking/create",
+        json=_create_tracking_payload(impact_jours=7),
+    )
+    tracking_id = create_resp.json()["tracking"]["id"]
+    client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/respond",
+        json={"periode_idx": 0, "choice": "0"},
+    )
+    client_with_profil.post(f"/api/dilemme/tracking/{tracking_id}/validate")
+
+    # Delete apres validate
+    del_resp = client_with_profil.delete(f"/api/dilemme/tracking/{tracking_id}")
+    assert del_resp.status_code == 200
+
+    # Plus dans la liste
+    listing = client_with_profil.get("/api/dilemme/tracking")
+    assert not any(t["id"] == tracking_id for t in listing.json()["items"])
+
+
+def test_delete_cancelled_partial_keeps_impact(client_with_profil: TestClient):
+    """Si on cancel('partial') puis on delete : l'impact partiel est deja
+    applique au profil, le delete ne le reverse pas (= verifie la separation
+    delete vs cancel)."""
+    profil_before = client_with_profil.get("/api/profil").json()
+    create_resp = client_with_profil.post(
+        "/api/dilemme/tracking/create",
+        json=_create_tracking_payload(impact_jours=90),  # 3 periodes
+    )
+    tracking_id = create_resp.json()["tracking"]["id"]
+    # Repondre periode 0 (option A, +150j * 1/3 = +50j attendu si partial)
+    client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/respond",
+        json={"periode_idx": 0, "choice": "0"},
+    )
+    # Cancel partial : impact applique
+    cancel_resp = client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/cancel",
+        json={"mode": "partial"},
+    )
+    assert cancel_resp.status_code == 200
+    profil_after_cancel = client_with_profil.get("/api/profil").json()
+    # Delete : ne reverse pas l'impact deja applique
+    del_resp = client_with_profil.delete(f"/api/dilemme/tracking/{tracking_id}")
+    assert del_resp.status_code == 200
+    profil_after_delete = client_with_profil.get("/api/profil").json()
+    # L'impact applique pendant cancel reste applique
+    assert profil_after_delete["temps_gagne_jours"] == profil_after_cancel["temps_gagne_jours"]

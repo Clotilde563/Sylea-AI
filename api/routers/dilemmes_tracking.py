@@ -367,3 +367,34 @@ async def cancel_tracking(
             raise HTTPException(status_code=400, detail=err)
         raise HTTPException(status_code=500, detail=err)
     return result
+
+
+@router.delete("/{tracking_id}")
+async def delete_tracking(
+    tracking_id: str,
+    db: DatabaseManager = Depends(get_db),
+    profil_repo: ProfilRepository = Depends(get_profil_repo),
+    user_id: str | None = Depends(get_optional_user),
+):
+    """Supprime DEFINITIVEMENT un tracking de la DB.
+
+    Difference avec cancel :
+      - cancel : conserve dans l'historique avec status='cancelled'
+      - delete : DELETE de la row (aucune trace, comme s'il n'avait jamais
+        existe). Pour l'utilisateur qui veut effacer un dilemme creer par
+        erreur ou qu'il regrette d'avoir lance.
+
+    Aucun impact applique. Si l'user veut conserver l'impact partiel, il doit
+    appeler POST /cancel?mode=partial AVANT de delete (ou simplement ne pas
+    delete et garder le statut 'cancelled' en historique).
+    """
+    profil = _require_profil(profil_repo, user_id)
+    dt.ensure_tracking_tables(db)
+
+    result = await dt.delete_tracking_async(tracking_id, profil.id)
+    if not result.get("ok"):
+        err = result.get("error", "unknown")
+        if err == "tracking_not_found":
+            raise HTTPException(status_code=404, detail=err)
+        raise HTTPException(status_code=500, detail=err)
+    return result
