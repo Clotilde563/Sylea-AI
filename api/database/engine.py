@@ -83,12 +83,29 @@ def _build_engine(url: str, is_read_replica: bool = False) -> AsyncEngine:
              (verifie que la connection est vivante avant chaque check-out).
     """
     if url.startswith('sqlite'):
-        return create_async_engine(
+        engine = create_async_engine(
             url,
             poolclass=NullPool,  # sqlite ne supporte pas le pool en async
             echo=False,
             connect_args={'check_same_thread': False, 'timeout': 10.0},
         )
+        # FIX P2 (2026-06) : SQLite desactive les FK par defaut a CHAQUE
+        # connexion. Le PRAGMA du chemin sync (database.py) ne se propage PAS
+        # aux connexions aiosqlite des sessions API → les contraintes FK
+        # etaient silencieusement OFF cote async. On force le PRAGMA sur
+        # chaque nouvelle connexion DBAPI via l'event "connect".
+        from sqlalchemy import event as _sa_event
+
+        @_sa_event.listens_for(engine.sync_engine, "connect")
+        def _set_sqlite_pragma(dbapi_conn, _rec):  # pragma: no cover (infra)
+            try:
+                cur = dbapi_conn.cursor()
+                cur.execute("PRAGMA foreign_keys=ON")
+                cur.close()
+            except Exception:
+                pass  # best-effort : ne pas casser la connexion sur un PRAGMA
+
+        return engine
     # PostgreSQL
     return create_async_engine(
         url,

@@ -2,6 +2,10 @@ anthropic>=0.40.0
 rich>=13.7.0
 python-dotenv>=1.0.0
 pydantic>=2.0.0
+# email-validator : requis par pydantic.EmailStr (api/auth/models.RegisterIn).
+# Avant P3, EmailStr etait importe mais inutilise + absent des requirements
+# → crash potentiel sur fresh install des qu'un champ EmailStr est valide.
+email-validator>=2.2.0
 # pytest >=9.0.3 corrige CVE-2025-71176 (cache poisoning via metadata)
 pytest>=9.0.3
 pytest-cov>=4.1.0

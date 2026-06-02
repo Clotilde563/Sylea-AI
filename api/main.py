@@ -115,16 +115,29 @@ if _scheduler_enabled in ("1", "true", "yes", "on"):
     from api.scheduler import scheduler as cron_scheduler
     cron_scheduler.start()
     print("[main] Scheduler cron ACTIVE (SYLEA_SCHEDULER_ENABLED=true)")
-    # Le scheduler dilemmes tracking est aligne sur la meme env var pour
-    # eviter d'avoir 2 flags qui divergent. Cout : zero appel LLM.
+else:
+    print("[main] Scheduler cron INACTIF (set SYLEA_SCHEDULER_ENABLED=true pour activer)")
+
+# Scheduler dilemmes tracking — decouple du cron (depuis 2026-06-01).
+# Avant : meme flag que SYLEA_SCHEDULER_ENABLED → si dev avait l'agent OFF
+# pour pas payer Anthropic, il perdait AUSSI les notifs de tracking, alors
+# que le tracking scheduler ne fait que des UPDATE DB + push WS (cout zero
+# LLM). Resultat : creer un tracking impact=1jour ne declenchait JAMAIS
+# de notif en dev → user voyait le countdown decroitre sans alerte.
+# Fix : tracking scheduler ON par defaut (gratuit), opt-out via
+# SYLEA_TRACKING_SCHEDULER_ENABLED=false.
+_tracking_sched_enabled = os.environ.get(
+    "SYLEA_TRACKING_SCHEDULER_ENABLED", "true"
+).strip().lower()
+if _tracking_sched_enabled in ("1", "true", "yes", "on"):
     try:
         from api.dilemmes_tracking_scheduler import scheduler as tracking_scheduler
         tracking_scheduler.start()
-        print("[main] Scheduler dilemmes tracking ACTIVE")
+        print("[main] Scheduler dilemmes tracking ACTIVE (cout LLM = 0)")
     except Exception as e:
         print(f"[main] Scheduler dilemmes tracking erreur: {e}")
 else:
-    print("[main] Scheduler cron INACTIF (set SYLEA_SCHEDULER_ENABLED=true pour activer)")
+    print("[main] Scheduler dilemmes tracking INACTIF (SYLEA_TRACKING_SCHEDULER_ENABLED=false)")
 
 
 # ── Application ────────────────────────────────────────────────────────────────
@@ -221,10 +234,17 @@ app.add_middleware(
 from api.security_headers import SecurityHeadersMiddleware
 from api.csrf_middleware import CSRFMiddleware
 from api.ip_rate_limiter import IPRateLimitMiddleware
+from api.presence_middleware import PresenceMiddleware
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(IPRateLimitMiddleware)
+# Presence/engagement tracking — touche users.last_seen_at + last_engaged_at
+# en debounced fire-and-forget. N'ajoute jamais de latence a la reponse user.
+# Fix : avant ce middleware, le seul moyen de detecter qu'un user etait actif
+# etait via chat ou decision, ce qui causait le bug "Yo Lucas 7 jours sans
+# nouvelles" alors que l'user etait connecte (cf api/presence_middleware.py).
+app.add_middleware(PresenceMiddleware)
 # RequestContextMiddleware en DERNIER ajout = exécuté EN PREMIER (LIFO).
 # Génère le request_id avant tout le reste pour qu'il soit dans tous les logs.
 app.add_middleware(RequestContextMiddleware)

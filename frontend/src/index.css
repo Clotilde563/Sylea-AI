@@ -879,3 +879,12 @@ input[type="range"]::-webkit-slider-thumb:hover {
   border-radius: var(--radius-md);
   animation: skeleton-pulse 1.5s ease-in-out infinite;
 }
+
+/* Table rendue par l'agent (contenu sanitize via DOMPurify, cf utils/sanitize.ts).
+   Le style etait avant injecte en <style> inline dans le HTML agent — retire
+   pour compat CSP (script/style-src) + securite. */
+.sylea-agent-table table { width: 100%; border-collapse: collapse; font-size: 0.75rem; color: #e2e8f0; }
+.sylea-agent-table th { padding: 0.5rem 0.7rem; text-align: left; background: rgba(139,92,246,0.12); color: #a78bfa; font-weight: 600; border-bottom: 1px solid rgba(139,92,246,0.2); }
+.sylea-agent-table td { padding: 0.4rem 0.7rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.sylea-agent-table tr:hover td { background: rgba(139,92,246,0.04); }
+.sylea-agent-table strong { color: #c4b5fd; }

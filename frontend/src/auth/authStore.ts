@@ -255,6 +255,12 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: () => {
+    // Revocation server-side (best-effort) : invalide tous les tokens cote
+    // backend AVANT de purger le local. Si l'appel echoue (reseau), on purge
+    // quand meme le local — l'important cote UX est de deconnecter ici.
+    try {
+      void api.authLogout().catch(() => { /* best-effort */ })
+    } catch { /* api indispo */ }
     localStorage.removeItem(AUTH_TOKEN_KEY)
     localStorage.removeItem(AUTH_USER_KEY)
     // Clear profil from main store to prevent flash of old data on next login

@@ -61,13 +61,17 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
-# Endpoints sensibles : rate limit plus strict (anti credential stuffing)
+# Endpoints sensibles : rate limit plus strict (anti credential stuffing).
+# FIX P0 2026-06 : les anciens prefixes /signup, /forgot-password,
+# /reset-password, /verify-code ne correspondaient a AUCUN endpoint reel
+# (les vrais sont /register et /verify) → l'OTP brute-force et la creation
+# de compte tombaient dans le bucket global laxiste (60/min). On aligne sur
+# les routes reellement exposees par api/auth/router.py + les echanges OAuth.
 _STRICT_ENDPOINTS_PREFIX = (
     "/api/auth/login",
-    "/api/auth/signup",
-    "/api/auth/forgot-password",
-    "/api/auth/reset-password",
-    "/api/auth/verify-code",
+    "/api/auth/register",   # creation de compte (anti-spam)
+    "/api/auth/verify",     # validation OTP (anti-bruteforce code) — CRITIQUE
+    "/api/auth/oauth",      # echanges OAuth google/github/apple (POST token)
 )
 
 # Endpoints exclus (health checks, websocket handshake — limités ailleurs)

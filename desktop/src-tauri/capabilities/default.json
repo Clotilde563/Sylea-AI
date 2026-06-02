@@ -31,8 +31,6 @@
     "fs:allow-read-dir",
     "fs:allow-remove",
     "fs:allow-create",
-    "fs:read-all",
-    "fs:write-all",
     "dialog:default",
     "dialog:allow-save",
     "dialog:allow-open",

@@ -5,6 +5,7 @@
 import { useEffect, useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
+import { formatImpactJours } from '../utils/duration'
 import type { TrackingItem, TrackingStatus } from '../types'
 
 type StatusFilter = TrackingStatus | 'all'
@@ -714,7 +715,7 @@ function TrackingCard({
             IMPACT FINAL
           </span>
           <span style={{ fontSize: '1.1rem', fontWeight: 800, color: '#4ade80', fontFamily: 'var(--font-mono, monospace)' }}>
-            {tr.impact_final_jours >= 0 ? '+' : ''}{tr.impact_final_jours.toFixed(1)} j
+            {formatImpactJours(tr.impact_final_jours)}
           </span>
           {tr.impact_final_probabilite !== null && (
             <span style={{ fontSize: '0.85rem', color: '#86efac' }}>
@@ -811,7 +812,7 @@ function TrackingCard({
               marginTop: '0.85rem',
               color: '#93c5fd', fontSize: '0.78rem',
             }}>
-              ℹ L'impact de <strong>{tr.impact_final_jours.toFixed(1)} j</strong> déjà appliqué <strong>ne sera pas reversé</strong>. Seul l'enregistrement disparaît.
+              ℹ L'impact de <strong>{formatImpactJours(tr.impact_final_jours)}</strong> déjà appliqué <strong>ne sera pas reversé</strong>. Seul l'enregistrement disparaît.
             </div>
           )}
         </Modal>

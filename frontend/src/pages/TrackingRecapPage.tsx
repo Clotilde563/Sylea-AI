@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import { useStore } from '../store/useStore'
+import { formatImpactJours } from '../utils/duration'
 import type { TrackingRecap, TrackingItem } from '../types'
 
 export function TrackingRecapPage() {
@@ -129,7 +130,7 @@ export function TrackingRecapPage() {
                   Impact en jours
                 </p>
                 <p style={{ fontSize: '1.4rem', fontWeight: 700, color: validatedResult.impact >= 0 ? '#4ade80' : '#fca5a5' }}>
-                  {validatedResult.impact >= 0 ? '+' : ''}{validatedResult.impact.toFixed(1)} j
+                  {formatImpactJours(validatedResult.impact)}
                 </p>
               </div>
               <div style={{
@@ -269,7 +270,7 @@ export function TrackingRecapPage() {
                     color: isPositive ? '#4ade80' : isNegative ? '#fca5a5' : 'var(--text-muted)',
                     fontFamily: 'var(--font-mono)',
                   }}>
-                    {isPositive ? '+' : ''}{b.impact_pondere.toFixed(1)} j
+                    {formatImpactJours(b.impact_pondere)}
                   </div>
                 </div>
               )
@@ -300,7 +301,7 @@ export function TrackingRecapPage() {
                 color: recap.recap.impact_total_jours >= 0 ? '#4ade80' : '#fca5a5',
                 lineHeight: 1,
               }}>
-                {recap.recap.impact_total_jours >= 0 ? '+' : ''}{recap.recap.impact_total_jours.toFixed(1)} j
+                {formatImpactJours(recap.recap.impact_total_jours)}
               </p>
               <p style={{
                 fontSize: '0.8rem',

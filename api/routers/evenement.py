@@ -464,6 +464,12 @@ async def confirmer_evenement(
     impact_jours = data.impact_jours
     if impact_jours == 0.0 and data.impact_probabilite != 0.0 and profil.temps_initial_jours > 0:
         impact_jours = round(data.impact_probabilite * profil.temps_initial_jours / 100, 1)
+    # ANTI-CHEAT (P0 2026-06) : impact_jours vient du client (ConfirmerEvenementIn).
+    # Clamp a +/- temps_initial pour bloquer un POST {"impact_jours": 99999999}.
+    # Defense complementaire au Field(ge/le) du schema. (Fix complet = Phase 1.)
+    if profil.temps_initial_jours and profil.temps_initial_jours > 0:
+        _cap = float(profil.temps_initial_jours)
+        impact_jours = max(-_cap, min(_cap, impact_jours))
     temps_gagne_apres = temps_gagne_avant + impact_jours
     temps_gagne_apres = max(0, min(profil.temps_initial_jours, temps_gagne_apres))
 

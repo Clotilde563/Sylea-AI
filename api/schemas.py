@@ -138,8 +138,8 @@ class AnalyseOptionOut(BaseModel):
     description: str
     pros: List[str]
     cons: List[str]
-    impact_probabilite: float = 0.0  # kept for backward compat
-    impact_jours: float = 0.0
+    impact_probabilite: float = Field(0.0, ge=-100.0, le=100.0)  # kept for backward compat
+    impact_jours: float = Field(0.0, ge=-36525.0, le=36525.0)  # borne anti-cheat (max 100 ans) — rejet 422 si hors borne, puis clamp server-side vs temps_initial
     resume: str
 
 
@@ -280,16 +280,16 @@ class EvenementIn(BaseModel):
 
 class AnalyseEvenementOut(BaseModel):
     resume: str
-    impact_probabilite: float = 0.0  # kept for backward compat
-    impact_jours: float = 0.0
+    impact_probabilite: float = Field(0.0, ge=-100.0, le=100.0)  # kept for backward compat
+    impact_jours: float = Field(0.0, ge=-36525.0, le=36525.0)  # borne anti-cheat (max 100 ans) — rejet 422 si hors borne, puis clamp server-side vs temps_initial
     explication: str
     conseil: str
 
 
 class ConfirmerEvenementIn(BaseModel):
     description: str
-    impact_probabilite: float = 0.0  # kept for backward compat
-    impact_jours: float = 0.0
+    impact_probabilite: float = Field(0.0, ge=-100.0, le=100.0)  # kept for backward compat
+    impact_jours: float = Field(0.0, ge=-36525.0, le=36525.0)  # borne anti-cheat (max 100 ans) — rejet 422 si hors borne, puis clamp server-side vs temps_initial
     resume: str
     contexte_appareil: Optional[DeviceContextIn] = None
 

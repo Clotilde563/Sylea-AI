@@ -74,6 +74,13 @@ clawhub-skill-upload/
 /test_*.txt
 /test_*.jpg
 /skills_check.json
+# Debug dumps — peuvent contenir des PII utilisateur (RGPD). NE JAMAIS commit.
+/debug_*.txt
+/debug_*.json
+/debug_*.log
+
+# Assets marketing (carrousels TikTok, visuels) — binaires, hors repo de code.
+/.tiktok-assets/
 
 # Frontend test fixtures
 frontend/public/test_*.jpg

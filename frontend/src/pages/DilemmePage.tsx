@@ -871,15 +871,15 @@ export function DilemmePage() {
               textAlign: 'left',
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: '#93c5fd', marginBottom: '0.35rem' }}>
-                <span>Dur\u00E9e du suivi&nbsp;:</span>
-                <strong>{dureeJours} jours</strong>
+                <span>{'Dur\u00E9e du suivi\u00A0:'}</span>
+                <strong>{dureeJours} {dureeJours <= 1 ? 'jour' : 'jours'}</strong>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: '#93c5fd', marginBottom: '0.35rem' }}>
-                <span>Nombre de p\u00E9riodes&nbsp;:</span>
+                <span>{'Nombre de p\u00E9riodes\u00A0:'}</span>
                 <strong>{nbPeriodes}</strong>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: '#93c5fd' }}>
-                <span>Premi\u00E8re notification&nbsp;:</span>
+                <span>{'Premi\u00E8re notification\u00A0:'}</span>
                 <strong>{nextNotif}</strong>
               </div>
             </div>

@@ -730,7 +730,14 @@ async def validate_tracking_async(
         return {"ok": False, "error": f"status_invalid:{tracking['status']}"}
 
     recap = compute_recap(tracking)
-    impact_jours = float(recap["impact_total_jours"])
+    impact_jours = float(recap["impact_total_jours"])  # valeur theorique (recap)
+
+    # FIX P2 / C1 (2026-06) : on capture temps_gagne AVANT/APRES pour calculer
+    # l'impact REELLEMENT applique. Avant, on renvoyait la valeur du recap
+    # (non clampee), alors que l'apply clamp a [0, temps_initial] + plafonne
+    # les SO. Resultat : un user proche d'un bord voyait "+50j applique" mais
+    # la DB ne bougeait que de +6j. On renvoie desormais la valeur reelle.
+    tg_before = float(getattr(profil, "temps_gagne_jours", 0) or 0)
 
     so_impactes: list[dict] = []
     try:
@@ -744,13 +751,22 @@ async def validate_tracking_async(
 
     # Profil : temps_gagne + probabilite_actuelle
     prob_actuelle_before = float(getattr(profil, "probabilite_actuelle", 0))
-    delta_prob = _compute_delta_probabilite(prob_actuelle_before, impact_jours)
     try:
         await _update_profil_temps_async(profil_repo, profil, impact_jours)
     except Exception as e:
         logger.warning(f"update profil (validate) failed: {e}")
 
-    # Marque le tracking comme valide
+    # Impact REELLEMENT reflete sur temps_gagne (post-clamp + alignement SO).
+    # Peut differer du recap si le profil est proche d'un bord (99.9%) ou si
+    # les SO saturent. On l'expose en transparence SANS changer le contrat
+    # historique (impact_jours_applique reste la valeur recap pour compat).
+    tg_after = float(getattr(profil, "temps_gagne_jours", 0) or 0)
+    impact_reel = round(tg_after - tg_before, 4)
+    # Divergence significative recap vs reel → le front peut alerter l'user.
+    divergence = abs(impact_jours - impact_reel) > 0.5
+    delta_prob = _compute_delta_probabilite(prob_actuelle_before, impact_jours)
+
+    # Marque le tracking comme valide.
     factory = get_session_factory()
     now_iso = datetime.now(timezone.utc).isoformat()
     async with factory() as session:
@@ -773,7 +789,9 @@ async def validate_tracking_async(
 
     return {
         "ok": True,
-        "impact_jours_applique": impact_jours,
+        "impact_jours_applique": impact_jours,       # recap (contrat historique)
+        "impact_reel_temps_gagne": impact_reel,      # delta temps_gagne effectif
+        "impact_clampe": divergence,                 # True si recap != reel (>0.5j)
         "delta_probabilite": delta_prob,
         "so_impactes": so_impactes,
         "recap": recap,

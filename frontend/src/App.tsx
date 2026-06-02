@@ -17,6 +17,7 @@ import { HistoriquePage }   from './pages/HistoriquePage'
 import { ServiceChatbot }   from './components/ServiceChatbot'
 import { DesktopStatusBanner } from './components/DesktopStatusBanner'
 import { TrackingNotifBanner } from './components/TrackingNotifBanner'
+import { RouteErrorBoundary } from './components/RouteErrorBoundary'
 import ParametresPage       from './pages/ParametresPage'
 import AgentsPage           from './pages/AgentsPage'
 import LoginPage            from './pages/LoginPage'
@@ -86,6 +87,7 @@ function AppContent() {
                 {/* Banner global : alerte si periodes de tracking dues OU recap a valider */}
                 <TrackingNotifBanner />
                 <main style={{ flex: 1 }}>
+                  <RouteErrorBoundary>
                   <Routes>
                     <Route path="/"             element={<DashboardPage />} />
                     <Route path="/profil"       element={<ProfilWizardPage />} />
@@ -113,6 +115,7 @@ function AppContent() {
                     <Route path="/api-keys"       element={<Navigate to="/integrations?tab=tokens" replace />} />
                     <Route path="*"             element={<Navigate to="/" replace />} />
                   </Routes>
+                  </RouteErrorBoundary>
                 </main>
                 <ServiceChatbot visible={chatbotOpen} onClose={() => setChatbotOpen(false)} />
 

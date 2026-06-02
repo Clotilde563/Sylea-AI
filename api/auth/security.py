@@ -3,6 +3,7 @@
 import os
 import secrets
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -102,18 +103,41 @@ def verify_password(plain: str, hashed: str) -> bool:
 # ── JWT ───────────────────────────────────────────────────────────────────────
 
 def create_access_token(user_id: str, expires_delta: timedelta | None = None) -> str:
-    """Create a JWT access token for the given user_id."""
-    expire = datetime.now(timezone.utc) + (
-        expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
-    payload = {"sub": user_id, "exp": expire}
+    """Create a JWT access token for the given user_id.
+
+    Le claim `iat` (issued-at) est ajoute (P1 2026-06) pour permettre la
+    REVOCATION : un /logout pose users.tokens_invalidated_before = now, et
+    tout token dont iat < tokens_invalidated_before est rejete a l'auth.
+    `jti` (UUID unique) permet une revocation par-token (denylist) si besoin.
+    """
+    now = datetime.now(timezone.utc)
+    expire = now + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    payload = {
+        "sub": user_id,
+        "exp": expire,
+        "iat": now,
+        "jti": uuid.uuid4().hex,
+    }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def decode_token(token: str) -> str | None:
-    """Decode a JWT token and return the user_id, or None if invalid."""
+    """Decode a JWT token and return the user_id (sub), or None if invalid."""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload.get("sub")
+    except JWTError:
+        return None
+
+
+def decode_token_payload(token: str) -> dict | None:
+    """Decode et retourne le payload complet (sub, iat, exp, jti) ou None.
+
+    Utilise par get_optional_user pour verifier la revocation (iat vs
+    tokens_invalidated_before). Separe de decode_token pour ne pas casser
+    les ~appelants existants qui attendent juste le sub.
+    """
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
         return None

@@ -57,14 +57,16 @@ export function getAuthHeaders(method?: string): Record<string, string> {
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
   }
-  // Inject X-CSRF-Token sur les méthodes mutantes. Si le cookie n'est pas
-  // encore posé (1er chargement avant le 1er GET), le header sera vide et
-  // le backend retournera 403 — corrigé par un GET préalable (cf. ensureCsrfCookie).
-  if (method && UNSAFE_METHODS.has(method.toUpperCase())) {
-    const csrf = getCsrfToken()
-    if (csrf) {
-      headers[CSRF_HEADER_NAME] = csrf
-    }
+  // FIX P1 (2026-06) : on attache le X-CSRF-Token DES QU'un cookie existe,
+  // quelle que soit la methode. Avant, ~19 fetch hand-rolled appelaient
+  // getAuthHeaders() SANS method -> aucun CSRF -> 403 (ou bypass si le backend
+  // skippait). Le backend ne VALIDE le token que sur POST/PUT/PATCH/DELETE
+  // (cf _UNSAFE_METHODS), donc l'envoyer sur un GET est inoffensif. `method`
+  // reste accepte pour compat mais n'est plus la condition.
+  void method  // conserve la signature (compat appelants existants)
+  const csrf = getCsrfToken()
+  if (csrf) {
+    headers[CSRF_HEADER_NAME] = csrf
   }
   return headers
 }
@@ -552,6 +554,11 @@ export const api = {
 
   authMe: (): Promise<{ id: string; email: string; provider: string }> =>
     request('/auth/me'),
+
+  // Logout server-side : revoque tous les tokens (tokens_invalidated_before).
+  // Best-effort — le client purge son localStorage quoi qu'il arrive.
+  authLogout: (): Promise<{ ok: boolean; detail: string }> =>
+    request('/auth/logout', { method: 'POST' }),
 
   // Google OAuth
   authGoogleUrl: (redirectUri?: string, state: string = 'login'): Promise<{ url: string }> => {

@@ -1234,7 +1234,19 @@ async def generate_proactive_message(
 
     # Check last PROACTIVE message time / USER message / decision / account+profile creation.
     # Migration PG (2026-05-13) : SELECT via SQLAlchemy text() async — compat SQLite + PG.
+    #
+    # Architecture des signaux d'activite (cf api/presence_middleware.py) :
+    #   - last_seen_at      : PRESENCE (tab ouvert) — touche par tous les GET auth
+    #   - last_engaged_at   : ACTION (POST/PUT/DEL) — fire si user fait qqch
+    #   - last_user_msg     : CONVERSATION — user parle au companion
+    #   - last_decision     : DECISION METIER — user a confirme un dilemme
+    #   - account/profil_at : statique, juste fallback "ne pas spammer comptes neufs"
+    #
+    # Priorite : last_seen_at est le SIGNAL #1 pour "le user est actif". Les
+    # autres sont des fallbacks (en cas de NULL pour comptes pre-migration).
     last_proactive = None
+    last_seen_at = None       # NEW (2026-05-31) — fix bug "Yo Lucas 7 jours"
+    last_engaged_at = None    # NEW (2026-05-31) — engagement, ortho a presence
     last_user_msg = None
     last_decision = None
     account_created = None
@@ -1278,6 +1290,23 @@ async def generate_proactive_message(
             _row = _r.first()
             last_decision = (_row[0],) if _row else None
 
+            # NEW : presence + engagement directement depuis users.
+            # Si la colonne n'existe pas (DB pre-migration), on swallow le KO.
+            try:
+                _r = await _session.execute(
+                    _sa_text(
+                        "SELECT last_seen_at, last_engaged_at FROM users "
+                        "WHERE id = :uid LIMIT 1"
+                    ),
+                    {"uid": user_id},
+                )
+                _row = _r.first()
+                if _row:
+                    last_seen_at = (_row[0],) if _row[0] else None
+                    last_engaged_at = (_row[1],) if _row[1] else None
+            except Exception:
+                pass  # Colonne manquante (DB pre-migration) — fallback signals
+
             _r = await _session.execute(
                 _sa_text("SELECT created_at FROM users WHERE id = :uid LIMIT 1"),
                 {"uid": user_id},
@@ -1319,41 +1348,72 @@ async def generate_proactive_message(
     if last_dt:
         hours_since_proactive = (now - last_dt).total_seconds() / 3600
 
-    # Calculate hours since last user activity
-    # On collecte tous les candidats (msg, decision, account, profil) et on prend
-    # le plus recent. Le fallback compte/profil garantit qu'un compte neuf n'est
-    # pas marque "absent depuis 41 jours" alors qu'il vient d'etre cree.
+    # Calculate hours since last user activity.
+    # Priorite : last_seen_at (presence reelle via middleware) > last_engaged_at
+    # (action) > last_user_msg (conversation) > last_decision (metier) > fallback
+    # account/profil_created (statiques, evitent "absent depuis 41 jours" sur
+    # un compte qui vient d'etre cree).
+    #
+    # CRITIQUE (fix bug 2026-05-31) : last_seen_at est touche par le presence
+    # middleware sur CHAQUE requete auth, y compris GET. Donc si l'user vient
+    # d'ouvrir le dashboard (ce qui declenche cet endpoint /agent/proactive
+    # via le polling frontend), il aura presque toujours un last_seen_at
+    # recent → plus jamais de "Yo Lucas 7 jours sans nouvelles" mensonger.
     hours_since_user = 999
-    for check in [last_user_msg, last_decision, account_created, profil_created]:
+    for check in [
+        last_seen_at,       # PRIMAIRE — presence app (debounce 5min)
+        last_engaged_at,    # SECONDAIRE — action mutative
+        last_user_msg,      # CONVERSATION — chat companion
+        last_decision,      # METIER — dilemme confirme
+        account_created,    # FALLBACK statique
+        profil_created,     # FALLBACK statique
+    ]:
         dt = _parse_iso(check[0] if check else None)
         if dt:
             h = (now - dt).total_seconds() / 3600
             hours_since_user = min(hours_since_user, h)
 
-    # RULES (FIX 2026-05-16 : eviter spam quand user absent) :
-    # 1. Minimum 72h entre proactifs pour routine check-ins.
-    # 2. Exception "absent" : si user inactif 72h+, on envoie un rappel — MAIS
-    #    avec un cooldown plancher de 24h pour eviter le spam si le user
-    #    revient sur la page sans interagir (chaque visite ne doit PAS regenerer
-    #    un message).
-    # 3. Compte neuf (<24h) : pas de proactive du tout.
-    is_brand_new = hours_since_user < 24
-    is_urgent = (not is_brand_new) and hours_since_user >= 72
-    is_routine_ok = hours_since_proactive >= 72
-    # Cooldown plancher meme en mode urgent : 24h min entre 2 proactifs.
-    is_urgent_cooldown_ok = hours_since_proactive >= 24
+    # FIX 2026-05-31 — Garde-fous decouples
+    # ────────────────────────────────────────────────────────────────────────
+    # Probleme du code initial : un seul `hours_since_user` etait utilise pour
+    # 3 decisions tres differentes :
+    #   1) "compte tellement neuf qu'il faut le laisser tranquille" (is_brand_new)
+    #   2) "user absent depuis longtemps -> rappel" (is_urgent)
+    #   3) "user actif maintenant -> on peut envoyer du routine" (implicite)
+    #
+    # Le bug : avec last_decision comme seul signal recent, un user qui
+    # utilisait l'app DAILY sans creer de decision etait classe "absent 7j"
+    # → message "Yo Lucas 7 jours sans nouvelles" alors qu'il etait connecte.
+    #
+    # Fix : on decouple les 3 signaux.
+    #   - "compte brand new"  : age du compte (account_created), independant
+    #                           de l'activite. Comptes <24h = pas de proactif.
+    #   - "user absent"       : DESACTIVE. Cet endpoint n'est jamais hit par
+    #                           un scheduler — il est appele depuis le frontend
+    #                           polling toutes les 30min QUAND L'APP EST OUVERTE.
+    #                           Donc par construction l'user n'est pas absent.
+    #   - "routine check-in"  : cooldown anti-spam sur `last_proactive` (72h).
+    hours_since_account = 999
+    if account_created:
+        _dt = _parse_iso(account_created[0])
+        if _dt:
+            hours_since_account = (now - _dt).total_seconds() / 3600
 
-    # Skip si compte neuf OU (pas urgent ET pas routine OK) OU
-    # (urgent MAIS dans le cooldown 24h)
-    if (is_brand_new
-            or (not is_urgent and not is_routine_ok)
-            or (is_urgent and not is_urgent_cooldown_ok)):
+    # RULES (refondues 2026-05-31 — voir bloc explicatif ci-dessus) :
+    # 1. Compte BRAND NEW (<24h depuis la creation du compte) : silence total.
+    # 2. Cooldown routine : minimum 72h entre 2 messages proactifs.
+    # 3. Plus de mode "absent" : par construction, cet endpoint n'est appele
+    #    que quand l'user est dans l'app (frontend polling depuis ProtectedRoute).
+    is_brand_new = hours_since_account < 24
+    is_routine_ok = hours_since_proactive >= 72
+
+    if is_brand_new or not is_routine_ok:
         return {"message": None}  # Too early, respect the user's peace
 
-    # Determine the reason for reaching out
+    # On envoie TOUJOURS un message de type "routine" — l'user est actif
+    # (sinon cet endpoint ne serait pas hit). Le mode "absent" n'a plus de
+    # sens et produisait des messages mensongers ("ca fait 7 jours...").
     reason = "routine"
-    if is_urgent:
-        reason = "absent"
 
     last_msg = last_proactive  # For prompt context
 
@@ -1367,23 +1427,15 @@ async def generate_proactive_message(
     except Exception:
         pass
 
-    # Build proactive prompt based on reason
-    # IMPORTANT : on ne donne PAS la valeur exacte de hours_since_user au LLM
-    # pour eviter qu'il hallucine "ca fait 41 jours" sur un compte neuf.
-    days_since = int(hours_since_user / 24)
+    # Build proactive prompt — toujours en mode "routine" depuis le fix 2026-05-31.
+    # On ne donne JAMAIS la valeur exacte de hours_since_user au LLM pour
+    # eviter qu'il hallucine "ca fait 41 jours" sur un compte actif (et de
+    # toute facon la duree n'a pas de sens : l'user est connecte au moment
+    # ou ce message est genere).
     objectif_desc = profil.objectif.description if profil.objectif else 'non defini'
 
-    if reason == "absent":
-        prompt = f"""Tu es l'Agent Sylea 1, le compagnon IA personnel de {profil.nom}.
-{profil.nom}, {profil.age} ans, {profil.profession}. Objectif : {objectif_desc}.
-{collected_info_str}
-
-CONTEXTE : {profil.nom} ne s'est pas connecte depuis {days_since} jours. Tu lui envoies un texto pour lui rappeler de revenir.
-
-Ecris UN message court et chaleureux, tutoiement, naturel comme un ami. Tu peux mentionner la duree d'absence ({days_since} jours). Pas de tartines — un texto, pas un mail.
-N'ecris RIEN d'autre que le message lui-meme.
-
-Message :"""
+    if False:  # ANCIEN PATH "absent" — desactive 2026-05-31 (cf bloc RULES ci-dessus).
+        prompt = ""  # placeholder, jamais execute
     else:
         # Routine : intent-driven prompt — on NE parle pas d'"absence" / "check-in" /
         # "depuis", on demande juste une question utile sur l'objectif.
@@ -1411,16 +1463,21 @@ Mauvais exemples (interdits) :
 
 Message :"""
 
-    # Mots-cles d'absence interdits — on rejette + retry si le LLM les utilise
+    # Mots-cles d'absence interdits — on rejette + retry si le LLM les utilise.
+    # Depuis le fix 2026-05-31, on n'a plus de mode "absent" donc ces mots
+    # ne doivent JAMAIS apparaitre (ils produisaient les "Yo Lucas 7 jours"
+    # mensongers). Les "jours/semaine/mois" sont aussi filtres pour eviter
+    # toute hallucination de duree par Haiku.
     forbidden_in_routine = [
         "ca fait", "ça fait", "depuis", "longtemps", "plus d'un",
         "on s'est pas vus", "on s'est pas parle", "ca faisait", "ça faisait",
         "des nouvelles depuis", "absent", "absente", "ou tu etais", "où tu étais",
+        # NEW : filtrer toute reference de duree (Haiku peut inventer "3 jours")
+        " jours", " semaines", " mois sans", "te voit pas", "te vois pas",
     ]
 
     def _is_clean(text: str) -> bool:
-        if reason == "absent":
-            return True  # absent message can mention duration
+        # Plus de mode "absent" depuis 2026-05-31 — on filtre toujours.
         low = text.lower()
         return not any(kw in low for kw in forbidden_in_routine)
 
@@ -1789,12 +1846,12 @@ Si false → question et choices sont null."""
         import anthropic
 
         client = anthropic.Anthropic(api_key=key)
-        # Sonnet 4.5 plutot que Haiku : suit mieux les instructions strictes
+        # Sonnet 4.6 plutot que Haiku : suit mieux les instructions strictes
         # ("ne demande PAS de contexte pour marathon/vacances/etc."). Surcout
         # marginal (~0.001 € par call) pour une UX bien meilleure.
         msg = await asyncio.to_thread(
             lambda: client.messages.create(
-                model="claude-sonnet-4-5-20250929",
+                model="claude-sonnet-4-6",
                 max_tokens=200,
                 system=system_prompt,  # Autorite plus forte que user message
                 messages=[{"role": "user", "content": prompt}],

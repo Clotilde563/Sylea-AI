@@ -124,7 +124,15 @@ CREATE TABLE IF NOT EXISTS users (
     hashed_password     TEXT,
     provider            TEXT DEFAULT 'local',
     provider_id         TEXT,
-    created_at          TEXT NOT NULL
+    created_at          TEXT NOT NULL,
+    -- Tracking de PRESENCE (touche par tous les GET authentifies)
+    -- Distinct de last_engaged_at qui ne bouge que sur les actions mutatives.
+    -- Voir api/presence_middleware.py pour la logique de touch + debounce.
+    last_seen_at        TEXT DEFAULT NULL,
+    -- Tracking d'ENGAGEMENT (POST/PUT/PATCH/DELETE auth)
+    -- Utilise par l'agent companion pour distinguer "user juste connecte" de
+    -- "user qui fait vraiment quelque chose".
+    last_engaged_at     TEXT DEFAULT NULL
 );
 """
 
@@ -466,3 +474,23 @@ class DatabaseManager:
                     self._conn.execute(col_sql2)
                 except Exception:
                     pass
+            # Migration 2026-05-31 : tracking presence/engagement utilisateur
+            # (fix bug "Yo Lucas 7 jours sans nouvelles" alors que user connecte)
+            # Voir api/presence_middleware.py pour la logique de remplissage.
+            for col_presence in [
+                "ALTER TABLE users ADD COLUMN last_seen_at TEXT DEFAULT NULL",
+                "ALTER TABLE users ADD COLUMN last_engaged_at TEXT DEFAULT NULL",
+            ]:
+                try:
+                    self._conn.execute(col_presence)
+                except Exception:
+                    pass  # Colonne deja existante
+            # Migration 2026-06 : revocation JWT. tokens_invalidated_before =
+            # timestamp ISO ; tout token dont iat < cette valeur est rejete a
+            # l'auth (cf api/dependencies.py). Pose par POST /api/auth/logout.
+            try:
+                self._conn.execute(
+                    "ALTER TABLE users ADD COLUMN tokens_invalidated_before TEXT DEFAULT NULL"
+                )
+            except Exception:
+                pass  # Colonne deja existante

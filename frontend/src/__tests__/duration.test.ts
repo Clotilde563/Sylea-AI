@@ -1,5 +1,52 @@
 import { describe, it, expect } from 'vitest'
-import { dureeFromProb, probFromJours, deltaFromImpact, buildTimeTicks } from '../utils/duration'
+import { dureeFromProb, probFromJours, deltaFromImpact, buildTimeTicks, formatImpactJours } from '../utils/duration'
+
+describe('formatImpactJours', () => {
+  it('returns "0" for exact zero', () => {
+    expect(formatImpactJours(0)).toBe('0')
+  })
+
+  // Fix bug 2026-06-01 : avant un impact -1h (-0.0417 j) etait formate "-0.0 j"
+  // via .toFixed(1) — illisible. Maintenant on bascule en heures.
+  it('formats -1 hour as "-1h"', () => {
+    expect(formatImpactJours(-1 / 24)).toBe('-1h')
+  })
+
+  it('formats +3 hours as "+3h"', () => {
+    expect(formatImpactJours(3 / 24)).toBe('+3h')
+  })
+
+  it('formats sub-hour impact in minutes', () => {
+    expect(formatImpactJours(-30 / (24 * 60))).toBe('-30min')
+    expect(formatImpactJours(15 / (24 * 60))).toBe('+15min')
+  })
+
+  it('formats sub-minute impact as "~0" (avoid misleading "1min")', () => {
+    // 30 secondes = 0.5/(24*60) jours
+    expect(formatImpactJours(-0.5 / (24 * 60))).toBe('-~0')
+    expect(formatImpactJours(0.5 / (24 * 60))).toBe('+~0')
+  })
+
+  it('formats whole days', () => {
+    expect(formatImpactJours(5)).toBe('+5j')
+    expect(formatImpactJours(-12)).toBe('-12j')
+  })
+
+  it('formats >= 30 days in months + jours', () => {
+    expect(formatImpactJours(35)).toBe('+1m 5j')
+    expect(formatImpactJours(-60)).toBe('-2m')
+  })
+
+  it('formats >= 365 days in years + months', () => {
+    expect(formatImpactJours(370)).toBe('+1a')
+    expect(formatImpactJours(-400)).toBe('-1a 1m')
+  })
+
+  it('rounds fractional days', () => {
+    // 1.5 j → round to 2j
+    expect(formatImpactJours(1.5)).toBe('+2j')
+  })
+})
 
 describe('dureeFromProb', () => {
   it('returns ~2.5 years for 50%', () => {

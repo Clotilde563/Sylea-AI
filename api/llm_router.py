@@ -51,7 +51,7 @@ logger = logging.getLogger("sylea.llm_router")
 class Model(str, Enum):
     """IDs Anthropic des modèles supportés (à jour mai 2026)."""
     HAIKU = "claude-haiku-4-5-20251001"
-    SONNET = "claude-sonnet-4-5-20251001"
+    SONNET = "claude-sonnet-4-6"
     OPUS = "claude-opus-4-5-20251001"
 
 

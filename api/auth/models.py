@@ -1,16 +1,22 @@
 """Pydantic schemas for authentication."""
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class RegisterIn(BaseModel):
-    email: str
-    password: str
+    # P3 (2026-06) : EmailStr valide le format RFC a l'inscription (avant,
+    # l'import EmailStr etait mort et `email: str` acceptait n'importe quoi).
+    # Requiert le package `email-validator` (ajoute a requirements.txt).
+    email: EmailStr
+    # Borne la longueur (anti-DoS paste) ; min 4 conserve (compat existant).
+    password: str = Field(min_length=4, max_length=256)
 
 
 class LoginIn(BaseModel):
-    email: str
-    password: str
+    # Login : on garde `str` (pas EmailStr) pour renvoyer un 401 generique
+    # plutot qu'un 422 revelateur sur email malforme (anti-enumeration).
+    email: str = Field(max_length=320)
+    password: str = Field(max_length=256)
 
 
 class TokenOut(BaseModel):

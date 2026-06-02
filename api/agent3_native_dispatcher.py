@@ -1915,7 +1915,7 @@ class Agent3ActionDispatcher:
                 system_prompt=session_system,
                 tools=session_tools,
                 executor=session_executor,
-                model="claude-sonnet-4-5-20250929",  # Sonnet pour exploration plus complexe que SPAWN_AGENT
+                model="claude-sonnet-4-6",  # Sonnet pour exploration plus complexe que SPAWN_AGENT
                 max_turns=max_turns,
                 max_tokens=3000,
                 input_usd_per_mtok=3.0,

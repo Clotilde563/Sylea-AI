@@ -188,16 +188,42 @@ export function gaugePercent(tempsInitial: number, tempsGagne: number): number {
   return Math.min(100, Math.max(0, (tempsGagne / tempsInitial) * 100))
 }
 
-/** Formate un impact en jours en label lisible : "+45j", "-1a 3m", "+2m 15j" */
+/**
+ * Formate un impact en jours (fractionnaires possibles) en label lisible.
+ *
+ * Echelle adaptative :
+ *   >= 365 jours       -> "+1a 3m"     (annees + mois)
+ *   >= 30 jours        -> "+2m 15j"    (mois + jours)
+ *   >= 1 jour          -> "+45j"       (jours entiers)
+ *   >= 1 heure         -> "+3h"        (heures entieres, range 1-23h)
+ *   >= 1 minute        -> "+45min"     (minutes entieres, range 1-59min)
+ *   > 0 mais < 1min    -> "~0"         (negligeable, evite le bug "-0.0 j")
+ *   exactement 0       -> "0"
+ *
+ * Fix 2026-06-01 : avant, un impact en heures (-0.04 j = -1h) etait
+ * affiche "-0.0 j" via .toFixed(1). Maintenant on bascule en h/min des
+ * que la magnitude est < 1 jour.
+ */
 export function formatImpactJours(impactJours: number): string {
   const sign = impactJours >= 0 ? '+' : '-'
   const absVal = Math.abs(impactJours)
-  if (absVal === 0) return '0j'
-  // Less than 1 day: show in hours
-  if (absVal < 1) {
-    const heures = Math.round(absVal * 24)
-    return heures === 0 ? (absVal > 0 ? `${sign}1h` : '0j') : `${sign}${heures}h`
+  if (absVal === 0) return '0'
+
+  // < 1 minute : impact ridiculement petit, on l'affiche tel quel
+  // pour pas mentir avec un "-1h" trompeur
+  const totalMinutes = absVal * 24 * 60
+  if (totalMinutes < 1) return `${sign}~0`
+
+  // < 1 heure : afficher en minutes
+  if (totalMinutes < 60) {
+    return `${sign}${Math.round(totalMinutes)}min`
   }
+
+  // < 1 jour : afficher en heures
+  if (absVal < 1) {
+    return `${sign}${Math.round(absVal * 24)}h`
+  }
+
   const abs = Math.round(absVal)
   const ans = Math.floor(abs / 365)
   const restJ = abs % 365

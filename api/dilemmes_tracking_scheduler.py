@@ -436,10 +436,16 @@ scheduler = DilemmesTrackingScheduler()
 def is_enabled() -> bool:
     """Check si le scheduler doit demarrer au boot de FastAPI.
 
-    Aligne sur SYLEA_SCHEDULER_ENABLED (meme env var que api/scheduler.py)
-    pour eviter d'avoir 2 flags qui divergent. Defaut OFF.
+    Decouple de SYLEA_SCHEDULER_ENABLED depuis 2026-06-01 : ce scheduler-ci
+    ne fait que des UPDATE DB + push WS (cout zero LLM) donc il peut tourner
+    en dev sans souci, alors que api/scheduler.py declenche des appels
+    Anthropic et reste OFF par defaut.
+
+    Defaut : ON (opt-out via SYLEA_TRACKING_SCHEDULER_ENABLED=false).
     """
-    val = os.environ.get("SYLEA_SCHEDULER_ENABLED", "false").strip().lower()
+    val = os.environ.get(
+        "SYLEA_TRACKING_SCHEDULER_ENABLED", "true"
+    ).strip().lower()
     return val in ("1", "true", "yes", "on")
 
 

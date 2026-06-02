@@ -1,5 +1,6 @@
 """Authentication routes: register, login, OAuth."""
 
+import logging
 import os
 import random
 import smtplib
@@ -9,6 +10,30 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+logger = logging.getLogger("sylea.auth")
+
+
+def _is_prod() -> bool:
+    """True si on tourne en PostgreSQL (= prod). Meme heuristique que repositories._is_pg."""
+    url = os.environ.get("DATABASE_URL", "")
+    return url.startswith(("postgresql://", "postgresql+", "postgres://"))
+
+
+def _mask_email(email: str) -> str:
+    """Masque un email pour les logs : 'lucas@gmail.com' -> 'l***@gmail.com'.
+
+    Evite de logger des PII en clair (RGPD) tout en gardant un identifiant
+    debuggable.
+    """
+    try:
+        local, _, domain = email.partition("@")
+        if not domain:
+            return "***"
+        head = local[0] if local else "*"
+        return f"{head}***@{domain}"
+    except Exception:
+        return "***"
 
 import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
@@ -59,8 +84,15 @@ def send_verification_email(to_email: str, code: str):
     smtp_password = os.getenv("SMTP_PASSWORD", "")
 
     if not smtp_email or not smtp_password:
-        # Fallback: just print the code (dev mode)
-        print(f"[DEV] Verification code for {to_email}: {code}")
+        # SMTP non configure.
+        # PROD : on REFUSE de continuer silencieusement — sinon le code finirait
+        # dans les logs en clair (RGPD/sec). On leve une 503 explicite.
+        if _is_prod():
+            logger.error("SMTP non configure en production — impossible d'envoyer le code a %s", _mask_email(to_email))
+            raise HTTPException(status_code=503, detail="Service d'email indisponible. Reessayez plus tard.")
+        # DEV uniquement : on surface le code en console pour le test local
+        # (email masque, jamais en prod).
+        logger.warning("[DEV] Code de verification pour %s : %s", _mask_email(to_email), code)
         return
 
     msg = MIMEMultipart()
@@ -89,9 +121,14 @@ def send_verification_email(to_email: str, code: str):
             server.login(smtp_email, smtp_password)
             server.send_message(msg)
     except Exception as e:
-        # Si l'email échoue, on log l'erreur mais on continue (le code est en mémoire)
-        print(f"[SMTP ERROR] Could not send email to {to_email}: {e}")
-        print(f"[DEV FALLBACK] Verification code for {to_email}: {code}")
+        # Echec d'envoi SMTP.
+        # On log l'ERREUR (email masque, JAMAIS le code) pour diagnostic.
+        logger.error("Echec envoi email de verification a %s : %s", _mask_email(to_email), e)
+        if _is_prod():
+            # PROD : on ne fallback PAS sur la console (le code fuirait dans les logs).
+            raise HTTPException(status_code=503, detail="Service d'email indisponible. Reessayez plus tard.")
+        # DEV uniquement : surface le code masque pour le test local.
+        logger.warning("[DEV FALLBACK] Code de verification pour %s : %s", _mask_email(to_email), code)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -307,6 +344,8 @@ async def register(data: RegisterIn, db=Depends(get_db)):
 
 @router.post("/verify", response_model=TokenOut)
 async def verify_code(data: VerifyCodeIn, db=Depends(get_db)):
+    import hmac
+
     _cleanup_expired()
 
     pending = pending_verifications.get(data.email)
@@ -317,7 +356,23 @@ async def verify_code(data: VerifyCodeIn, db=Depends(get_db)):
         del pending_verifications[data.email]
         raise HTTPException(status_code=400, detail="Le code a expire. Veuillez vous reinscrire.")
 
-    if pending["code"] != data.code:
+    # ANTI-BRUTEFORCE (P0 2026-06) : compteur de tentatives par compte.
+    # Au-dela de 5 essais errones, on invalide la verification (l'user doit
+    # se reinscrire pour obtenir un nouveau code). Borne le bruteforce a
+    # 5 essais peu importe le rate-limit IP (defense en profondeur).
+    attempts = int(pending.get("attempts", 0)) + 1
+    if attempts > 5:
+        del pending_verifications[data.email]
+        raise HTTPException(
+            status_code=429,
+            detail="Trop de tentatives. Veuillez vous reinscrire pour obtenir un nouveau code.",
+        )
+    pending["attempts"] = attempts
+
+    # TIMING-SAFE compare (P0 2026-06) : `!=` sur des str fuit le code via
+    # timing attack (comparaison court-circuitee au 1er char different).
+    # hmac.compare_digest est constant-time.
+    if not hmac.compare_digest(str(pending["code"]), str(data.code)):
         raise HTTPException(status_code=400, detail="Code de verification incorrect")
 
     # Code is valid — create the user
@@ -361,6 +416,49 @@ async def login(data: LoginIn, db=Depends(get_db)):
 
     token = create_access_token(user["id"])
     return TokenOut(access_token=token)
+
+
+# ── Logout (revocation) ─────────────────────────────────────────────────────
+
+@router.post("/logout")
+async def logout(request: Request, db=Depends(get_db)):
+    """Revoque TOUS les tokens de l'utilisateur courant (logout everywhere).
+
+    Pose users.tokens_invalidated_before = now() : tout JWT dont iat < now
+    sera rejete a la prochaine requete (cf api/dependencies.get_optional_user).
+    Idempotent. Necessite un Bearer token valide.
+
+    Note : le frontend doit AUSSI purger son localStorage (deja fait cote
+    authStore.logout). Cet endpoint ajoute la revocation server-side qui
+    manquait — un token vole devient inutilisable apres logout.
+    """
+    from api.dependencies import get_optional_user
+    user_id = await get_optional_user(request)
+    if not user_id:
+        # Pas de session → rien a revoquer, succes idempotent.
+        return {"ok": True, "detail": "Aucune session active."}
+
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            await session.execute(
+                _sa_text("UPDATE users SET tokens_invalidated_before = :now WHERE id = :uid"),
+                {"now": now_iso, "uid": user_id},
+            )
+            await session.commit()
+        # Invalide le cache de securite immediatement (sinon TTL 30s de delai).
+        try:
+            from api.dependencies import _sec_cache
+            _sec_cache.pop(user_id, None)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error("Echec logout (revocation) pour %s : %s", user_id, e)
+        raise HTTPException(status_code=500, detail="Echec de la deconnexion. Reessaye.")
+    return {"ok": True, "detail": "Deconnecte. Tous les tokens ont ete revoques."}
 
 
 # ── OAuth Google ──────────────────────────────────────────────────────────────

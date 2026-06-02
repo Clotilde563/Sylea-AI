@@ -5,6 +5,8 @@ import { api } from '../api/client'
 import { useDeviceContext } from '../contexts/DeviceContext'
 import { useStore } from '../store/useStore'
 import { useToast } from '../components/Toast'
+import { openExternalSafe } from '../utils/safeOpen'
+import { sanitizeAgentHtml } from '../utils/sanitize'
 
 // Agent 2 feature flag — set to true when desktop version is ready
 const AGENT2_ENABLED = true
@@ -347,7 +349,7 @@ function formatInline(text: string): React.ReactNode {
               border: '1px solid rgba(255,255,255,0.1)',
               cursor: 'zoom-in',
             }}
-            onClick={() => window.open(imgUrl, '_blank')}
+            onClick={() => openExternalSafe(imgUrl)}
           />
           {altText && altText !== 'image' && (
             <div style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.5)', marginTop: '0.3rem', fontStyle: 'italic' }}>
@@ -1415,7 +1417,7 @@ export default function AgentsPage() {
         try {
           const res = await api.agent2SendEmail(action.data.to, action.data.subject, action.data.body)
           if (res.gmail_url) {
-            window.open(res.gmail_url, '_blank')
+            openExternalSafe(res.gmail_url)
             setActionToast('Gmail ouvert — ton mail est pret, il ne reste plus qu\'a l\'envoyer !')
           } else {
             setActionToast('Erreur ouverture Gmail')
@@ -1464,7 +1466,11 @@ export default function AgentsPage() {
         break
       }
       case 'LINK':
-        window.open(action.data.url, '_blank')
+        // P0 : URL fournie par le LLM — openExternalSafe rejette javascript:/data:/etc.
+        if (!openExternalSafe(action.data.url)) {
+          setActionToast('Lien invalide ou non sécurisé, ouverture annulée.')
+          setTimeout(() => setActionToast(null), 3000)
+        }
         break
       case 'COPY':
         try {
@@ -4213,7 +4219,7 @@ export default function AgentsPage() {
                                 borderRadius: '8px', overflow: 'hidden', border: '1px solid rgba(139,92,246,0.2)',
                                 background: 'rgba(0,0,0,0.15)', maxHeight: '500px', overflowY: 'auto',
                               }}>
-                                <div dangerouslySetInnerHTML={{ __html: `<style>table{width:100%;border-collapse:collapse;font-size:0.75rem;color:#e2e8f0}th{padding:0.5rem 0.7rem;text-align:left;background:rgba(139,92,246,0.12);color:#a78bfa;font-weight:600;border-bottom:1px solid rgba(139,92,246,0.2)}td{padding:0.4rem 0.7rem;border-bottom:1px solid rgba(255,255,255,0.06)}tr:hover td{background:rgba(139,92,246,0.04)}strong{color:#c4b5fd}</style>${action.data.content}` }} />
+                                <div className="sylea-agent-table" dangerouslySetInnerHTML={{ __html: sanitizeAgentHtml(action.data.content) }} />
                               </div>
                             ) : (action.data.type === 'chart' || action.data.type === 'diagram') && typeof action.data.content === 'string' ? (() => {
                               // Parse chart data: "pie_chart:Label-Value%,..." or "bar_chart:..." or simple "Label-Value%,..."
