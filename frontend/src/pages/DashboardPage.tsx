@@ -466,7 +466,7 @@ export function DashboardPage() {
                           )}
                         </span>
                         {initialLabel && (
-                          <span style={{ fontSize: isActive ? '0.78rem' : '0.72rem', fontWeight: isActive ? 600 : 500, color: isCompleted ? '#4ade80' : isActive ? 'var(--accent-violet-light)' : `${soColor}B3`, opacity: isActive ? 1 : 0.8, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                          <span title={t('dashboard.so_temps_hint')} style={{ fontSize: isActive ? '0.78rem' : '0.72rem', fontWeight: isActive ? 600 : 500, color: isCompleted ? '#4ade80' : isActive ? 'var(--accent-violet-light)' : `${soColor}B3`, opacity: isActive ? 1 : 0.8, display: 'flex', alignItems: 'center', gap: '0.35rem', cursor: 'help' }}>
                             <span style={{ color: isCompleted ? '#4ade80' : isActive ? 'var(--text-primary)' : `${soColor}B3` }}>{restantLabel || '0j'}</span>
                             <span style={{ color: 'var(--text-muted)', fontSize: '0.65rem', opacity: 0.6 }}>/</span>
                             <span style={{ color: 'var(--text-muted)', fontSize: '0.65rem', opacity: 0.6 }}>{initialLabel}</span>

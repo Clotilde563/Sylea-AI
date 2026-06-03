@@ -291,6 +291,78 @@ async def create_portal_session(db: Any, user_id: str) -> dict[str, Any]:
 # Webhook handler
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _run_async(coro):
+    """Execute une coroutine depuis un contexte sync OU depuis un thread ou une
+    boucle asyncio tourne deja.
+
+    Le webhook est appele depuis un endpoint FastAPI `async def` : un simple
+    asyncio.run() y leverait 'cannot be called from a running event loop' (et
+    les ecritures DB seraient silencieusement perdues). On retombe alors sur un
+    thread separe. Meme pattern eprouve que api.auth.router._run_async.
+    """
+    import asyncio as _aio
+    try:
+        return _aio.run(coro)
+    except RuntimeError:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(_aio.run, coro).result()
+
+
+# Idempotence : Stripe re-livre le MEME event (event.id stable) en cas de retry
+# apres timeout. On memorise les event.id deja traites pour ne pas re-appliquer
+# leurs effets. Defense en profondeur : les handlers sont deja majoritairement
+# idempotents (set_user_plan = SET), mais ceci protege tout effet de bord futur
+# non-idempotent (credits, emails, etc.).
+_PROCESSED_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS stripe_processed_events (
+    event_id TEXT PRIMARY KEY,
+    event_type TEXT,
+    processed_at TEXT NOT NULL
+)
+"""
+
+
+async def _is_stripe_event_processed_async(event_id: str) -> bool:
+    """True si cet event.id a deja ete traite. Cree la table au besoin (idempotent)."""
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        await session.execute(_sa_text(_PROCESSED_EVENTS_DDL))
+        await session.commit()
+        res = await session.execute(
+            _sa_text("SELECT 1 FROM stripe_processed_events WHERE event_id = :eid"),
+            {"eid": event_id},
+        )
+        return res.first() is not None
+
+
+async def _mark_stripe_event_processed_async(event_id: str, event_type: str) -> None:
+    """Enregistre event_id comme traite (no-op silencieux si deja present)."""
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(_sa_text(_PROCESSED_EVENTS_DDL))
+            await session.execute(
+                _sa_text(
+                    "INSERT INTO stripe_processed_events (event_id, event_type, processed_at) "
+                    "VALUES (:eid, :et, :now)"
+                ),
+                {
+                    "eid": event_id,
+                    "et": event_type,
+                    "now": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            await session.commit()
+        except Exception:
+            # Doublon (violation PK) ou erreur transitoire -> swallow.
+            await session.rollback()
+
+
 def handle_webhook(
     db: Any, payload: bytes, sig_header: str,
 ) -> dict[str, Any]:
@@ -329,18 +401,43 @@ def handle_webhook(
     except (KeyError, AttributeError):
         data_obj = {}
 
+    # event.id (stable a travers les re-livraisons Stripe) pour l'idempotence.
+    try:
+        event_id = event["id"] if hasattr(event, "__getitem__") else getattr(event, "id", "")
+    except (KeyError, AttributeError):
+        event_id = ""
+
+    # Skip si deja traite. FAIL-OPEN : si le check DB echoue, on traite quand
+    # meme (ne JAMAIS perdre un event de paiement legitime ; le risque inverse,
+    # un double-traitement, est borne car les handlers sont idempotents).
+    if event_id:
+        try:
+            if _run_async(_is_stripe_event_processed_async(event_id)):
+                return {"ok": True, "event_type": event_type, "action": "duplicate_ignored"}
+        except Exception as e:
+            logger.debug(f"stripe idempotency check failed (fail-open): {e}")
+
     try:
         if event_type == "checkout.session.completed":
-            return _handle_checkout_completed(db, data_obj)
+            result = _handle_checkout_completed(db, data_obj)
         elif event_type == "customer.subscription.updated":
-            return _handle_subscription_updated(db, data_obj)
+            result = _handle_subscription_updated(db, data_obj)
         elif event_type == "customer.subscription.deleted":
-            return _handle_subscription_deleted(db, data_obj)
+            result = _handle_subscription_deleted(db, data_obj)
         else:
-            return {"ok": True, "event_type": event_type, "action": "ignored"}
+            result = {"ok": True, "event_type": event_type, "action": "ignored"}
     except Exception as e:
         logger.exception(f"webhook handler failed for {event_type}: {e}")
         return {"ok": False, "error": f"handler crash: {type(e).__name__}"}
+
+    # Marque l'event traite UNIQUEMENT si le handler a reussi (sinon on laisse
+    # Stripe re-livrer pour reessayer).
+    if event_id and result.get("ok"):
+        try:
+            _run_async(_mark_stripe_event_processed_async(event_id, event_type))
+        except Exception as e:
+            logger.debug(f"stripe mark-processed failed: {e}")
+    return result
 
 
 def _handle_checkout_completed(db: Any, session: dict) -> dict[str, Any]:
@@ -384,7 +481,7 @@ def _handle_checkout_completed(db: Any, session: dict) -> dict[str, Any]:
                     await sess.rollback()
 
     try:
-        _asyncio.run(_do_writes())
+        _run_async(_do_writes())
     except Exception as e:
         logger.warning(f"checkout_completed writes failed: {e}")
 
@@ -408,7 +505,7 @@ def _handle_subscription_updated(db: Any, sub: dict) -> dict[str, Any]:
 
     if status not in ("active", "trialing"):
         try:
-            _asyncio.run(set_user_plan_async(user_id, "free"))
+            _run_async(set_user_plan_async(user_id, "free"))
         except Exception:
             pass
         return {"ok": True, "event_type": "subscription.updated", "action": "downgraded to free"}
@@ -418,7 +515,7 @@ def _handle_subscription_updated(db: Any, sub: dict) -> dict[str, Any]:
         if plan == "pro":
             plan = "advanced"
         try:
-            _asyncio.run(set_user_plan_async(user_id, plan))
+            _run_async(set_user_plan_async(user_id, plan))
         except Exception:
             pass
         return {"ok": True, "event_type": "subscription.updated", "action": f"synced to {plan}"}
@@ -439,7 +536,7 @@ def _handle_subscription_deleted(db: Any, sub: dict) -> dict[str, Any]:
 
     from api.agent3_quotas import set_user_plan_async
     try:
-        _asyncio.run(set_user_plan_async(user_id, "free"))
+        _run_async(set_user_plan_async(user_id, "free"))
     except Exception:
         pass
     return {"ok": True, "event_type": "subscription.deleted", "action": "downgraded to free"}

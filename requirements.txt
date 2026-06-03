@@ -41,6 +41,11 @@ psycopg2-binary>=2.9.0
 alembic>=1.13.0
 
 # Authentication
+# PyJWT : coeur d'auth de l'app (create/decode des access tokens HS256). Mieux
+# maintenu que python-jose et non concerne par les CVE d'algorithm-confusion.
+PyJWT>=2.8.0
+# python-jose : conserve UNIQUEMENT pour la verification RS256 de l'id_token
+# Apple (api/auth/apple_oauth.py, via JWKS). Plus utilise pour les tokens app.
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
 

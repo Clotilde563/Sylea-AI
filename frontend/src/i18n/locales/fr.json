@@ -144,6 +144,7 @@
     "sous_objectifs": "Sous-objectifs",
     "a_prioriser": "à prioriser",
     "generation_so": "Génération des sous-objectifs…",
+    "so_temps_hint": "Temps restant / temps total estimé pour ce sous-objectif",
     "analyse_sylea": "Analyse Syléa.AI",
     "points_forts": "Points forts",
     "points_faibles": "Points faibles",

@@ -8,7 +8,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import bcrypt
-from jose import JWTError, jwt
+# Coeur d'auth : PyJWT (et non python-jose) pour create/decode des access
+# tokens HS256. API jwt.encode/decode identique ; tokens interoperables (meme
+# secret + algo) -> aucune session existante invalidee par la migration.
+import jwt
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -126,7 +129,7 @@ def decode_token(token: str) -> str | None:
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload.get("sub")
-    except JWTError:
+    except jwt.PyJWTError:
         return None
 
 
@@ -139,5 +142,5 @@ def decode_token_payload(token: str) -> dict | None:
     """
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
+    except jwt.PyJWTError:
         return None

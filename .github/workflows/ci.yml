@@ -6,16 +6,19 @@ on:
   pull_request:
     branches: [master, main]
 
+# Supply-chain hardening : les actions sont epinglees au SHA de commit (et non
+# a un tag mobile @v4 qui peut etre re-pointe par un attaquant ayant compromis
+# le repo de l'action). Le commentaire indique la version lisible correspondante.
 jobs:
   # ─── Tests backend Python ──────────────────────────────────────────────────
   backend-tests:
     name: Backend tests (pytest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Setup Python 3.13
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.13"
           cache: "pip"
@@ -44,10 +47,10 @@ jobs:
     name: Frontend tests (vitest + tsc)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Setup Node 20
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
           cache: "npm"
@@ -70,10 +73,10 @@ jobs:
     name: Audit PG migration coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Setup Python 3.13
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.13"
 

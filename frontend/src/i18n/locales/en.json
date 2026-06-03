@@ -144,6 +144,7 @@
     "sous_objectifs": "Sub-objectives",
     "a_prioriser": "to prioritize",
     "generation_so": "Generating sub-objectives…",
+    "so_temps_hint": "Time remaining / total estimated time for this sub-objective",
     "analyse_sylea": "Syléa.AI Analysis",
     "points_forts": "Strengths",
     "points_faibles": "Weaknesses",
