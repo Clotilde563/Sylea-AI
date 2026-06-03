@@ -292,21 +292,24 @@ async def create_portal_session(db: Any, user_id: str) -> dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_async(coro):
-    """Execute une coroutine depuis un contexte sync OU depuis un thread ou une
-    boucle asyncio tourne deja.
+    """Execute une coroutine depuis le webhook (contexte sync), SANS jamais
+    toucher l'event loop du thread appelant.
 
-    Le webhook est appele depuis un endpoint FastAPI `async def` : un simple
-    asyncio.run() y leverait 'cannot be called from a running event loop' (et
-    les ecritures DB seraient silencieusement perdues). On retombe alors sur un
-    thread separe. Meme pattern eprouve que api.auth.router._run_async.
+    On execute TOUJOURS dans un thread worker dedie (sa propre boucle via
+    asyncio.run). Deux raisons :
+      - le webhook est appele depuis un endpoint FastAPI `async def` : un
+        asyncio.run() dans le thread courant leverait 'cannot be called from a
+        running event loop' (et les ecritures DB seraient silencieusement
+        perdues) ;
+      - en contexte sync (CLI / tests), appeler asyncio.run() dans le thread
+        courant FERME la boucle et vide l'etat asyncio global, ce qui peut
+        polluer des appels asyncio ulterieurs (ex: tests pytest-asyncio qui
+        suivent). Un worker isole evite toute fuite d'etat.
     """
     import asyncio as _aio
-    try:
-        return _aio.run(coro)
-    except RuntimeError:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(_aio.run, coro).result()
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_aio.run, coro).result()
 
 
 # Idempotence : Stripe re-livre le MEME event (event.id stable) en cas de retry
