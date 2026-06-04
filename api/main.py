@@ -337,7 +337,8 @@ def health_observability():
 async def websocket_agent(websocket: WebSocket, token: str = Query(default="")):
     """WebSocket pour l'app desktop Syléa Agent — accepte toutes les origines."""
     from api.websocket import ws_manager
-    from api.auth.security import decode_token
+    from api.auth.security import decode_token_payload
+    from api.dependencies import _get_user_security_state
 
     # Accepter la connexion AVANT la validation du token
     # (sinon le CORS middleware bloque)
@@ -346,11 +347,32 @@ async def websocket_agent(websocket: WebSocket, token: str = Query(default="")):
         await websocket.close(code=4001, reason="Token manquant")
         return
 
-    user_id = decode_token(token)
-    if not user_id:
+    payload = decode_token_payload(token)
+    if not payload or not payload.get("sub"):
         await websocket.accept()
         await websocket.close(code=4001, reason="Token invalide")
         return
+    user_id = payload["sub"]
+
+    # SECURITE (audit 2026-06) : appliquer au WS les MEMES regles que l'auth HTTP
+    # (get_optional_user) — compte desactive (disabled_at) ou token revoque
+    # (iat < tokens_invalidated_before, pose par /logout). Avant, le WS ne faisait
+    # qu'un decode_token nu -> un token revoque ou un compte banni gardait le canal
+    # desktop ouvert jusqu'a l'expiration (7j).
+    try:
+        _disabled, _invalidated_before = await _get_user_security_state(user_id)
+    except Exception:
+        _disabled, _invalidated_before = False, None
+    if _disabled:
+        await websocket.accept()
+        await websocket.close(code=4003, reason="Compte desactive")
+        return
+    if _invalidated_before is not None:
+        _iat = payload.get("iat")
+        if _iat is None or float(_iat) < _invalidated_before:
+            await websocket.accept()
+            await websocket.close(code=4001, reason="Session expiree")
+            return
 
     await ws_manager.connect(websocket, user_id)
     print(f"[WS] User {user_id} connected successfully")

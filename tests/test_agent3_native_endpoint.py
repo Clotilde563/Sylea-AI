@@ -87,6 +87,22 @@ def app_client(monkeypatch):
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _bypass_agent3_auth_gate():
+    """Audit securite 2026-06 : l'endpoint /chat/native est protege par
+    `_require_agent3_plan` (plan team/enterprise requis, anonyme -> 401).
+
+    Cette garde est testee SEPAREMENT dans test_agent3_auth_gate.py. Ces tests
+    d'integration-ci ciblent la LOGIQUE de l'endpoint (flux SSE, tool-use,
+    persistence) -> on neutralise la garde (= simule un user authentifie plan
+    team) pour ne pas dependre d'un vrai token. Nettoyage apres chaque test."""
+    from api.main import app
+    from api.routers.agent3_openclaw import _require_agent3_plan
+    app.dependency_overrides[_require_agent3_plan] = lambda: None
+    yield
+    app.dependency_overrides.pop(_require_agent3_plan, None)
+
+
 def _parse_sse(body: str) -> list[dict]:
     """Parse un flux SSE bruteforcement en liste de {event, data}."""
     events: list[dict] = []

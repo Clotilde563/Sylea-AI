@@ -107,7 +107,17 @@ async def _require_agent3_plan(
     A ajouter en Depends sur chaque endpoint chat / computer-use / execute.
     """
     if user_id is None:
-        return  # laisse downstream renvoyer 401 si besoin
+        # SECURITE (audit 2026-06) : un appel NON authentifie ne doit JAMAIS
+        # atteindre un endpoint Agent 3 sensible (code exec, computer-use,
+        # acces fichiers...). On bloque ici en 401. Avant ce fix on faisait
+        # `return` en supposant qu'un check downstream renverrait 401 — mais
+        # plusieurs endpoints (ex: POST /code/execute) n'en avaient AUCUN,
+        # d'ou une RCE non authentifiee. Fail-closed desormais.
+        raise HTTPException(
+            status_code=401,
+            detail="Authentification requise.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     try:
         from api.agent3_quotas import get_user_plan_async
         plan_name = (await get_user_plan_async(user_id) or {}).get('name', 'free')
