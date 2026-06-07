@@ -21,6 +21,7 @@ import { RouteErrorBoundary } from './components/RouteErrorBoundary'
 import ParametresPage       from './pages/ParametresPage'
 import AgentsPage           from './pages/AgentsPage'
 import LoginPage            from './pages/LoginPage'
+import LandingPage          from './pages/LandingPage'
 import { ProtectedRoute }   from './auth/ProtectedRoute'
 import { LanguageProvider, useT } from './i18n/LanguageContext'
 import LockScreen           from './security/LockScreen'
@@ -64,6 +65,7 @@ function AppContent() {
 
       <Routes>
         {/* Routes publiques */}
+        <Route path="/bienvenue" element={<LandingPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/auth/callback" element={<AuthCallbackPage />} />
         <Route path="/auth/apple-desktop" element={<AppleDesktopBridgePage />} />

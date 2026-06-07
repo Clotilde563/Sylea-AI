@@ -1,0 +1,25 @@
+<!-- Favicon Syléa.AI — icône d'app : carré arrondi sombre + double-S dégradé
+     épais (cyan -> bleu -> violet) avec canal central creux. Optimisé pour
+     rester lisible à 16px dans l'onglet du navigateur. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
+  <defs>
+    <linearGradient id="sg" x1="50%" y1="100%" x2="50%" y2="0%">
+      <stop offset="0%"   stop-color="#8b5cf6"/>
+      <stop offset="45%"  stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Fond carré arrondi (donne une forme reconnaissable à petite taille) -->
+  <rect x="4" y="4" width="112" height="112" rx="28" fill="#0a0e17"/>
+  <rect x="5" y="5" width="110" height="110" rx="27" fill="none"
+        stroke="#22d3ee" stroke-opacity="0.35" stroke-width="2"/>
+
+  <!-- Corps du S — trait épais dégradé -->
+  <path d="M60 28 C84 28 84 47 60 54 C36 61 36 80 60 80"
+        stroke="url(#sg)" stroke-width="14" fill="none" stroke-linecap="round"/>
+
+  <!-- Canal central creux (signature du logo) -->
+  <path d="M60 28 C84 28 84 47 60 54 C36 61 36 80 60 80"
+        stroke="#0a0e17" stroke-width="4.5" fill="none" stroke-linecap="butt"/>
+</svg>
