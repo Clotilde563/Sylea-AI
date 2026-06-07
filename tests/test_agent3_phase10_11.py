@@ -76,12 +76,13 @@ class TestPlans:
         assert plan["name"] == "free"
         assert plan["limits"]["tokens_per_month"] == 100_000
 
-    def test_set_plan_pro(self, db):
+    def test_set_plan_advanced(self, db):
         from api.agent3_quotas import set_user_plan_async, get_user_plan_async
-        r = asyncio.run(set_user_plan_async("u_pro", "pro"))
+        # NB (audit 2026-06) : plan "pro" renomme en "advanced".
+        r = asyncio.run(set_user_plan_async("u_pro", "advanced"))
         assert r["ok"] is True
         plan = asyncio.run(get_user_plan_async("u_pro"))
-        assert plan["name"] == "pro"
+        assert plan["name"] == "advanced"
         assert plan["limits"]["tokens_per_month"] == 1_000_000
 
     def test_set_unknown_plan_rejected(self, db):
@@ -406,65 +407,12 @@ class TestSelfReflection:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Phase 11B — Long-term planner
+# Phase 11B — Long-term planner (SUPPRIME)
+# Le module api/agent3_longterm a ete retire dans une session precedente
+# (l'utilisateur a juge la fonctionnalite redondante avec memory + sous-objectifs
+# auto-generes a l'onboarding). Les 8 tests de TestLongTerm ont ete supprimes
+# en consequence.
 # ═════════════════════════════════════════════════════════════════════════════
-
-class TestLongTerm:
-    def test_create_and_get_plan(self, db):
-        from api.agent3_longterm import create_plan, get_plan
-        r = create_plan(db, "u", title="Livre IA", goal="Ecrire un livre de 10 chapitres")
-        assert r["ok"] is True
-        p = get_plan(db, r["plan_id"])
-        assert p["title"] == "Livre IA"
-        assert p["status"] == "active"
-        assert p["progress_pct"] == 0
-
-    def test_list_user_plans_with_filter(self, db):
-        from api.agent3_longterm import create_plan, update_plan, list_user_plans
-        r = create_plan(db, "u", title="A", goal="aa")
-        create_plan(db, "u", title="B", goal="bb")
-        update_plan(db, r["plan_id"], "u", status="completed")
-        active = list_user_plans(db, "u", status="active")
-        assert len(active) == 1
-        assert active[0]["title"] == "B"
-
-    def test_record_check_in_updates_progress(self, db):
-        from api.agent3_longterm import create_plan, record_check_in, get_plan
-        r = create_plan(db, "u", title="P", goal="g")
-        record_check_in(db, r["plan_id"], progress_delta=30, summary="Phase 1 done")
-        p = get_plan(db, r["plan_id"])
-        assert p["progress_pct"] == 30
-        assert len(p["check_ins"]) == 1
-
-    def test_check_in_100pct_completes(self, db):
-        from api.agent3_longterm import create_plan, record_check_in, get_plan
-        r = create_plan(db, "u", title="P", goal="g")
-        record_check_in(db, r["plan_id"], progress_delta=100)
-        p = get_plan(db, r["plan_id"])
-        assert p["status"] == "completed"
-
-    def test_update_plan_ownership(self, db):
-        from api.agent3_longterm import create_plan, update_plan
-        r = create_plan(db, "alice", title="P", goal="g")
-        res = update_plan(db, r["plan_id"], "bob", title="Hacked")
-        assert res["ok"] is False
-
-    def test_format_plans_for_prompt(self, db):
-        from api.agent3_longterm import create_plan, format_plans_for_prompt
-        create_plan(db, "u", title="Mon Livre", goal="Ecrire 10 chapitres")
-        ctx = format_plans_for_prompt(db, "u")
-        assert "OBJECTIFS LONG-TERME" in ctx
-        assert "Mon Livre" in ctx
-
-    def test_format_empty_when_no_plans(self, db):
-        from api.agent3_longterm import format_plans_for_prompt
-        assert format_plans_for_prompt(db, "u_nothing") == ""
-
-    def test_delete_plan(self, db):
-        from api.agent3_longterm import create_plan, delete_plan, get_plan
-        r = create_plan(db, "u", title="P", goal="g")
-        delete_plan(db, r["plan_id"], "u")
-        assert get_plan(db, r["plan_id"]) is None
 
 
 # ═════════════════════════════════════════════════════════════════════════════

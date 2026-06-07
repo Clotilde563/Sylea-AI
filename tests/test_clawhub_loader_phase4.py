@@ -207,6 +207,7 @@ class TestScanAllSkills:
 
     def test_scan_empty_dirs(self, tmp_path, monkeypatch):
         monkeypatch.setattr(clawhub_loader, "USER_SKILLS_DIR", tmp_path / "nonexistent")
+        monkeypatch.setattr(clawhub_loader, "WORKSPACE_USER_SKILLS_DIR", tmp_path / "nonexistent2")
         monkeypatch.setattr(clawhub_loader, "BUNDLED_SKILLS_DIRS", [])
         assert scan_all_skills() == []
 

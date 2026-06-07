@@ -106,17 +106,22 @@ class TestOpenClawSchemasModule:
 
 class TestBuildToolSchemasIntegration:
     def test_default_does_not_expose_openclaw_tools(self):
-        # Par defaut (opt-in off), les 38 outils ne sont pas exposes.
+        # Par defaut (opt-in off), les outils OpenClaw-only (i.e. ceux SANS
+        # equivalent natif) ne sont pas exposes. Les outils ayant un handler
+        # natif (browser, canvas, web_fetch, x_search) restent exposes via
+        # leur nom natif uppercase.
         schemas = build_tool_schemas(enabled_actions=Agent3ActionDispatcher.SUPPORTED)
         names = {s["name"] for s in schemas}
-        assert "browser" not in names
+        # Sample d'outils OpenClaw-only qui ne doivent PAS etre la sans opt-in
         assert "exec" not in names
         assert "image_generate" not in names
+        assert "firecrawl" not in names
+        assert "bash" not in names
 
     def test_opt_in_adds_openclaw_tools_minus_collisions(self):
         # Les 38 outils OpenClaw sont ajoutes, MOINS ceux qui partagent un nom
-        # avec un tool natif d'Agent 3 (collision : web_fetch, x_search, canvas).
-        # Les collisions sont gardees cote natif (prioritaires), donc on ajoute 35.
+        # avec un tool natif d'Agent 3 (4 collisions actuelles : browser,
+        # canvas, web_fetch, x_search). Les collisions sont gardees cote natif.
         schemas_without = build_tool_schemas(
             enabled_actions=Agent3ActionDispatcher.SUPPORTED,
         )
@@ -125,12 +130,11 @@ class TestBuildToolSchemasIntegration:
             include_openclaw_direct_tools=True,
         )
         added = len(schemas_with) - len(schemas_without)
-        # 3 collisions attendues : web_fetch, x_search, canvas
-        assert added == 38 - 3, f"Expected +35 (38 - 3 collisions), got +{added}"
+        # 4 collisions attendues : web_fetch, x_search, canvas, browser
+        assert added == 38 - 4, f"Expected +34 (38 - 4 collisions), got +{added}"
 
         # Verifie que quelques OpenClaw-only tools sont bien la
         names = {s["name"] for s in schemas_with}
-        assert "browser" in names
         assert "exec" in names
         assert "image_generate" in names
         assert "firecrawl" in names
@@ -158,30 +162,26 @@ class TestBuildToolSchemasIntegration:
 
 @pytest.mark.asyncio
 class TestDispatcherRoutesOpenClaw:
-    async def test_browser_tool_routes_to_invoke_tool(self, dispatcher):
-        # Le LLM appelle 'browser' avec {action, args}. Le dispatcher doit
-        # appeler openclaw_invoke_tool("browser", "default", {...}, session_key).
-        fake_resp = {"success": True, "result": {"screenshot_url": "/tmp/ss.png"}}
+    async def test_image_generate_routes_to_invoke_tool(self, dispatcher):
+        # Note : BROWSER est devenu un handler natif (Phase 14I, Playwright direct),
+        # plus route via openclaw_invoke_tool. On valide donc le routage avec
+        # IMAGE_GENERATE qui reste un outil OpenClaw direct.
+        fake_resp = {"success": True, "result": {"image_url": "/tmp/img.png"}}
         with patch(
             "api.openclaw_bridge.openclaw_invoke_tool",
             new=AsyncMock(return_value=fake_resp),
         ) as m:
-            r = await dispatcher.execute("BROWSER", {
-                "action": "screenshot",
-                "args": {"url": "https://example.com"},
+            r = await dispatcher.execute("IMAGE_GENERATE", {
+                "action": "generate",
+                "args": {"prompt": "a cat"},
             })
             assert r["is_error"] is False
             m.assert_awaited_once()
             kwargs = m.call_args.kwargs
-            assert kwargs["tool_name"] == "browser"
-            assert kwargs["action"] == "screenshot"
-            assert kwargs["args"] == {"url": "https://example.com"}
+            assert kwargs["tool_name"] == "image_generate"
+            assert kwargs["action"] == "generate"
+            assert kwargs["args"] == {"prompt": "a cat"}
             assert kwargs["session_key"] == "sess_test"
-            # Le content est shape par openclaw_result_shaping : pour un tool
-            # 'browser' avec screenshot_url, on doit voir "Capture : ..." dans
-            # le texte lisible par le LLM, et l'URL dans raw.action_card.
-            assert "Capture" in r["content"] or "/tmp/ss.png" in r["content"]
-            assert r["raw"].get("action_card", {}).get("screenshot_url") == "/tmp/ss.png"
 
     async def test_fs_read_maps_to_openclaw_read(self, dispatcher):
         # Le LLM appelle `fs_read`, le dispatcher convertit vers `read` cote OpenClaw.
@@ -196,14 +196,15 @@ class TestDispatcherRoutesOpenClaw:
             assert kwargs["tool_name"] == "read"  # renomme !
 
     async def test_openclaw_error_is_reported(self, dispatcher):
+        # BROWSER est natif maintenant, on teste avec EXEC qui reste OpenClaw.
         fake_resp = {"success": False, "error": "Tool not configured"}
         with patch(
             "api.openclaw_bridge.openclaw_invoke_tool",
             new=AsyncMock(return_value=fake_resp),
         ):
-            r = await dispatcher.execute("BROWSER", {"args": {}})
+            r = await dispatcher.execute("EXEC", {"args": {"command": "ls"}})
             assert r["is_error"] is True
-            assert "Tool not configured" in r["content"] or "browser" in r["content"].lower()
+            assert "Tool not configured" in r["content"] or "exec" in r["content"].lower()
 
     async def test_openclaw_exception_is_handled(self, dispatcher):
         # Si openclaw_invoke_tool raise, le dispatcher ne doit pas propager.

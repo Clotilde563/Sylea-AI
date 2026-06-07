@@ -311,7 +311,9 @@ class TestRunClawhubHomeOverride:
         from api.agent3_skills import clawhub_meta_tools as cmt
         monkeypatch.setattr(cmt.subprocess, "run", fake_run)
 
-        asyncio.get_event_loop().run_until_complete(
+        # asyncio.run() : loop fraiche et isolee (robuste a la pollution inter-tests
+        # ou un test asyncio anterieur peut laisser la loop courante fermee).
+        asyncio.run(
             cmt._run_clawhub(["search", "test"], timeout=5, auth_user_id="alice-42")
         )
 
@@ -340,7 +342,8 @@ class TestRunClawhubHomeOverride:
         from api.agent3_skills import clawhub_meta_tools as cmt
         monkeypatch.setattr(cmt.subprocess, "run", fake_run)
 
-        asyncio.get_event_loop().run_until_complete(
+        # asyncio.run() : loop fraiche et isolee (cf. test ci-dessus).
+        asyncio.run(
             cmt._run_clawhub(["search", "test"], timeout=5, auth_user_id=None)
         )
 

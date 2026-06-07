@@ -119,8 +119,8 @@ class TestWebhookHandler:
             r = handle_webhook(db, b'{"type":"checkout.session.completed"}', "t=x,v1=y")
             assert r["ok"] is True
 
-        # Apres : pro
-        assert asyncio.run(get_user_plan_async("u_stripe"))["name"] == "pro"
+        # Apres : advanced (le webhook remappe l'ancien plan "pro" -> "advanced")
+        assert asyncio.run(get_user_plan_async("u_stripe"))["name"] == "advanced"
 
     def test_subscription_deleted_downgrades(self, db, monkeypatch):
         monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_x")
@@ -128,8 +128,8 @@ class TestWebhookHandler:
 
         import asyncio
         from api.agent3_quotas import set_user_plan_async, get_user_plan_async
-        asyncio.run(set_user_plan_async("u_canc", "pro"))
-        assert asyncio.run(get_user_plan_async("u_canc"))["name"] == "pro"
+        asyncio.run(set_user_plan_async("u_canc", "advanced"))
+        assert asyncio.run(get_user_plan_async("u_canc"))["name"] == "advanced"
 
         fake_event = {
             "type": "customer.subscription.deleted",

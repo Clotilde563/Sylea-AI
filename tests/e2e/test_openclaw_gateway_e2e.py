@@ -231,7 +231,10 @@ class TestDispatcherE2E:
             "screenshot_url": "/tmp/capture-1234.png",
             "text": "Breaking news today: AI...",
         })
-        r = await dispatcher.execute("BROWSER", {
+        # NB : on appelle _openclaw_direct directement plutot que execute("BROWSER")
+        # car BROWSER est dans SUPPORTED → routé vers le handler natif Playwright.
+        # Ce test cible explicitement le shaping/friendly-error du chemin Gateway.
+        r = await dispatcher._openclaw_direct("browser", {
             "action": "screenshot",
             "args": {"url": "https://news.site.com"},
         })
@@ -256,7 +259,9 @@ class TestDispatcherE2E:
         mock_gateway.state.set_tool_failure(
             "browser", status=500, body="Navigation timeout of 30000 ms exceeded",
         )
-        r = await dispatcher.execute("BROWSER", {"args": {"url": "https://slow.com"}})
+        # Idem que le test precedent : on cible le chemin Gateway directement
+        # via _openclaw_direct (BROWSER dans SUPPORTED → natif sinon).
+        r = await dispatcher._openclaw_direct("browser", {"args": {"url": "https://slow.com"}})
         assert r["is_error"] is True
         # Le friendly error mapping doit transformer en message FR
         assert "navigation" in r["content"].lower() or "temps" in r["content"].lower()

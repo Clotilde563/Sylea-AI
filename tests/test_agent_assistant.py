@@ -45,12 +45,15 @@ def db(tmp_path, monkeypatch):
         (TEST_USER_ID, "test-agent2@test.com", "fake_hash", "local"),
     )
     manager._conn.commit()
-    # Agent 2 est gate par le plan : on bascule le user test en 'pro'
+    # Agent 2 est gate par le plan : on bascule le user test en 'advanced'
     # pour permettre l'acces aux endpoints /api/agent2/* (sinon 403).
+    # NB (audit 2026-06) : le plan a ete renomme "pro" -> "advanced".
+    # set_user_plan_async rejette "pro" (unknown plan) sans lever d'exception
+    # -> l'user restait 'free' -> 403 sur les 15 tests Agent 2.
     try:
         from api.agent3_quotas import ensure_quota_tables, set_user_plan_async
         ensure_quota_tables(manager)
-        _aio.run(set_user_plan_async(TEST_USER_ID, "pro"))
+        _aio.run(set_user_plan_async(TEST_USER_ID, "advanced"))
     except Exception:
         pass
     yield manager

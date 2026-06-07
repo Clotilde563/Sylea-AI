@@ -37,8 +37,22 @@ import pytest
 
 
 def _run(coro):
-    """Execute une coroutine dans une event loop isolee."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Execute une coroutine dans une event loop valide.
+
+    Robuste a la pollution inter-tests : sous pytest, un test asyncio anterieur
+    (ou un asyncio.run() ailleurs) peut fermer la loop courante. On reutilise la
+    loop courante si elle est valide, sinon on en cree une nouvelle — au lieu de
+    `asyncio.get_event_loop()` aveugle qui renverrait une loop fermee
+    (-> RuntimeError: Event loop is closed) en run complet de la suite.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("event loop is closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
 
 
 def _mock_httpx_response(status_code: int = 200, json_data: dict | None = None,
