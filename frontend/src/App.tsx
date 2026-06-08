@@ -150,6 +150,10 @@ function AppContent() {
                       Support &amp; aide
                     </a>
                   </span>
+                  <span style={{ display: 'block', marginTop: '0.45rem', fontSize: '0.68rem', opacity: 0.7, lineHeight: 1.5 }}>
+                    Syléa est une aide à la décision — pas un conseil médical, financier ou juridique professionnel.
+                    En cas de détresse psychologique : 3114 (prévention suicide, 24h/24) ou 15 (SAMU).
+                  </span>
                 </footer>
               </div>
             }
