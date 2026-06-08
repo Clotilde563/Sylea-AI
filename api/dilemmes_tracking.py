@@ -618,8 +618,8 @@ async def _record_tracking_decision_async(
     abandonne, avec le detail des rappels.
 
     IMPORTANT : n'applique AUCUN impact (deja applique par le caller via
-    _apply_impact_with_cascade_async + _update_profil_temps_async). On se
-    contente d'ENREGISTRER l'evenement pour qu'il apparaisse dans l'historique
+    _apply_impact_with_cascade_async + _persist_profil_temps_in_session, dans la
+    MEME transaction). On se contente d'ENREGISTRER l'evenement dans l'historique
     des decisions (cohérence : impact_net = temps_gagne_apres - temps_gagne_avant
     = impact reel applique, donc sum(decisions.impact_net) reste aligne sur
     profil.temps_gagne_jours). INSERT dans la session fournie -> atomique avec
@@ -701,6 +701,7 @@ async def _apply_impact_with_cascade_async(
     profil_id: str,
     temps_initial_jours: float,
     impact_jours: float,
+    session: Any = None,
 ) -> list[dict]:
     """
     Applique impact_jours sur les sous-objectifs du user et retourne la
@@ -712,9 +713,12 @@ async def _apply_impact_with_cascade_async(
 
     Cible le PREMIER sous-objectif non-sature (l'IA n'est pas appelee ici
     car la cible reelle est determinee au moment de l'analyse initiale —
-    le tracking n'a pas vocation a re-questionner les SO). Si besoin, on
-    pourra plus tard stocker `so_cible_id` au moment de la creation du
-    tracking et le passer ici.
+    le tracking n'a pas vocation a re-questionner les SO).
+
+    Atomicite : si `session` est fourni, la cascade s'execute DANS cette
+    session SANS commit (le caller gere la transaction -> validate/cancel
+    appliquent cascade + profil + statut + decision en UNE transaction).
+    Sinon, la fonction cree sa propre session et commit (comportement legacy).
     """
     from sqlalchemy import text as _sql_text
     from api.database import get_session_factory
@@ -723,87 +727,91 @@ async def _apply_impact_with_cascade_async(
     if not impact_jours or abs(impact_jours) < 0.001:
         return []
 
-    cascade_items: list[dict] = []
+    async def _do(sess) -> list[dict]:
+        cascade_items: list[dict] = []
+        # 1. SELECT sous_objectifs (snapshot AVANT)
+        result = await sess.execute(
+            _sql_text(
+                "SELECT id, titre, progression, ordre, temps_estime "
+                "FROM sous_objectifs WHERE user_id = :uid ORDER BY ordre"
+            ),
+            {"uid": profil_id},
+        )
+        all_so_all = list(result.mappings().all())
+        if not all_so_all:
+            return []
 
+        prog_before: dict[str, tuple[str, float]] = {
+            so["id"]: (so["titre"], float(so["progression"] or 0.0))
+            for so in all_so_all
+        }
+
+        # Cible = premier SO non-sature dans la direction de l'impact.
+        target_so_id = None
+        if impact_jours >= 0:
+            candidates = [
+                so["id"] for so in all_so_all
+                if (so["progression"] or 0.0) < 100
+            ]
+        else:
+            candidates = [
+                so["id"] for so in all_so_all
+                if (so["progression"] or 0.0) > 0
+            ]
+        if candidates:
+            target_so_id = candidates[0]
+
+        # 2. Cascade invariant-safe (pas de commit : gere par le caller)
+        target_id_used, _delta_pct = await apply_impact_invariant_safe_async(
+            sess, profil_id, target_so_id, impact_jours, temps_initial_jours,
+        )
+
+        # 3. Snapshot APRES
+        after = await sess.execute(
+            _sql_text(
+                "SELECT id, progression FROM sous_objectifs WHERE user_id = :uid"
+            ),
+            {"uid": profil_id},
+        )
+        prog_after = {
+            r["id"]: float(r["progression"] or 0.0)
+            for r in after.mappings().all()
+        }
+
+        for sid, (titre, p_before) in prog_before.items():
+            p_after = prog_after.get(sid, p_before)
+            delta = p_after - p_before
+            if abs(delta) < 0.05:
+                continue
+            cascade_items.append({
+                "so_id": sid,
+                "titre": titre,
+                "progression_avant": round(p_before, 2),
+                "progression_apres": round(p_after, 2),
+                "delta_pct": round(delta, 2),
+                "est_cible": sid == (target_id_used or target_so_id),
+                "est_complete": p_after >= 99.99,
+            })
+
+        cascade_items.sort(
+            key=lambda i: (not i["est_cible"], -abs(i["delta_pct"]))
+        )
+        return cascade_items
+
+    # Cas atomique : on rejoint la transaction du caller (pas de commit ici).
+    if session is not None:
+        return await _do(session)
+
+    # Cas legacy : transaction autonome.
     factory = get_session_factory()
-    async with factory() as session:
+    async with factory() as own:
         try:
-            # 1. SELECT sous_objectifs (snapshot AVANT)
-            result = await session.execute(
-                _sql_text(
-                    "SELECT id, titre, progression, ordre, temps_estime "
-                    "FROM sous_objectifs WHERE user_id = :uid ORDER BY ordre"
-                ),
-                {"uid": profil_id},
-            )
-            all_so_all = list(result.mappings().all())
-            if not all_so_all:
-                return []
-
-            prog_before: dict[str, tuple[str, float]] = {
-                so["id"]: (so["titre"], float(so["progression"] or 0.0))
-                for so in all_so_all
-            }
-
-            # Cible = premier SO non-sature dans la direction de l'impact.
-            # apply_impact_invariant_safe_async gere le fallback de toute facon
-            # si on lui passe un id orphelin / sature.
-            target_so_id = None
-            if impact_jours >= 0:
-                candidates = [
-                    so["id"] for so in all_so_all
-                    if (so["progression"] or 0.0) < 100
-                ]
-            else:
-                candidates = [
-                    so["id"] for so in all_so_all
-                    if (so["progression"] or 0.0) > 0
-                ]
-            if candidates:
-                target_so_id = candidates[0]
-
-            # 2. Cascade invariant-safe
-            target_id_used, _delta_pct = await apply_impact_invariant_safe_async(
-                session, profil_id, target_so_id, impact_jours, temps_initial_jours,
-            )
-
-            # 3. Snapshot APRES
-            after = await session.execute(
-                _sql_text(
-                    "SELECT id, progression FROM sous_objectifs WHERE user_id = :uid"
-                ),
-                {"uid": profil_id},
-            )
-            prog_after = {
-                r["id"]: float(r["progression"] or 0.0)
-                for r in after.mappings().all()
-            }
-
-            for sid, (titre, p_before) in prog_before.items():
-                p_after = prog_after.get(sid, p_before)
-                delta = p_after - p_before
-                if abs(delta) < 0.05:
-                    continue
-                cascade_items.append({
-                    "so_id": sid,
-                    "titre": titre,
-                    "progression_avant": round(p_before, 2),
-                    "progression_apres": round(p_after, 2),
-                    "delta_pct": round(delta, 2),
-                    "est_cible": sid == (target_id_used or target_so_id),
-                    "est_complete": p_after >= 99.99,
-                })
-
-            cascade_items.sort(
-                key=lambda i: (not i["est_cible"], -abs(i["delta_pct"]))
-            )
-
-            await session.commit()
+            items = await _do(own)
+            await own.commit()
+            return items
         except Exception:
-            await session.rollback()
+            await own.rollback()
             raise
-
-    return cascade_items
 
 
 def _compute_delta_probabilite(prob_actuelle: float, impact_jours: float) -> float:
@@ -817,27 +825,39 @@ def _compute_delta_probabilite(prob_actuelle: float, impact_jours: float) -> flo
     return round(prob_apres - prob_actuelle, 4)
 
 
-async def _update_profil_temps_async(
-    profil_repo: Any,
-    profil: Any,
-    impact_jours: float,
-) -> None:
-    """Met a jour temps_gagne + probabilite_actuelle du profil (sync via
-    le repo, hors transaction async). Conserve les memes invariants que
-    dilemme.py et evenement.py."""
+async def _persist_profil_temps_in_session(session, profil: Any, impact_jours: float) -> float:
+    """Met a jour temps_gagne + probabilite_actuelle du profil DANS la session
+    fournie (full UPDATE via to_dict, SANS commit) et met a jour l'objet profil
+    en memoire. Retourne le temps_gagne APRES (clampe a [0, temps_initial]).
+
+    Remplace l'ancien chemin sync (profil_repo.sauvegarder, hors transaction) :
+    permet a validate/cancel d'appliquer cascade SO + profil + statut + decision
+    dans UNE SEULE transaction atomique. Idempotence : un crash en plein vol
+    roll back tout -> le tracking reste 'awaiting_validation' -> retry propre,
+    jamais de double application ni de drift.
+
+    NB : en mutation de temps_gagne, sauvegarder() saute de toute facon son
+    alignement progressions->temps_gagne (detection mutation) ; on reproduit
+    donc fidelement son effet (UPDATE de toutes les colonnes du profil) sans cet
+    alignement. Compatible SQLite + PG (text() portable, pas de _run_async sync
+    imbrique).
+    """
+    temps_initial = float(getattr(profil, "temps_initial_jours", 0) or 0)
+    tg_before = float(getattr(profil, "temps_gagne_jours", 0) or 0)
     if not impact_jours or abs(impact_jours) < 0.001:
-        return
-    temps_gagne_apres = float(getattr(profil, "temps_gagne_jours", 0)) + impact_jours
-    temps_gagne_apres = max(
-        0, min(float(getattr(profil, "temps_initial_jours", 0) or 0), temps_gagne_apres)
-    )
-    profil.temps_gagne_jours = temps_gagne_apres
-    if float(getattr(profil, "temps_initial_jours", 0) or 0) > 0:
-        profil.probabilite_actuelle = round(
-            (temps_gagne_apres / profil.temps_initial_jours) * 100, 2
-        )
+        return tg_before
+    tg_after = max(0.0, min(temps_initial, tg_before + impact_jours))
+    profil.temps_gagne_jours = tg_after
+    if temps_initial > 0:
+        profil.probabilite_actuelle = round((tg_after / temps_initial) * 100, 2)
     profil.marquer_modification()
-    profil_repo.sauvegarder(profil)
+    pdata = profil.to_dict()
+    updates = ", ".join(f"{k} = :{k}" for k in pdata if k != "id")
+    await session.execute(
+        text(f"UPDATE profil_utilisateur SET {updates} WHERE id = :id"),
+        pdata,
+    )
+    return tg_after
 
 
 async def validate_tracking_async(
@@ -867,81 +887,75 @@ async def validate_tracking_async(
 
     recap = compute_recap(tracking)
     impact_jours = float(recap["impact_total_jours"])  # valeur theorique (recap)
-
-    # FIX P2 / C1 (2026-06) : on capture temps_gagne AVANT/APRES pour calculer
-    # l'impact REELLEMENT applique. Avant, on renvoyait la valeur du recap
-    # (non clampee), alors que l'apply clamp a [0, temps_initial] + plafonne
-    # les SO. Resultat : un user proche d'un bord voyait "+50j applique" mais
-    # la DB ne bougeait que de +6j. On renvoie desormais la valeur reelle.
+    prob_before = float(getattr(profil, "probabilite_actuelle", 0) or 0)
     tg_before = float(getattr(profil, "temps_gagne_jours", 0) or 0)
+    temps_initial = float(getattr(profil, "temps_initial_jours", 0) or 0)
+    delta_prob = _compute_delta_probabilite(prob_before, impact_jours)
 
-    so_impactes: list[dict] = []
-    try:
-        so_impactes = await _apply_impact_with_cascade_async(
-            profil_id=profil.id,
-            temps_initial_jours=float(getattr(profil, "temps_initial_jours", 0) or 0),
-            impact_jours=impact_jours,
-        )
-    except Exception as e:
-        logger.warning(f"apply_impact (validate) failed (continuing): {e}")
-
-    # Profil : temps_gagne + probabilite_actuelle
-    prob_actuelle_before = float(getattr(profil, "probabilite_actuelle", 0))
-    try:
-        await _update_profil_temps_async(profil_repo, profil, impact_jours)
-    except Exception as e:
-        logger.warning(f"update profil (validate) failed: {e}")
-
-    # Impact REELLEMENT reflete sur temps_gagne (post-clamp + alignement SO).
-    # Peut differer du recap si le profil est proche d'un bord (99.9%) ou si
-    # les SO saturent. On l'expose en transparence SANS changer le contrat
-    # historique (impact_jours_applique reste la valeur recap pour compat).
-    tg_after = float(getattr(profil, "temps_gagne_jours", 0) or 0)
-    impact_reel = round(tg_after - tg_before, 4)
-    # Divergence significative recap vs reel → le front peut alerter l'user.
-    divergence = abs(impact_jours - impact_reel) > 0.5
-    delta_prob = _compute_delta_probabilite(prob_actuelle_before, impact_jours)
-
-    # Marque le tracking comme valide.
+    # ── Transaction UNIQUE (atomicite) ──────────────────────────────────────
+    # cascade SO + profil + statut + decision commitent ENSEMBLE, ou rien. Un
+    # crash en plein vol roll back tout -> le tracking reste
+    # 'awaiting_validation' -> retry propre, jamais de double application ni de
+    # drift d'invariant Dashboard.
     factory = get_session_factory()
     now_iso = datetime.now(timezone.utc).isoformat()
+    so_impactes: list[dict] = []
+    impact_reel = 0.0
     async with factory() as session:
-        await session.execute(
-            text(
-                "UPDATE dilemmes_tracking SET status='validated', "
-                "impact_final_jours = :ij, impact_final_probabilite = :ip, "
-                "so_impactes_json = :so, validated_at = :v "
-                "WHERE id = :id"
-            ),
-            {
-                "ij": impact_jours,
-                "ip": delta_prob,
-                "so": json.dumps(so_impactes, ensure_ascii=False),
-                "v": now_iso,
-                "id": tracking_id,
-            },
-        )
-        # Regle : on enregistre dans l'historique des decisions UNIQUEMENT si la
-        # decision a un impact REEL sur le temps vers l'objectif (impact_reel !=
-        # 0). Une validation sans impact (ex: toutes les periodes "Aucun", ou
-        # gauge deja a la borne) ne laisse aucune trace. Best-effort : un echec
-        # d'enregistrement n'annule pas la validation (impact deja applique).
-        if abs(impact_reel) > 0.001:
-            try:
+        try:
+            so_impactes = await _apply_impact_with_cascade_async(
+                profil_id=profil.id,
+                temps_initial_jours=temps_initial,
+                impact_jours=impact_jours,
+                session=session,
+            )
+            tg_after = await _persist_profil_temps_in_session(session, profil, impact_jours)
+            # Impact REELLEMENT reflete sur temps_gagne (post-clamp). Peut
+            # differer du recap si le profil est proche d'un bord (99.9%) ou si
+            # les SO saturent.
+            impact_reel = round(tg_after - tg_before, 4)
+
+            await session.execute(
+                text(
+                    "UPDATE dilemmes_tracking SET status='validated', "
+                    "impact_final_jours = :ij, impact_final_probabilite = :ip, "
+                    "so_impactes_json = :so, validated_at = :v "
+                    "WHERE id = :id"
+                ),
+                {
+                    "ij": impact_jours,
+                    "ip": delta_prob,
+                    "so": json.dumps(so_impactes, ensure_ascii=False),
+                    "v": now_iso,
+                    "id": tracking_id,
+                },
+            )
+            # Regle : enregistrement dans l'historique des decisions UNIQUEMENT
+            # si la decision a un impact REEL sur le temps vers l'objectif
+            # (impact_reel != 0). Validation sans impact -> aucune trace.
+            if abs(impact_reel) > 0.001:
                 await _record_tracking_decision_async(
                     session, tracking,
                     mode="validated",
-                    prob_before=prob_actuelle_before,
-                    prob_after=prob_actuelle_before + delta_prob,
+                    prob_before=prob_before,
+                    prob_after=prob_before + delta_prob,
                     tg_before=tg_before,
                     tg_after=tg_after,
                     recap=recap,
                     so_impactes=so_impactes,
                 )
-            except Exception as e:
-                logger.warning(f"record decision (validate) failed: {e}")
-        await session.commit()
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            # Transaction annulee : on restaure le profil en memoire pour qu'il
+            # reste coherent avec la DB (rien n'a ete applique).
+            profil.temps_gagne_jours = tg_before
+            profil.probabilite_actuelle = prob_before
+            logger.exception("validate_tracking_async atomic failed")
+            return {"ok": False, "error": f"validate_failed: {e}"}
 
+    # True si recap != reel applique (>0.5j) -> le front peut alerter l'user.
+    divergence = abs(impact_jours - impact_reel) > 0.5
     return {
         "ok": True,
         "impact_jours_applique": impact_jours,       # recap (contrat historique)
@@ -978,74 +992,78 @@ async def cancel_tracking_async(
     if mode not in ("zero", "partial"):
         return {"ok": False, "error": "mode_invalid"}
 
-    impact_jours = 0.0
-    delta_prob = 0.0
-    so_impactes: list[dict] = []
     # Recap toujours calcule (pur, sans effet de bord) : sert a l'enregistrement
     # de la decision dans l'historique (option dominante + detail des rappels).
     recap = compute_recap(tracking)
-    prob_actuelle_before = float(getattr(profil, "probabilite_actuelle", 0))
+    prob_before = float(getattr(profil, "probabilite_actuelle", 0) or 0)
     tg_before = float(getattr(profil, "temps_gagne_jours", 0) or 0)
+    temps_initial = float(getattr(profil, "temps_initial_jours", 0) or 0)
+    impact_jours = float(recap["impact_total_jours"]) if mode == "partial" else 0.0
+    delta_prob = (
+        _compute_delta_probabilite(prob_before, impact_jours)
+        if mode == "partial" else 0.0
+    )
 
-    if mode == "partial":
-        impact_jours = float(recap["impact_total_jours"])
-
-        try:
-            so_impactes = await _apply_impact_with_cascade_async(
-                profil_id=profil.id,
-                temps_initial_jours=float(getattr(profil, "temps_initial_jours", 0) or 0),
-                impact_jours=impact_jours,
-            )
-        except Exception as e:
-            logger.warning(f"apply_impact (cancel partial) failed: {e}")
-
-        delta_prob = _compute_delta_probabilite(prob_actuelle_before, impact_jours)
-        try:
-            await _update_profil_temps_async(profil_repo, profil, impact_jours)
-        except Exception as e:
-            logger.warning(f"update profil (cancel partial) failed: {e}")
-
-    tg_after = float(getattr(profil, "temps_gagne_jours", 0) or 0)
-
+    # ── Transaction UNIQUE (atomicite) : cascade + profil + statut + decision
+    # commitent ensemble, ou rien (cf. validate_tracking_async).
     factory = get_session_factory()
     now_iso = datetime.now(timezone.utc).isoformat()
+    so_impactes: list[dict] = []
+    impact_reel = 0.0
     async with factory() as session:
-        await session.execute(
-            text(
-                "UPDATE dilemmes_tracking SET status='cancelled', "
-                "cancellation_mode = :mode, "
-                "impact_final_jours = :ij, impact_final_probabilite = :ip, "
-                "so_impactes_json = :so, cancelled_at = :c "
-                "WHERE id = :id"
-            ),
-            {
-                "mode": mode,
-                "ij": impact_jours,
-                "ip": delta_prob,
-                "so": json.dumps(so_impactes, ensure_ascii=False),
-                "c": now_iso,
-                "id": tracking_id,
-            },
-        )
-        # Regle : un abandon ne rejoint l'historique des decisions QUE s'il a un
-        # impact REEL sur le temps vers l'objectif. Un abandon sans impact
-        # (mode 'zero', ou periodes toutes "Aucun") ne laisse aucune trace —
-        # comme une suppression.
-        if abs(tg_after - tg_before) > 0.001:
-            try:
+        try:
+            if mode == "partial" and abs(impact_jours) > 0.001:
+                so_impactes = await _apply_impact_with_cascade_async(
+                    profil_id=profil.id,
+                    temps_initial_jours=temps_initial,
+                    impact_jours=impact_jours,
+                    session=session,
+                )
+                tg_after = await _persist_profil_temps_in_session(
+                    session, profil, impact_jours
+                )
+                impact_reel = round(tg_after - tg_before, 4)
+            else:
+                tg_after = tg_before
+
+            await session.execute(
+                text(
+                    "UPDATE dilemmes_tracking SET status='cancelled', "
+                    "cancellation_mode = :mode, "
+                    "impact_final_jours = :ij, impact_final_probabilite = :ip, "
+                    "so_impactes_json = :so, cancelled_at = :c "
+                    "WHERE id = :id"
+                ),
+                {
+                    "mode": mode,
+                    "ij": impact_jours,
+                    "ip": delta_prob,
+                    "so": json.dumps(so_impactes, ensure_ascii=False),
+                    "c": now_iso,
+                    "id": tracking_id,
+                },
+            )
+            # Regle : un abandon ne rejoint l'historique des decisions QUE s'il a
+            # un impact REEL sur le temps (mode 'zero' ou periodes toutes "Aucun"
+            # -> aucune trace, comme une suppression).
+            if abs(impact_reel) > 0.001:
                 await _record_tracking_decision_async(
                     session, tracking,
                     mode="abandoned",
-                    prob_before=prob_actuelle_before,
-                    prob_after=prob_actuelle_before + delta_prob,
+                    prob_before=prob_before,
+                    prob_after=prob_before + delta_prob,
                     tg_before=tg_before,
                     tg_after=tg_after,
                     recap=recap,
                     so_impactes=so_impactes,
                 )
-            except Exception as e:
-                logger.warning(f"record decision (cancel) failed: {e}")
-        await session.commit()
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            profil.temps_gagne_jours = tg_before
+            profil.probabilite_actuelle = prob_before
+            logger.exception("cancel_tracking_async atomic failed")
+            return {"ok": False, "error": f"cancel_failed: {e}"}
 
     return {
         "ok": True,

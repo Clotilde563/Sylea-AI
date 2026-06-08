@@ -776,6 +776,38 @@ def test_validate_then_delete_keeps_history_decision(client_with_profil: TestCli
     assert tracking_decisions[0]["rappels"]["mode"] == "validated"
 
 
+def test_validate_is_idempotent_no_double_apply(client_with_profil: TestClient):
+    """Idempotence (transaction unique) : une 2e tentative de validation apres
+    succes est rejetee (409) et n'applique PAS l'impact une 2e fois — temps_gagne
+    stable + une seule decision dans l'historique (pas de doublon)."""
+    assert client_with_profil.post("/api/profil/probabilite", json={}).status_code == 200
+    create_resp = client_with_profil.post(
+        "/api/dilemme/tracking/create",
+        json=_create_tracking_payload(impact_jours=30),
+    )
+    tracking_id = create_resp.json()["tracking"]["id"]
+    client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/respond",
+        json={"periode_idx": 0, "choice": "0"},
+    )
+    assert client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/validate"
+    ).status_code == 200
+    tg_after_1 = client_with_profil.get("/api/profil").json()["temps_gagne_jours"]
+    assert tg_after_1 > 0  # impact applique une fois
+
+    # 2e validation -> 409 (status deja 'validated') et AUCUN nouvel impact.
+    assert client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/validate"
+    ).status_code == 409
+    tg_after_2 = client_with_profil.get("/api/profil").json()["temps_gagne_jours"]
+    assert tg_after_2 == pytest.approx(tg_after_1, abs=0.001)
+
+    # Une seule decision issue du tracking dans l'historique (pas de doublon).
+    decisions = client_with_profil.get("/api/historique?limite=20").json()
+    assert len([d for d in decisions if d.get("rappels")]) == 1
+
+
 def test_delete_tracking_decision_from_history_reverses_impact(client_with_profil: TestClient):
     """Supprimer depuis l'historique une decision issue d'un tracking reverse
     l'impact temps ET resynchronise la probabilite (anti-drift de l'invariant :
