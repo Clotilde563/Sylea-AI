@@ -9,6 +9,9 @@ email-validator>=2.2.0
 # pytest >=9.0.3 corrige CVE-2025-71176 (cache poisoning via metadata)
 pytest>=9.0.3
 pytest-cov>=4.1.0
+# pytest-asyncio : REQUIS par la suite (asyncio_mode=strict dans pytest.ini) —
+# sans lui, les tests async lèvent "async def not natively supported" en CI.
+pytest-asyncio>=1.0.0
 
 # Web GUI (FastAPI)
 fastapi>=0.111.0
