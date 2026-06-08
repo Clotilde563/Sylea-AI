@@ -168,6 +168,115 @@ class TestGDPRDelete:
         assert "error" in r
 
 
+class TestGDPRCompleteErasure:
+    """Verifie que la suppression RGPD (decouverte dynamique) purge VRAIMENT
+    toutes les tables user-scoped — y compris les plus sensibles qui etaient
+    auparavant oubliees (journaux sante, chats Agent 1/2, profil) — ET la ligne
+    `users` (le compte). Garde-fou anti-regression de la violation Art. 17."""
+
+    def _seed_sensitive(self, db, uid: str) -> None:
+        c = db.conn
+        # Profil EN PREMIER (id = uid) : les tables user_id (bilans, sous_obj)
+        # ont une FK -> profil_utilisateur(id). auth_user_id -> users(id).
+        c.execute(
+            "INSERT INTO profil_utilisateur (id, auth_user_id, nom, age, profession, ville, "
+            "situation_familiale, revenu_annuel, patrimoine_estime, charges_mensuelles, "
+            "cree_le, mis_a_jour_le) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (uid, uid, "Nom", 30, "Job", "Paris", "Celibataire",
+             50000.0, 10000.0, 1500.0, "2026-06-01", "2026-06-01"),
+        )
+        # Journal sante quotidien (donnee sensible) — user_id -> profil(id)
+        c.execute(
+            "INSERT INTO bilans_quotidiens (id, user_id, date, cree_le) VALUES (?,?,?,?)",
+            (f"bil_{uid}", uid, "2026-06-01", "2026-06-01T08:00:00"),
+        )
+        # Chat Agent 1 (Compagnon)
+        c.execute(
+            "INSERT INTO agent_messages (id, auth_user_id, role, content, created_at) VALUES (?,?,?,?,?)",
+            (f"a1_{uid}", uid, "user", f"secret_sante_{uid}", "2026-06-01T09:00:00"),
+        )
+        # Chat Agent 2 (Assistant)
+        c.execute(
+            "INSERT INTO agent2_messages (id, auth_user_id, role, content, type, created_at) VALUES (?,?,?,?,?,?)",
+            (f"a2_{uid}", uid, "user", f"secret_finance_{uid}", "text", "2026-06-01T09:30:00"),
+        )
+        c.commit()
+
+    def _count_user_rows(self, db, uid: str) -> dict[str, int]:
+        """Compte les lignes referencant `uid` dans CHAQUE table user-scoped
+        (meme logique de decouverte que le module GDPR)."""
+        from api.agent3_gdpr import _OWNER_COLUMNS, _DISCOVERY_DENYLIST
+        c = db.conn
+        tables = [r[0] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()]
+        counts: dict[str, int] = {}
+        for t in tables:
+            if t in _DISCOVERY_DENYLIST:
+                continue
+            cols = [x[1] for x in c.execute(f"PRAGMA table_info({t})").fetchall()]
+            owner = [x for x in _OWNER_COLUMNS if x in cols]
+            if not owner:
+                continue
+            where = " OR ".join(f"{x} = ?" for x in owner)
+            n = c.execute(f"SELECT COUNT(*) FROM {t} WHERE {where}", tuple([uid] * len(owner))).fetchone()[0]
+            if n:
+                counts[t] = n
+        return counts
+
+    def test_delete_purges_sensitive_tables_and_account(self, db):
+        from api.agent3_gdpr import delete_my_data_async
+        _seed_user(db, "u_rgpd", "u_rgpd@test.com")
+        _seed_user(db, "bob_keep", "bob_keep@test.com")
+        self._seed_sensitive(db, "u_rgpd")
+        self._seed_sensitive(db, "bob_keep")
+
+        # Avant : u_rgpd a des lignes dans plusieurs tables sensibles
+        before = self._count_user_rows(db, "u_rgpd")
+        assert "bilans_quotidiens" in before
+        assert "agent_messages" in before
+        assert "agent2_messages" in before
+        assert "profil_utilisateur" in before
+
+        result = asyncio.run(delete_my_data_async("u_rgpd", delete_uploads=False))
+        assert "error" not in result
+        # Les tables sensibles + le compte sont bien dans le rapport de suppression
+        for t in ("bilans_quotidiens", "agent_messages", "agent2_messages",
+                  "profil_utilisateur", "users"):
+            assert result["deleted_by_table"].get(t, 0) >= 1, f"{t} non supprimee"
+
+        # Apres : AUCUNE ligne referencant u_rgpd ne subsiste, nulle part
+        after = self._count_user_rows(db, "u_rgpd")
+        assert after == {}, f"residu apres suppression: {after}"
+        # La ligne `users` (le compte) est supprimee
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM users WHERE id = ?", ("u_rgpd",)
+        ).fetchone()[0] == 0
+
+        # Isolation : bob_keep est intact
+        bob = self._count_user_rows(db, "bob_keep")
+        assert "agent_messages" in bob and "profil_utilisateur" in bob
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM users WHERE id = ?", ("bob_keep",)
+        ).fetchone()[0] == 1
+
+    def test_export_includes_sensitive_and_redacts_secrets(self, db):
+        from api.agent3_gdpr import export_my_data_async
+        _seed_user(db, "u_exp", "u_exp@test.com")
+        self._seed_sensitive(db, "u_exp")
+
+        bundle = asyncio.run(export_my_data_async("u_exp"))
+        data = bundle["data"]
+        # Les donnees sensibles sont bien exportees (Art. 15/20)
+        assert "bilans_quotidiens" in data
+        assert "agent_messages" in data
+        assert "agent2_messages" in data
+        assert "users" in data
+        # Le hash du mot de passe n'est JAMAIS exporte en clair
+        users_row = data["users"][0]
+        assert users_row.get("hashed_password") == "[REDACTED — secret/hash non exporte en clair]"
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Retention policies
 # ═════════════════════════════════════════════════════════════════════════════
