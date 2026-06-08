@@ -5,7 +5,6 @@
 import { useEffect, useState, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
-import { formatImpactJours } from '../utils/duration'
 import type { TrackingItem, TrackingStatus } from '../types'
 
 // "Mes dilemmes" n'affiche QUE les dilemmes en cours (tracking + a valider).
@@ -704,62 +703,26 @@ function TrackingCard({
         </div>
       )}
 
-      {/* Validated result */}
-      {tr.status === 'validated' && tr.impact_final_jours !== null && (
-        <div style={{
-          padding: '0.85rem 1rem',
-          background: 'rgba(34,197,94,0.06)',
-          border: '1px solid rgba(34,197,94,0.3)',
-          borderRadius: '10px',
-          marginBottom: '1rem',
-          display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap',
-        }}>
-          <span style={{ fontSize: '0.75rem', color: '#4ade80', fontFamily: 'var(--font-mono, monospace)', letterSpacing: '0.05em' }}>
-            IMPACT FINAL
-          </span>
-          <span style={{ fontSize: '1.1rem', fontWeight: 800, color: '#4ade80', fontFamily: 'var(--font-mono, monospace)' }}>
-            {formatImpactJours(tr.impact_final_jours)}
-          </span>
-          {tr.impact_final_probabilite !== null && (
-            <span style={{ fontSize: '0.85rem', color: '#86efac' }}>
-              Δ {tr.impact_final_probabilite >= 0 ? '+' : ''}{tr.impact_final_probabilite.toFixed(2)}%
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* === BOUTONS D'ACTION TOUJOURS VISIBLES === */}
+      {/* === BOUTONS D'ACTION (dilemmes en cours uniquement) === */}
       <div style={{
         display: 'flex', gap: '0.55rem',
         paddingTop: '0.85rem',
         borderTop: '1px solid rgba(0,200,255,0.08)',
       }}>
-        {(tr.status === 'tracking' || tr.status === 'awaiting_validation') ? (
-          <>
-            <button
-              type="button"
-              onClick={() => setShowAbandon(true)}
-              className="sylea-action-btn sylea-action-btn-abandon"
-            >
-              ◯ Abandonner
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowDelete(true)}
-              className="sylea-action-btn sylea-action-btn-delete"
-            >
-              ✕ Supprimer
-            </button>
-          </>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setShowDelete(true)}
-            className="sylea-action-btn sylea-action-btn-delete"
-          >
-            ✕ Supprimer de l'historique
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={() => setShowAbandon(true)}
+          className="sylea-action-btn sylea-action-btn-abandon"
+        >
+          ◯ Abandonner
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowDelete(true)}
+          className="sylea-action-btn sylea-action-btn-delete"
+        >
+          ✕ Supprimer
+        </button>
       </div>
 
       {/* === MODALS === */}
@@ -807,17 +770,6 @@ function TrackingCard({
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.88rem', lineHeight: 1.6 }}>
             Le dilemme sera <strong style={{ color: '#f87171' }}>complètement effacé</strong> — aucune trace dans votre historique. <strong>Aucun impact</strong> appliqué à votre objectif. Cette action est <strong>irréversible</strong>.
           </p>
-          {tr.status === 'validated' && tr.impact_final_jours !== null && (
-            <div style={{
-              background: `rgba(0,200,255,0.06)`,
-              border: `1px solid ${SYLEA.cyan}44`,
-              borderRadius: '8px', padding: '0.6rem 0.85rem',
-              marginTop: '0.85rem',
-              color: '#93c5fd', fontSize: '0.78rem',
-            }}>
-              ℹ L'impact de <strong>{formatImpactJours(tr.impact_final_jours)}</strong> déjà appliqué <strong>ne sera pas reversé</strong>. Seul l'enregistrement disparaît.
-            </div>
-          )}
         </Modal>
       )}
     </div>

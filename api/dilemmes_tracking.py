@@ -612,6 +612,7 @@ async def _record_tracking_decision_async(
     tg_before: float,
     tg_after: float,
     recap: dict,
+    so_impactes: list[dict] | None = None,
 ) -> None:
     """Cree une row `decisions` (historique) a partir d'un tracking valide ou
     abandonne, avec le detail des rappels.
@@ -651,6 +652,21 @@ async def _record_tracking_decision_async(
             best_clicks = b["nb_clicks"]
             chosen_id = options[idx].id
 
+    # Sous-objectif cible (coherence Chart1 + recompute distribution) : on
+    # rattache la decision au SO que la cascade a vise (est_cible), sinon au
+    # premier SO impacte. Ainsi la decision suivie se comporte comme une
+    # decision classique vis-a-vis des sous-objectifs (timeline + recompute).
+    cible_so_id: str | None = None
+    cible_impact = 0.0
+    for it in (so_impactes or []):
+        if it.get("est_cible"):
+            cible_so_id = it.get("so_id")
+            cible_impact = float(it.get("delta_pct", 0) or 0)
+            break
+    if cible_so_id is None and so_impactes:
+        cible_so_id = so_impactes[0].get("so_id")
+        cible_impact = float(so_impactes[0].get("delta_pct", 0) or 0)
+
     decision = Decision(
         user_id=tracking["user_id"],
         question=tracking.get("question", ""),
@@ -659,8 +675,8 @@ async def _record_tracking_decision_async(
         option_choisie_id=chosen_id,
         probabilite_apres=round(prob_after, 2),
         impact_temporel_jours=tracking.get("impact_temporel_jours"),
-        sous_objectif_id=None,      # impact temps deja cascade (multi-SO possible)
-        impact_sous_objectif=0.0,
+        sous_objectif_id=cible_so_id,
+        impact_sous_objectif=cible_impact,
         temps_gagne_avant=round(tg_before, 4),
         temps_gagne_apres=round(tg_after, 4),
         rappels=_build_rappels_detail(tracking, mode),
@@ -920,6 +936,7 @@ async def validate_tracking_async(
                     tg_before=tg_before,
                     tg_after=tg_after,
                     recap=recap,
+                    so_impactes=so_impactes,
                 )
             except Exception as e:
                 logger.warning(f"record decision (validate) failed: {e}")
@@ -1024,6 +1041,7 @@ async def cancel_tracking_async(
                     tg_before=tg_before,
                     tg_after=tg_after,
                     recap=recap,
+                    so_impactes=so_impactes,
                 )
             except Exception as e:
                 logger.warning(f"record decision (cancel) failed: {e}")

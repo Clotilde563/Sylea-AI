@@ -70,7 +70,10 @@ export function StatistiquesPage() {
     // Toujours recharger le profil depuis l'API
     api.getProfil().then(setProfil).catch(() => navigate('/profil'))
     api.getHistorique(100)
-      .then(setDecisions)
+      // Exclut les marqueurs internes de recalcul de proba (question sentinelle)
+      // : ce ne sont pas des decisions utilisateur. Ils polluaient la liste, le
+      // compteur et la courbe (snapshots temps_gagne=0 -> plongeon a 0 %).
+      .then((ds) => setDecisions(ds.filter((d) => d.question !== '[Recalcul probabilite]')))
       .catch(() => setDecisions([]))
       .finally(() => setLoading(false))
     refreshSousObjectifs()
@@ -323,6 +326,8 @@ export function StatistiquesPage() {
                               type="button"
                               onClick={() => setExpandedRappels(isOpen ? null : d.id)}
                               title="Voir le détail des rappels"
+                              aria-expanded={isOpen}
+                              aria-label={`Détail des rappels (${rappels!.nb_repondu}/${rappels!.nb_periodes})`}
                               style={{
                                 marginLeft: '0.5rem', cursor: 'pointer',
                                 background: rappelColor + '1f',
