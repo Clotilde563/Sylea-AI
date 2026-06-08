@@ -618,3 +618,159 @@ def test_delete_cancelled_partial_keeps_impact(client_with_profil: TestClient):
     profil_after_delete = client_with_profil.get("/api/profil").json()
     # L'impact applique pendant cancel reste applique
     assert profil_after_delete["temps_gagne_jours"] == profil_after_cancel["temps_gagne_jours"]
+
+
+# ── Tests : enregistrement dans l'historique des decisions ───────────────────
+# Nouveau comportement (2026-06) : un dilemme suivi VALIDE ou ABANDONNE rejoint
+# l'historique des decisions (GET /api/historique) avec le detail des rappels.
+# Un dilemme SUPPRIME ne laisse aucune trace.
+
+
+def test_validate_records_decision_in_history_with_rappels(client_with_profil: TestClient):
+    """Apres validation, le dilemme apparait dans l'historique des decisions
+    avec le detail des rappels (mode='validated') + impact temps coherent."""
+    # Calcule d'abord temps_initial (sinon l'impact est clampe a 0 car un profil
+    # fraichement cree a temps_initial_jours = 0).
+    assert client_with_profil.post("/api/profil/probabilite", json={}).status_code == 200
+
+    create_resp = client_with_profil.post(
+        "/api/dilemme/tracking/create",
+        json=_create_tracking_payload(impact_jours=30),  # 1 periode
+    )
+    tracking_id = create_resp.json()["tracking"]["id"]
+    client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/respond",
+        json={"periode_idx": 0, "choice": "0"},  # option A (+150j)
+    )
+    assert client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/validate"
+    ).status_code == 200
+
+    profil_after = client_with_profil.get("/api/profil").json()
+
+    hist = client_with_profil.get("/api/historique?limite=20")
+    assert hist.status_code == 200, hist.text
+    decisions = hist.json()
+    # NB : POST /probabilite a insere un marker de recalc (rappels=None). On
+    # cible la decision issue du tracking via son champ rappels.
+    tracking_decisions = [d for d in decisions if d.get("rappels")]
+    assert len(tracking_decisions) == 1
+    d = tracking_decisions[0]
+    assert d["question"] == "Faut-il apprendre l'anglais ou l'italien ?"
+    # Option dominante = A
+    assert d["option_choisie_description"] == "Apprendre l'anglais 1h/jour"
+    # impact temps reel recorde (> 0) et coherent
+    assert d["impact_net"] is not None and d["impact_net"] > 0
+    assert d["impact_net"] == pytest.approx(
+        d["temps_gagne_apres"] - d["temps_gagne_avant"], abs=0.01
+    )
+    # Coherence avec le profil : la decision reflete le temps_gagne reel
+    assert d["temps_gagne_apres"] == pytest.approx(
+        profil_after["temps_gagne_jours"], abs=0.01
+    )
+    # Detail des rappels
+    r = d["rappels"]
+    assert r is not None
+    assert r["mode"] == "validated"
+    assert r["nb_periodes"] == 1
+    assert r["nb_repondu"] == 1
+    assert len(r["periodes"]) == 1
+    p = r["periodes"][0]
+    assert p["index"] == 1
+    assert p["label"] == "A"
+    assert p["repondu"] is True
+
+
+def test_cancel_partial_records_abandoned_decision(client_with_profil: TestClient):
+    """Un abandon (cancel partial) AVEC impact rejoint l'historique, mode='abandoned'."""
+    # temps_initial pour que l'impact partiel soit reel (sinon clampe a 0).
+    assert client_with_profil.post("/api/profil/probabilite", json={}).status_code == 200
+    create_resp = client_with_profil.post(
+        "/api/dilemme/tracking/create",
+        json=_create_tracking_payload(impact_jours=365),  # 12 periodes
+    )
+    tracking_id = create_resp.json()["tracking"]["id"]
+    client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/respond",
+        json={"periode_idx": 0, "choice": "0"},
+    )
+    assert client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/cancel",
+        json={"mode": "partial"},
+    ).status_code == 200
+
+    decisions = client_with_profil.get("/api/historique?limite=20").json()
+    tracking_decisions = [d for d in decisions if d.get("rappels")]
+    assert len(tracking_decisions) == 1
+    d = tracking_decisions[0]
+    assert d["impact_net"] != 0  # impact reel applique
+    r = d["rappels"]
+    assert r["mode"] == "abandoned"
+    assert r["nb_periodes"] == 12
+    assert r["nb_repondu"] == 1
+    # 11 periodes non repondues + 1 repondue
+    assert sum(1 for p in r["periodes"] if p["repondu"]) == 1
+
+
+def test_cancel_no_impact_does_not_record_decision(client_with_profil: TestClient):
+    """REGLE : tout ce qui a un impact sur le temps -> historique ; le reste, non.
+    Un abandon SANS impact (aucune periode repondue) ne laisse AUCUNE trace,
+    meme si temps_initial est defini (donc l'impact AURAIT pu etre non nul)."""
+    assert client_with_profil.post("/api/profil/probabilite", json={}).status_code == 200
+    create_resp = client_with_profil.post(
+        "/api/dilemme/tracking/create",
+        json=_create_tracking_payload(impact_jours=365),
+    )
+    tracking_id = create_resp.json()["tracking"]["id"]
+    # Abandon partial SANS aucune reponse -> impact pondere = 0
+    assert client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/cancel",
+        json={"mode": "partial"},
+    ).status_code == 200
+
+    decisions = client_with_profil.get("/api/historique?limite=20").json()
+    # Aucune decision issue d'un tracking (le marker de recalc a rappels=None)
+    assert [d for d in decisions if d.get("rappels")] == []
+
+
+def test_delete_does_not_record_decision(client_with_profil: TestClient):
+    """Un dilemme SUPPRIME (sans validation) ne laisse AUCUNE trace dans
+    l'historique des decisions."""
+    create_resp = client_with_profil.post(
+        "/api/dilemme/tracking/create",
+        json=_create_tracking_payload(impact_jours=30),
+    )
+    tracking_id = create_resp.json()["tracking"]["id"]
+    client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/respond",
+        json={"periode_idx": 0, "choice": "0"},
+    )
+    assert client_with_profil.delete(
+        f"/api/dilemme/tracking/{tracking_id}"
+    ).status_code == 200
+
+    decisions = client_with_profil.get("/api/historique?limite=20").json()
+    assert decisions == []
+
+
+def test_validate_then_delete_keeps_history_decision(client_with_profil: TestClient):
+    """Supprimer le TRACKING valide ne supprime pas la decision d'historique
+    (ce sont 2 enregistrements distincts : la decision vit dans l'historique)."""
+    assert client_with_profil.post("/api/profil/probabilite", json={}).status_code == 200
+    create_resp = client_with_profil.post(
+        "/api/dilemme/tracking/create",
+        json=_create_tracking_payload(impact_jours=7),
+    )
+    tracking_id = create_resp.json()["tracking"]["id"]
+    client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/respond",
+        json={"periode_idx": 0, "choice": "0"},
+    )
+    client_with_profil.post(f"/api/dilemme/tracking/{tracking_id}/validate")
+    # Supprime le tracking (pas la decision historique)
+    client_with_profil.delete(f"/api/dilemme/tracking/{tracking_id}")
+
+    decisions = client_with_profil.get("/api/historique?limite=20").json()
+    tracking_decisions = [d for d in decisions if d.get("rappels")]
+    assert len(tracking_decisions) == 1
+    assert tracking_decisions[0]["rappels"]["mode"] == "validated"

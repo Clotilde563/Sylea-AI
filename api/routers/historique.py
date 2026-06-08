@@ -364,6 +364,7 @@ def _decision_to_out(d: Decision) -> DecisionOut:
         impact_sous_objectif=so_impact if so_impact else None,
         temps_gagne_avant=d.temps_gagne_avant,
         temps_gagne_apres=d.temps_gagne_apres,
+        rappels=getattr(d, "rappels", None),
     )
 
 

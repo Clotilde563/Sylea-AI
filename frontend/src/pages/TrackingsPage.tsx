@@ -8,7 +8,12 @@ import { api } from '../api/client'
 import { formatImpactJours } from '../utils/duration'
 import type { TrackingItem, TrackingStatus } from '../types'
 
-type StatusFilter = TrackingStatus | 'all'
+// "Mes dilemmes" n'affiche QUE les dilemmes en cours (tracking + a valider).
+// Les dilemmes valides ou abandonnes rejoignent l'historique des decisions
+// (page Statistiques). Les supprimes ne laissent aucune trace.
+type StatusFilter = 'all' | 'tracking' | 'awaiting_validation'
+
+const ACTIVE_STATUSES: TrackingStatus[] = ['tracking', 'awaiting_validation']
 
 // Palette officielle Sylea
 const SYLEA = {
@@ -318,7 +323,9 @@ export function TrackingsPage() {
     setError(null)
     try {
       const r = await api.trackingList()
-      setItems(r.items || [])
+      // Ne garder que les dilemmes en cours : valides/abandonnes sont dans
+      // l'historique des decisions, supprimes = aucune trace.
+      setItems((r.items || []).filter(t => ACTIVE_STATUSES.includes(t.status)))
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Erreur de chargement')
     } finally {
@@ -333,8 +340,6 @@ export function TrackingsPage() {
     all: items.length,
     tracking: items.filter(t => t.status === 'tracking').length,
     awaiting_validation: items.filter(t => t.status === 'awaiting_validation').length,
-    validated: items.filter(t => t.status === 'validated').length,
-    cancelled: items.filter(t => t.status === 'cancelled').length,
   }), [items])
 
   return (
@@ -374,7 +379,7 @@ export function TrackingsPage() {
               Mes dilemmes
             </h1>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.92rem', marginTop: '0.4rem', maxWidth: 640 }}>
-              Engagements pris et mesurés dans le temps. Sylea notifie à chaque période pour capter vos vraies actions.
+              Vos dilemmes <strong style={{ color: SYLEA.cyan }}>en cours</strong>, mesurés dans le temps. Sylea notifie à chaque période pour capter vos vraies actions. Une fois <strong>validés</strong> ou <strong>abandonnés</strong>, ils rejoignent l'historique des décisions (Statistiques).
             </p>
           </div>
 
@@ -384,8 +389,6 @@ export function TrackingsPage() {
               ['all', 'Tous', counts.all],
               ['tracking', 'En cours', counts.tracking],
               ['awaiting_validation', 'À valider', counts.awaiting_validation],
-              ['validated', 'Validés', counts.validated],
-              ['cancelled', 'Abandonnés', counts.cancelled],
             ] as [StatusFilter, string, number][]).map(([key, label, count]) => (
               <button
                 key={key}

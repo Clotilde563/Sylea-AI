@@ -136,6 +136,21 @@ export interface ActionAgent {
   execute_le: string
 }
 
+export interface RappelPeriode {
+  index: number
+  label: string
+  description: string
+  responded_at: string | null
+  repondu: boolean
+}
+
+export interface DecisionRappels {
+  mode: 'validated' | 'abandoned'
+  nb_periodes: number
+  nb_repondu: number
+  periodes: RappelPeriode[]
+}
+
 export interface Decision {
   id: string
   user_id: string
@@ -153,6 +168,8 @@ export interface Decision {
   sous_objectif_impacte?: string | null
   sous_objectif_id?: string | null
   impact_sous_objectif?: number | null
+  // Detail des rappels (dilemmes issus du suivi/tracking). null sinon.
+  rappels?: DecisionRappels | null
 }
 
 export interface ProbabiliteResult {

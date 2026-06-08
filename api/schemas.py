@@ -180,6 +180,24 @@ class ActionAgentOut(BaseModel):
     execute_le: str
 
 
+class RappelPeriodeOut(BaseModel):
+    """Une periode (rappel) d'un dilemme suivi en mode TRACKING."""
+    index: int
+    label: str
+    description: str = ""
+    responded_at: Optional[str] = None
+    repondu: bool = False
+
+
+class RappelsOut(BaseModel):
+    """Detail des rappels d'un dilemme issu du TRACKING (valide ou abandonne).
+    None pour les decisions classiques."""
+    mode: str  # 'validated' | 'abandoned'
+    nb_periodes: int = 0
+    nb_repondu: int = 0
+    periodes: List[RappelPeriodeOut] = []
+
+
 class DecisionOut(BaseModel):
     id: str
     user_id: str
@@ -205,6 +223,9 @@ class DecisionOut(BaseModel):
     # Temps-based fields
     temps_gagne_avant: float = 0.0
     temps_gagne_apres: float = 0.0
+
+    # Detail des rappels (dilemmes issus du mode TRACKING). None sinon.
+    rappels: Optional[RappelsOut] = None
 
 
 class SousObjectifImpactItem(BaseModel):

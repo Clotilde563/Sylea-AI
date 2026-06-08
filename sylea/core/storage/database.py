@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     action_agent_json   TEXT,
     temps_gagne_avant   REAL DEFAULT 0.0,
     temps_gagne_apres   REAL DEFAULT 0.0,
+    rappels_json        TEXT DEFAULT NULL,
     cree_le             TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES profil_utilisateur(id)
 );
@@ -464,6 +465,14 @@ class DatabaseManager:
                     self._conn.execute(col_temps_dec)
                 except Exception:
                     pass  # Colonne deja existante
+            # Migration : ajouter rappels_json dans decisions (detail des rappels
+            # pour les decisions issues du mode TRACKING — dilemmes valides/abandonnes)
+            try:
+                self._conn.execute(
+                    "ALTER TABLE decisions ADD COLUMN rappels_json TEXT DEFAULT NULL"
+                )
+            except Exception:
+                pass  # Colonne deja existante
             # Legacy migrations for competences/diplomes/langues (now in CREATE TABLE)
             for col_sql2 in [
                 "ALTER TABLE profil_utilisateur ADD COLUMN competences TEXT DEFAULT ''",

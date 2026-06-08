@@ -557,6 +557,126 @@ def compute_recap(tracking: dict) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Enregistrement dans l'historique des decisions (validate / abandon)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _build_rappels_detail(tracking: dict, mode: str) -> dict:
+    """Construit le detail periode-par-periode des rappels pour l'historique
+    des decisions. `mode` = 'validated' | 'abandoned'."""
+    options = tracking.get("options_json", []) or []
+    choices = tracking.get("choices_json", []) or []
+    nb_periodes = tracking.get("nb_periodes", len(choices) or 1)
+
+    periodes: list[dict] = []
+    nb_repondu = 0
+    for c in choices:
+        ch = c.get("choice")
+        repondu = ch is not None
+        if repondu:
+            nb_repondu += 1
+        if ch is None:
+            label, description = "—", "Pas de reponse"
+        elif ch == "none":
+            label, description = "Aucun", "Aucune des options"
+        else:
+            try:
+                opt = options[int(ch)]
+                label = opt.get("lettre") or chr(65 + int(ch))
+                description = opt.get("description", "")
+            except (ValueError, IndexError, TypeError):
+                label, description = str(ch), ""
+        periodes.append({
+            "index": int(c.get("periode_idx", 0)) + 1,
+            "label": label,
+            "description": description,
+            "responded_at": c.get("responded_at"),
+            "repondu": repondu,
+        })
+
+    return {
+        "mode": mode,
+        "nb_periodes": nb_periodes,
+        "nb_repondu": nb_repondu,
+        "periodes": periodes,
+    }
+
+
+async def _record_tracking_decision_async(
+    session,
+    tracking: dict,
+    *,
+    mode: str,  # 'validated' | 'abandoned'
+    prob_before: float,
+    prob_after: float,
+    tg_before: float,
+    tg_after: float,
+    recap: dict,
+) -> None:
+    """Cree une row `decisions` (historique) a partir d'un tracking valide ou
+    abandonne, avec le detail des rappels.
+
+    IMPORTANT : n'applique AUCUN impact (deja applique par le caller via
+    _apply_impact_with_cascade_async + _update_profil_temps_async). On se
+    contente d'ENREGISTRER l'evenement pour qu'il apparaisse dans l'historique
+    des decisions (cohérence : impact_net = temps_gagne_apres - temps_gagne_avant
+    = impact reel applique, donc sum(decisions.impact_net) reste aligne sur
+    profil.temps_gagne_jours). INSERT dans la session fournie -> atomique avec
+    l'UPDATE du statut tracking.
+    """
+    from sylea.core.models.decision import Decision, OptionDilemme
+
+    tr_options = tracking.get("options_json", []) or []
+    options = [
+        OptionDilemme(
+            description=o.get("description", ""),
+            impact_score=float(o.get("impact_jours", 0) or 0),
+            explication_impact=o.get("resume", "") or "",
+        )
+        for o in tr_options
+    ]
+
+    # Option dominante (la plus cliquee, hors 'none') -> option_choisie de la
+    # decision historique. None si l'user n'a jamais choisi d'option.
+    chosen_id: str | None = None
+    best_clicks = 0
+    for b in (recap.get("breakdown", []) if recap else []):
+        if b.get("option") == "none":
+            continue
+        try:
+            idx = int(b.get("option"))
+        except (ValueError, TypeError):
+            continue
+        if b.get("nb_clicks", 0) > best_clicks and 0 <= idx < len(options):
+            best_clicks = b["nb_clicks"]
+            chosen_id = options[idx].id
+
+    decision = Decision(
+        user_id=tracking["user_id"],
+        question=tracking.get("question", ""),
+        options=options,
+        probabilite_avant=round(prob_before, 2),
+        option_choisie_id=chosen_id,
+        probabilite_apres=round(prob_after, 2),
+        impact_temporel_jours=tracking.get("impact_temporel_jours"),
+        sous_objectif_id=None,      # impact temps deja cascade (multi-SO possible)
+        impact_sous_objectif=0.0,
+        temps_gagne_avant=round(tg_before, 4),
+        temps_gagne_apres=round(tg_after, 4),
+        rappels=_build_rappels_detail(tracking, mode),
+    )
+    decision.cree_le = datetime.now(timezone.utc)
+
+    data = decision.to_dict()
+    cols = ", ".join(data.keys())
+    placeholders = ", ".join(f":{k}" for k in data.keys())
+    await session.execute(
+        text(f"INSERT INTO decisions ({cols}) VALUES ({placeholders})"),
+        data,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Validation finale (= applique l'impact)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -785,6 +905,24 @@ async def validate_tracking_async(
                 "id": tracking_id,
             },
         )
+        # Regle : on enregistre dans l'historique des decisions UNIQUEMENT si la
+        # decision a un impact REEL sur le temps vers l'objectif (impact_reel !=
+        # 0). Une validation sans impact (ex: toutes les periodes "Aucun", ou
+        # gauge deja a la borne) ne laisse aucune trace. Best-effort : un echec
+        # d'enregistrement n'annule pas la validation (impact deja applique).
+        if abs(impact_reel) > 0.001:
+            try:
+                await _record_tracking_decision_async(
+                    session, tracking,
+                    mode="validated",
+                    prob_before=prob_actuelle_before,
+                    prob_after=prob_actuelle_before + delta_prob,
+                    tg_before=tg_before,
+                    tg_after=tg_after,
+                    recap=recap,
+                )
+            except Exception as e:
+                logger.warning(f"record decision (validate) failed: {e}")
         await session.commit()
 
     return {
@@ -826,10 +964,13 @@ async def cancel_tracking_async(
     impact_jours = 0.0
     delta_prob = 0.0
     so_impactes: list[dict] = []
-    recap: dict | None = None
+    # Recap toujours calcule (pur, sans effet de bord) : sert a l'enregistrement
+    # de la decision dans l'historique (option dominante + detail des rappels).
+    recap = compute_recap(tracking)
+    prob_actuelle_before = float(getattr(profil, "probabilite_actuelle", 0))
+    tg_before = float(getattr(profil, "temps_gagne_jours", 0) or 0)
 
     if mode == "partial":
-        recap = compute_recap(tracking)
         impact_jours = float(recap["impact_total_jours"])
 
         try:
@@ -841,12 +982,13 @@ async def cancel_tracking_async(
         except Exception as e:
             logger.warning(f"apply_impact (cancel partial) failed: {e}")
 
-        prob_actuelle_before = float(getattr(profil, "probabilite_actuelle", 0))
         delta_prob = _compute_delta_probabilite(prob_actuelle_before, impact_jours)
         try:
             await _update_profil_temps_async(profil_repo, profil, impact_jours)
         except Exception as e:
             logger.warning(f"update profil (cancel partial) failed: {e}")
+
+    tg_after = float(getattr(profil, "temps_gagne_jours", 0) or 0)
 
     factory = get_session_factory()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -868,6 +1010,23 @@ async def cancel_tracking_async(
                 "id": tracking_id,
             },
         )
+        # Regle : un abandon ne rejoint l'historique des decisions QUE s'il a un
+        # impact REEL sur le temps vers l'objectif. Un abandon sans impact
+        # (mode 'zero', ou periodes toutes "Aucun") ne laisse aucune trace —
+        # comme une suppression.
+        if abs(tg_after - tg_before) > 0.001:
+            try:
+                await _record_tracking_decision_async(
+                    session, tracking,
+                    mode="abandoned",
+                    prob_before=prob_actuelle_before,
+                    prob_after=prob_actuelle_before + delta_prob,
+                    tg_before=tg_before,
+                    tg_after=tg_after,
+                    recap=recap,
+                )
+            except Exception as e:
+                logger.warning(f"record decision (cancel) failed: {e}")
         await session.commit()
 
     return {

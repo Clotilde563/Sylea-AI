@@ -2,7 +2,7 @@
 // Graphique 1 (théorique) : X = temps restant (10a → 0), Y = probabilité % (0→100%)
 // Graphique 2 (réel)      : X = temps réel écoulé depuis le début (→ aujourd'hui), Y = probabilité %
 
-import { useEffect, useState, useId } from 'react'
+import { useEffect, useState, useId, Fragment } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../store/useStore'
 import { api } from '../api/client'
@@ -55,6 +55,8 @@ export function StatistiquesPage() {
     setDeleteTarget(null)
   }
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  // Dilemme suivi (tracking) dont on affiche le detail des rappels (id ou null)
+  const [expandedRappels, setExpandedRappels] = useState<string | null>(null)
   const [loading, setLoading]     = useState(true)
   const [zoomChart1, setZoomChart1] = useState<'7j' | '30j' | '90j' | 'max'>('max')
   const [smoothChart1, setSmoothChart1] = useState(true)
@@ -301,13 +303,35 @@ export function StatistiquesPage() {
                 <tbody>
                   {decisions.slice(0, 10).map((d, i) => {
                     const impact = d.impact_net ?? 0
+                    const rappels = d.rappels
+                    const hasRappels = !!rappels && rappels.periodes.length > 0
+                    const isOpen = expandedRappels === d.id
+                    const rappelColor = rappels?.mode === 'abandoned' ? '#fbbf24' : '#4ade80'
                     return (
-                      <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                      <Fragment key={d.id || i}>
+                      <tr style={{ borderBottom: (hasRappels && isOpen) ? 'none' : '1px solid rgba(255,255,255,0.04)' }}>
                         <td style={{ padding: '0.625rem 0.75rem', color: 'var(--text-secondary)', maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {d.question}
                         </td>
                         <td style={{ padding: '0.625rem 0.75rem', color: 'var(--text-primary)', fontSize: '0.8rem' }}>
                           {d.option_choisie_description || '—'}
+                          {hasRappels && (
+                            <button
+                              type="button"
+                              onClick={() => setExpandedRappels(isOpen ? null : d.id)}
+                              title="Voir le détail des rappels"
+                              style={{
+                                marginLeft: '0.5rem', cursor: 'pointer',
+                                background: rappelColor + '1f',
+                                border: `1px solid ${rappelColor}66`,
+                                color: rappelColor,
+                                borderRadius: '999px', fontSize: '0.68rem', fontWeight: 600,
+                                padding: '0.1rem 0.5rem', whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {isOpen ? '▾' : '▸'} {rappels!.nb_repondu}/{rappels!.nb_periodes} rappels
+                            </button>
+                          )}
                         </td>
                         <td style={{ padding: '0.625rem 0.75rem' }}>
                           <span style={{ color: impact >= 0 ? '#22c55e' : '#ef4444', fontWeight: 600, fontSize: '0.8rem' }}>
@@ -338,6 +362,45 @@ export function StatistiquesPage() {
                           </button>
                         </td>
                       </tr>
+                      {hasRappels && isOpen && (
+                        <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                          <td colSpan={5} style={{ padding: '0 0.75rem 0.75rem' }}>
+                            <div style={{
+                              background: 'rgba(255,255,255,0.02)',
+                              border: `1px solid ${rappelColor}33`,
+                              borderRadius: '10px', padding: '0.75rem 0.9rem',
+                            }}>
+                              <div style={{ fontSize: '0.7rem', color: rappelColor, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: '0.6rem' }}>
+                                {rappels!.mode === 'abandoned' ? '◯ Suivi abandonné' : '✓ Suivi validé'} · détail des rappels
+                              </div>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem' }}>
+                                {rappels!.periodes.map((p) => (
+                                  <div key={p.index} style={{
+                                    display: 'flex', flexDirection: 'column', gap: '0.15rem',
+                                    minWidth: 96, flex: '1 1 96px',
+                                    background: p.repondu ? 'rgba(255,255,255,0.03)' : 'rgba(148,163,184,0.06)',
+                                    border: '1px solid rgba(255,255,255,0.06)',
+                                    borderRadius: '8px', padding: '0.45rem 0.6rem',
+                                  }}>
+                                    <span style={{ fontSize: '0.66rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                                      Période {p.index}
+                                    </span>
+                                    <span style={{ fontSize: '0.78rem', color: p.repondu ? 'var(--text-primary)' : 'var(--text-muted)', fontWeight: 600 }}>
+                                      {p.label}{p.description ? ` · ${p.description}` : ''}
+                                    </span>
+                                    {p.responded_at && (
+                                      <span style={{ fontSize: '0.64rem', color: 'var(--text-muted)' }}>
+                                        {new Date(p.responded_at).toLocaleDateString('fr-FR')}
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     )
                   })}
                 </tbody>
