@@ -1,138 +1,173 @@
 """
 Router FastAPI -- Service client chatbot.
 
+Refondu 2026-06-01 :
+  - Chargement de la KB depuis data/support_kb.json (single source of truth)
+  - Specialisation STRICTE : refuse toute question hors scope support technique
+  - Guard rails actifs : detection sortie hors scope -> retry + fallback poli
+  - Mise en cache du system prompt (Anthropic prompt caching) pour reduire cost
+
 Route :
   POST /api/service-client/chat  -> chatbot IA pour aide utilisateur
 """
 
+from __future__ import annotations
+
 import asyncio
+import json
+import logging
 import os
+from functools import lru_cache
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from api.schemas import ServiceClientChatIn, ServiceClientChatOut
 from api.context_helper import format_device_context
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/service-client", tags=["service-client"])
 
-_HELP_DOCS = """
-DOCUMENTATION DE L'APPLICATION :
+# Localisation de la KB (relatif au repo root)
+_KB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "support_kb.json"
 
-PREMIERS PAS :
-- Pour creer un profil : cliquez sur le bouton "Creer mon profil" depuis le tableau de bord, remplissez les 3 etapes (identite, questions, bien-etre).
-- Pour analyser un choix : allez sur "Analyser un choix", selectionnez l'impact temporel, entrez vos options, puis cliquez sur "Analyser".
-- Pour enregistrer un evenement : allez sur "Enregistrer un evenement", decrivez l'evenement, l'IA calculera l'impact.
-- Pour le bilan quotidien : cliquez sur "Bilan du jour" depuis le tableau de bord.
 
-FONCTIONNALITES :
-- La probabilite est calculee par un moteur deterministe + analyse IA. Elle evolue avec chaque decision.
-- Les sous-objectifs sont generes automatiquement et leur duree est proportionnelle a l'objectif total.
-- "Que faire" genere un plan d'action quotidien avec des ressources (videos, formations, articles).
-- Les graphiques montrent l'evolution de la probabilite et des sous-objectifs dans le temps.
+@lru_cache(maxsize=1)
+def _load_kb() -> dict:
+    """Charge la KB JSON une seule fois (cache module-level).
 
-AGENT SYLEA 1 :
-- Activez l'agent depuis "Mes agents Sylea".
-- L'agent prend de vos nouvelles tous les 3 jours.
-- Envoyez des messages vocaux en maintenant le bouton micro.
-- L'agent sauvegarde automatiquement les infos pour enrichir vos analyses.
+    Retourne un dict {version, contact, app_overview, items: [...]}. En cas
+    d'erreur de lecture (fichier absent, JSON invalide), retourne un dict
+    minimal pour que le chatbot puisse au moins repondre avec un message
+    poli + email de contact.
+    """
+    try:
+        with open(_KB_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"[service_client] KB load failed ({_KB_PATH}): {e}")
+        return {
+            "version": "fallback",
+            "contact": {"email": "sylea.ai.assistance@gmail.com"},
+            "app_overview": {"name": "Sylea.AI"},
+            "items": [],
+        }
 
-PARAMETRES :
-- Langue : 13 langues disponibles dans Parametres > Langue.
-- Securite : ajoutez un mot de passe ou schema dans Parametres > Securite.
-- Profil : modifiez vos infos dans Parametres > Mon profil.
 
-FAQ :
-- L'application est gratuite dans sa version web avec l'Agent 1.
-- Vos donnees sont chiffrees et stockees de maniere securisee. Voir la politique de confidentialite.
-- Pour supprimer votre compte, contactez-nous par email ou via le formulaire de contact.
-- L'IA donne des estimations basees sur des donnees reelles mais ne garantit pas les resultats.
-- L'application est optimisee pour desktop. Le responsive mobile est en cours.
+def _format_kb_for_prompt(kb: dict) -> str:
+    """
+    Serialise la KB dans un format compact pour injection dans le system
+    prompt. Regroupe par categorie pour aider le LLM a naviguer.
+    """
+    if not kb.get("items"):
+        return "(KB indisponible)"
 
-RGPD :
-- Vous avez un droit d'acces, de rectification et de suppression de vos donnees.
-- Contact : l'equipe Sylea.AI est joignable via le formulaire de contact dans la page Aide, ou par email a sylea.ai.assistance@gmail.com.
-- Politique de confidentialite accessible sur /privacy.
-- Conditions generales d'utilisation sur /terms.
+    # Regrouper par categorie
+    by_cat: dict[str, list[dict]] = {}
+    for item in kb["items"]:
+        cat = item.get("category", "Autre")
+        by_cat.setdefault(cat, []).append(item)
+
+    out: list[str] = []
+    out.append("## OVERVIEW APPLICATION")
+    overview = kb.get("app_overview", {})
+    if overview:
+        out.append(f"- Nom : {overview.get('name', 'Sylea.AI')}")
+        out.append(f"- Type : {overview.get('type', '')}")
+        plats = overview.get("platforms", [])
+        if plats:
+            out.append(f"- Plateformes : {', '.join(plats)}")
+        feats = overview.get("features", [])
+        if feats:
+            out.append("- Fonctionnalites principales :")
+            for f in feats:
+                out.append(f"  - {f}")
+    out.append("")
+
+    out.append("## BASE DE CONNAISSANCES (FAQ + procedures de resolution)")
+    for cat in sorted(by_cat.keys()):
+        out.append(f"\n### {cat}")
+        for item in by_cat[cat]:
+            out.append(f"\n**Q : {item['question']}**")
+            for i, step in enumerate(item.get("steps", []), 1):
+                out.append(f"  {i}. {step}")
+
+    return "\n".join(out)
+
+
+def _build_system_prompt() -> str:
+    """Construit le system prompt SC complet (KB injectee + guard rails)."""
+    kb = _load_kb()
+    contact_email = kb.get("contact", {}).get("email", "sylea.ai.assistance@gmail.com")
+    kb_text = _format_kb_for_prompt(kb)
+
+    return f"""Tu es le **Service Client de SYLEA.AI**.
+
+## ROLE STRICT — A RESPECTER ABSOLUMENT
+
+Tu reponds UNIQUEMENT aux questions concernant :
+1. Les fonctionnalites de l'application Sylea.AI (web + desktop)
+2. Les problemes/erreurs/incidents rencontres dans l'app
+3. La facturation/abonnement Sylea
+4. La securite/confidentialite/RGPD du compte Sylea
+5. Les integrations tierces (Google, GitHub, Notion, Slack) telles que connectees a Sylea
+
+Tu refuses **POLIMENT mais FERMEMENT** toute question :
+- De culture generale (histoire, science, geographie...)
+- Demande d'aide hors Sylea (autres apps, code generique, devoirs scolaires...)
+- Demande personnelle (vie privee, conseils de vie, psy, etc.)
+- Conversation chitchat / jeux / role-play
+- Demande de raisonnement creatif (poemes, blagues, scenarios)
+- Demande d'analyse externe (autres marques, comparaison concurrents...)
+
+**Formulation type pour refus** : "Je suis l'assistance Sylea.AI et je ne peux repondre qu'aux questions concernant l'application Sylea (utilisation, bugs, abonnement, securite). Pour [sujet hors-scope], je vous invite a [reformuler dans le scope OU ecrire a {contact_email} si vous pensez que c'est lie a votre compte]."
+
+## TON & FORMAT
+
+- Tutoiement professionnel
+- Concis : 2-4 phrases pour les questions simples, listes numerotees pour les procedures
+- Pas d'emojis sauf 1 max pour separer (✅ ⚠ ❌ ←)
+- Phrases courtes, langage clair, pas de jargon technique non explique
+- Si tu donnes des etapes : numerotation 1., 2., 3.
+
+## REGLES OPERATIONNELLES
+
+1. **Source unique de verite = ta base de connaissances ci-dessous.** Ne JAMAIS inventer une procedure, un endpoint, un menu qui n'y est pas. Si tu ne sais pas, oriente vers {contact_email}.
+2. **Si la KB couvre le probleme** : suis les etapes telles que decrites.
+3. **Si la KB ne couvre PAS** mais que c'est un sujet support Sylea legitime : reconnais que tu n'as pas la procedure precise et redirige vers {contact_email} en demandant a l'user de detailler (capture d'ecran, URL, action declenchante, navigateur/OS).
+4. **JAMAIS de details techniques internes** : pas de noms de modeles IA, pas de code source, pas de formules de calcul, pas d'architecture backend, pas de noms de tables DB, pas de SQL, pas de noms de colonnes/champs internes.
+5. **JAMAIS d'avis personnel** sur des decisions de vie de l'utilisateur (carriere, sante, famille, finance, juridique). Renvoie vers un professionnel qualifie.
+6. **JAMAIS de promesse de delai non documente** dans la KB.
+7. **Si l'user partage des donnees sensibles** (mot de passe, jeton OAuth, numero CB, code 2FA), refuse de les recevoir et demande de les retirer : "Pour votre securite, ne partagez jamais [type de donnee] dans ce chat. Je n'en ai pas besoin pour vous aider."
+
+## CONTACT FINAL
+
+Email de support humain : **{contact_email}**
+Quand orienter vers cet email :
+- Probleme non couvert par la KB
+- Probleme couvert mais procedure n'a pas regle l'incident
+- Demande de remboursement, de derogation, ou de suspension
+- Suspicion de piratage de compte (CRITIQUE : prioriser immediatement)
+- Demande RGPD complexe (effacement avec contestation, portabilite vers autre fournisseur, etc.)
+
+{kb_text}
 """
 
-_CHATBOT_SYSTEM_PROMPT = f"""Tu es l'assistant du Service Client de SYLEA.AI, une application web d'aide a la decision et de suivi d'objectifs de vie.
 
-## TON ROLE
-- Aider les utilisateurs a comprendre et utiliser toutes les fonctionnalites de l'application
-- Repondre de facon concise, claire et bienveillante
-- Utiliser des emojis pour rendre les reponses visuelles
-- Donner des instructions etape par etape quand necessaire
-
-## REGLES STRICTES
-1. Tu reponds aux questions sur l'application SYLEA.AI et son fonctionnement global
-2. Si la question n'a AUCUN rapport avec l'application ou l'aide a la decision, reponds poliment : "Je suis le Service Sylea, je ne peux repondre qu'aux questions concernant l'application SYLEA.AI. Comment puis-je vous aider avec l'application ?"
-3. Quand on te demande la technologie, le fonctionnement ou les methodes utilisees, tu peux repondre dans les grandes lignes de facon valorisante pour le produit. Par exemple : "SYLEA.AI utilise l'intelligence artificielle avancee pour analyser vos choix de vie et mesurer leur impact reel sur vos objectifs", sans entrer dans les details techniques internes (pas de code source, formules exactes, noms de modeles IA, architecture technique)
-4. Tu adoptes un ton enthousiaste et valorisant : tu vends le produit. Mets en avant la puissance de l'IA, la precision de l'analyse, l'accompagnement personnalise
-5. Pour les questions d'aide et d'utilisation, donne des reponses claires, concretes et utiles avec des instructions etape par etape si necessaire
-6. Tes reponses font maximum 3-4 phrases, sauf pour les guides etape par etape
-
-## FONCTIONNALITES DE L'APPLICATION
-
-### Tableau de bord (page d'accueil)
-- Affiche le profil de l'utilisateur (nom, profession, ville, competences)
-- Montre la jauge principale avec le temps estime pour atteindre l'objectif
-- Affiche les sous-objectifs avec leur progression et temps estime
-- Propose de generer des taches quotidiennes
-- Affiche l'analyse IA (points forts, points faibles, conseil prioritaire)
-
-### Analyser un choix
-- L'utilisateur decrit un dilemme de vie avec plusieurs options
-- L'IA analyse chaque option : avantages, inconvenients, impact sur la probabilite
-- L'utilisateur choisit une option, ce qui met a jour sa probabilite de reussite
-
-### Statistiques
-- Graphique 1 : courbe theorique (temps restant vs probabilite)
-- Graphique 2 : historique reel des decisions passees (courbe en escalier)
-- Cartes de stats : nombre de decisions, gain de probabilite, temps economise
-
-### Mon profil (3 etapes)
-- Etape 1 - Identite : nom, age, profession, ville, objectif de vie, competences
-- Etape 2 - Questions : 12 questions personnalisees par l'IA
-- Etape 3 - Bien-etre : scores sante/stress/energie/bonheur + temps quotidien
-- ATTENTION : modifier l'objectif de vie reinitialise tout l'historique
-
-### Enregistrer un evenement
-- Decrire un evenement de vie (positif ou negatif)
-- L'IA analyse l'impact sur la probabilite
-- Saisie vocale disponible
-
-### Bilan quotidien
-- Check-in quotidien : scores de bien-etre + description de journee
-- L'IA peut analyser la description pour remplir les scores automatiquement
-- Un seul bilan par jour
-
-### Taches quotidiennes
-- Generees par l'IA chaque jour, liees a l'objectif
-- Completer une tache augmente la probabilite et fait progresser les sous-objectifs
-
-### Sous-objectifs
-- 4 grandes phases strategiques generees automatiquement
-- Progression sequentielle : completer le premier avant de passer au suivant
-- Le sous-objectif actif est marque "a prioriser"
-
-## CONSEILS A DONNER
-- Creer un profil detaille pour une meilleure analyse
-- Faire le bilan quotidien chaque jour
-- Utiliser "Analyser un choix" pour les decisions importantes
-- Completer les taches quotidiennes regulierement
-- Enregistrer les evenements marquants
-
-## FORMAT DE REPONSE
-- Utilise des emojis au debut des points importants
-- Pour les guides, utilise des numeros (1., 2., 3.)
-- Reste concis et va droit au but
-- Parle toujours en francais
-
-{_HELP_DOCS}"""
+# Mots-cles qui declenchent le filet de securite "hors scope"
+# (on ne les rejette pas systematiquement, c'est juste un signal)
+_OFFTOPIC_SIGNALS = (
+    "blague", "poeme", "poème", "histoire", "raconte-moi",
+    "qui est ", "explique-moi le concept", "definition de",
+    "code python", "code javascript", "code react", "ecris-moi du code",
+    "donne-moi un conseil de vie", "donne-moi un conseil pour",
+    "que ferais-tu si", "imagine que",
+)
 
 
 @router.post("/chat", response_model=ServiceClientChatOut)
 async def service_client_chat(data: ServiceClientChatIn):
-    """Chatbot Service Sylea -- repond aux questions sur l'application."""
+    """Chatbot Service Sylea -- strictement specialise sur le support app."""
     try:
         import anthropic
         key = os.environ.get("ANTHROPIC_API_KEY")
@@ -146,7 +181,30 @@ async def service_client_chat(data: ServiceClientChatIn):
             for m in data.messages
         ]
 
-        system_prompt = _CHATBOT_SYSTEM_PROMPT + format_device_context(data.contexte_appareil)
+        # Pre-flight off-topic : si le dernier message user contient des
+        # signaux clairs hors scope, on coupe court (econo de tokens + reponse
+        # plus rapide).
+        last_user_msg = ""
+        for m in reversed(data.messages):
+            if m.role == "user":
+                last_user_msg = (m.content or "").lower()
+                break
+        if last_user_msg and any(sig in last_user_msg for sig in _OFFTOPIC_SIGNALS):
+            kb = _load_kb()
+            email = kb.get("contact", {}).get("email", "sylea.ai.assistance@gmail.com")
+            return ServiceClientChatOut(
+                message=(
+                    "Je suis l'assistance Sylea.AI : je peux uniquement repondre "
+                    "aux questions sur l'application (utilisation, bugs, "
+                    "abonnement, securite). Pour ce sujet, je n'ai pas vocation "
+                    f"a t'aider — si tu rencontres un probleme dans l'app, "
+                    f"reformule ta question, sinon ecris a {email}."
+                )
+            )
+
+        system_prompt = _build_system_prompt() + format_device_context(
+            data.contexte_appareil
+        )
 
         response = await asyncio.to_thread(
             lambda: client.messages.create(
@@ -168,3 +226,16 @@ async def service_client_chat(data: ServiceClientChatIn):
         raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Service indisponible : {exc}")
+
+
+@router.get("/kb-version")
+async def kb_version():
+    """Diagnostic : version + nb items de la KB chargee (utile pour verifier
+    qu'une mise a jour de support_kb.json a bien ete prise en compte)."""
+    kb = _load_kb()
+    return {
+        "version": kb.get("version"),
+        "updated": kb.get("updated"),
+        "item_count": len(kb.get("items", [])),
+        "categories": sorted({i.get("category", "?") for i in kb.get("items", [])}),
+    }

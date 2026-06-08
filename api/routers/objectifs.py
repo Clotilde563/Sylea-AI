@@ -23,7 +23,7 @@ from api.schemas import (
     GenererSousObjectifsIn, GenererTachesIn,
 )
 from api.dependencies import get_profil_repo, get_db, get_optional_user
-from api.context_helper import format_device_context, build_full_user_context
+from api.context_helper import format_device_context, build_full_user_context_async
 
 router = APIRouter(tags=["objectifs"])
 
@@ -75,28 +75,42 @@ def _build_profil_context(profil) -> str:
 
 
 
-def _get_past_task_descriptions(db, user_id: str, days: int = 60) -> list[dict]:
-    """Recupere les taches deja proposees avec date et statut (derniers N jours)."""
+async def _get_past_task_descriptions_async(user_id: str, days: int = 60) -> list[dict]:
+    """Async sibling : recupere les taches passees.
+
+    Migration PG (2026-05-13) : SELECT via SQLAlchemy text() async — compat
+    SQLite + PG.
+    """
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
     cutoff = (date.today() - timedelta(days=days)).isoformat()
-    rows = db.conn.execute(
-        "SELECT date, taches_json FROM taches_quotidiennes "
-        "WHERE user_id = ? AND date >= ? ORDER BY date DESC",
-        (user_id, cutoff),
-    ).fetchall()
-    tasks = []
-    for row in rows:
-        try:
-            taches = json.loads(row["taches_json"])
-            for t in taches:
-                desc = t.get("description", "").strip()
-                if desc:
-                    tasks.append({
-                        "description": desc,
-                        "completee": t.get("completee", False),
-                        "date": row["date"],
-                    })
-        except (json.JSONDecodeError, TypeError):
-            continue
+    factory = _gsf()
+    tasks: list[dict] = []
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                _sa_text(
+                    "SELECT date, taches_json FROM taches_quotidiennes "
+                    "WHERE user_id = :uid AND date >= :cutoff ORDER BY date DESC"
+                ),
+                {"uid": user_id, "cutoff": cutoff},
+            )
+            rows = result.mappings().all()
+        for row in rows:
+            try:
+                taches = json.loads(row["taches_json"])
+                for t in taches:
+                    desc = t.get("description", "").strip()
+                    if desc:
+                        tasks.append({
+                            "description": desc,
+                            "completee": t.get("completee", False),
+                            "date": row["date"],
+                        })
+            except (json.JSONDecodeError, TypeError):
+                continue
+    except Exception:
+        pass
     return tasks
 
 
@@ -105,23 +119,28 @@ def _get_past_task_descriptions(db, user_id: str, days: int = 60) -> list[dict]:
 @router.get("/api/sous-objectifs", response_model=list[SousObjectifOut])
 async def liste_sous_objectifs(
     profil_repo: ProfilRepository = Depends(get_profil_repo),
-    db=Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
+    """Migration PG : SELECT via SQLAlchemy text() — compatible SQLite + PG."""
     if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
     profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
-    rows = db.conn.execute(
-        "SELECT * FROM sous_objectifs WHERE user_id = ? ORDER BY ordre",
-        (profil.id,),
-    ).fetchall()
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text("SELECT * FROM sous_objectifs WHERE user_id = :uid ORDER BY ordre"),
+            {"uid": profil.id},
+        )
+        rows = result.mappings().all()
     return [
         SousObjectifOut(
             id=r["id"], titre=r["titre"], description=r["description"],
             progression=r["progression"], ordre=r["ordre"],
-            temps_estime=r["temps_estime"] if "temps_estime" in r.keys() else 0.0,
+            temps_estime=r["temps_estime"] if r.get("temps_estime") is not None else 0.0,
         )
         for r in rows
     ]
@@ -139,26 +158,35 @@ async def generer_sous_objectifs(
     profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None or not profil.objectif:
         raise HTTPException(status_code=400, detail="Profil ou objectif manquant.")
-    # Verifier si des sous-objectifs existent deja -> ne jamais regenerer
-    existing = db.conn.execute(
-        "SELECT * FROM sous_objectifs WHERE user_id = ? ORDER BY ordre",
-        (profil.id,),
-    ).fetchall()
+    # Verifier si des sous-objectifs existent deja -> ne jamais regenerer.
+    # Migration PG (2026-05-13) : SELECT via SQLAlchemy text() async.
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    _factory = _gsf()
+    async with _factory() as _session:
+        _r = await _session.execute(
+            _sa_text("SELECT * FROM sous_objectifs WHERE user_id = :uid ORDER BY ordre"),
+            {"uid": profil.id},
+        )
+        existing = _r.mappings().all()
     if existing:
         return [
             SousObjectifOut(
                 id=r["id"], titre=r["titre"], description=r["description"],
                 progression=r["progression"], ordre=r["ordre"],
-                temps_estime=r["temps_estime"] if "temps_estime" in r.keys() else 0.0,
+                temps_estime=r["temps_estime"] if r.get("temps_estime") is not None else 0.0,
             )
             for r in existing
         ]
-    ctx = build_full_user_context(db, user_id, profil)
+    ctx = await build_full_user_context_async(db, user_id, profil)
     prompt = (
         "Tu es un coach de vie strategique. Analyse ce profil et son objectif de vie, "
-        "puis genere exactement 4 sous-objectifs LARGES et strategiques pour atteindre "
-        "l'objectif principal. Chaque sous-objectif doit representer une GRANDE PHASE "
-        "du parcours.\n\n"
+        "puis genere les sous-objectifs LARGES et strategiques pour atteindre l'objectif "
+        "principal. Chaque sous-objectif doit representer une GRANDE PHASE du parcours.\n\n"
+        "NOMBRE DE SOUS-OBJECTIFS : libre de choisir le nombre pertinent selon la "
+        "complexite de l'objectif. Generalement entre 3 et 6 sous-objectifs. Un objectif "
+        "simple peut tenir en 3 phases, un objectif tres complexe peut en necessiter 5-6. "
+        "Ne force PAS un nombre arbitraire — adapte au reel.\n\n"
         "PERSONNALISATION:\n"
         "Le profil contient les reponses de l'utilisateur a des questions personnalisees "
         "(section apres '--- Contexte personnalise ---'). "
@@ -173,7 +201,7 @@ async def generer_sous_objectifs(
         f"PROFIL:\n{ctx}\n\n"
         "Reponds UNIQUEMENT avec du JSON valide (pas de markdown):\n"
         '[{"titre": "...", "description": "...", "temps_estime_jours": <int>}, ...]\n'
-        "Exactement 4 sous-objectifs, du plus immediat au plus lointain. "
+        "Du plus immediat au plus lointain. "
         "temps_estime_jours est le nombre de jours estimes pour accomplir ce sous-objectif. "
         "Les titres doivent etre courts et larges (phase strategique, pas micro-tache)."
         + format_device_context(data.contexte_appareil)
@@ -189,21 +217,29 @@ async def generer_sous_objectifs(
         ]
     now = datetime.now().isoformat()
     results = []
-    for i, item in enumerate(raw[:4]):
-        so_id = str(uuid.uuid4())
-        titre = str(item.get("titre", f"Etape {i+1}"))
-        desc = str(item.get("description", ""))
-        temps_est = float(item.get("temps_estime_jours", 0))
-        db.conn.execute(
-            "INSERT INTO sous_objectifs (id, user_id, titre, description, progression, ordre, cree_le, temps_estime) "
-            "VALUES (?, ?, ?, ?, 0.0, ?, ?, ?)",
-            (so_id, profil.id, titre, desc, i, now, temps_est),
-        )
-        results.append(SousObjectifOut(
-            id=so_id, titre=titre, description=desc, progression=0.0, ordre=i,
-            temps_estime=temps_est,
-        ))
-    db.conn.commit()
+    # Migration PG (2026-05-13) : INSERT via SQLAlchemy text() async.
+    async with _factory() as _session:
+        for i, item in enumerate(raw[:4]):
+            so_id = str(uuid.uuid4())
+            titre = str(item.get("titre", f"Etape {i+1}"))
+            desc = str(item.get("description", ""))
+            temps_est = float(item.get("temps_estime_jours", 0))
+            await _session.execute(
+                _sa_text(
+                    "INSERT INTO sous_objectifs "
+                    "(id, user_id, titre, description, progression, ordre, cree_le, temps_estime) "
+                    "VALUES (:id, :uid, :titre, :desc, 0.0, :ordre, :cree, :temps)"
+                ),
+                {
+                    "id": so_id, "uid": profil.id, "titre": titre,
+                    "desc": desc, "ordre": i, "cree": now, "temps": temps_est,
+                },
+            )
+            results.append(SousObjectifOut(
+                id=so_id, titre=titre, description=desc, progression=0.0, ordre=i,
+                temps_estime=temps_est,
+            ))
+        await _session.commit()
     return results
 
 
@@ -212,19 +248,24 @@ async def generer_sous_objectifs(
 @router.get("/api/taches/aujourd-hui", response_model=TachesCheckOut)
 async def check_taches_aujourdhui(
     profil_repo: ProfilRepository = Depends(get_profil_repo),
-    db=Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
+    """Migration PG : SELECT via SQLAlchemy text() — compatible SQLite + PG."""
     if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
     profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
     today = date.today().isoformat()
-    row = db.conn.execute(
-        "SELECT * FROM taches_quotidiennes WHERE user_id = ? AND date = ?",
-        (profil.id, today),
-    ).fetchone()
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text("SELECT * FROM taches_quotidiennes WHERE user_id = :uid AND date = :date"),
+            {"uid": profil.id, "date": today},
+        )
+        row = result.mappings().first()
     if row:
         taches = json.loads(row["taches_json"])
         return TachesCheckOut(
@@ -252,41 +293,73 @@ async def generer_taches(
     if profil is None or not profil.objectif:
         raise HTTPException(status_code=400, detail="Profil ou objectif manquant.")
     today = date.today().isoformat()
-    existing = db.conn.execute(
-        "SELECT * FROM taches_quotidiennes WHERE user_id = ? AND date = ?",
-        (profil.id, today),
-    ).fetchone()
-    if existing:
-        raise HTTPException(status_code=409, detail="Taches deja generees pour aujourd'hui.")
-    # Recuperer le sous-objectif actif pour generer des taches ciblees
-    active_so = db.conn.execute(
-        "SELECT titre, progression FROM sous_objectifs WHERE user_id = ? AND progression < 100 ORDER BY ordre LIMIT 1",
-        (profil.id,),
-    ).fetchone()
-    so_rows = db.conn.execute(
-        "SELECT titre, progression FROM sous_objectifs WHERE user_id = ? ORDER BY ordre",
-        (profil.id,),
-    ).fetchall()
+
+    # Migration PG (2026-05-13) : checks existence + chargement SO via SQLAlchemy text() async.
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    _factory = _gsf()
+    existing = None
+    active_so = None
+    so_rows: list = []
+    collected_context = ""
+    async with _factory() as _session:
+        _r = await _session.execute(
+            _sa_text(
+                "SELECT 1 FROM taches_quotidiennes WHERE user_id = :uid AND date = :date LIMIT 1"
+            ),
+            {"uid": profil.id, "date": today},
+        )
+        existing = _r.first()
+        if existing:
+            raise HTTPException(status_code=409, detail="Taches deja generees pour aujourd'hui.")
+
+        _r = await _session.execute(
+            _sa_text(
+                "SELECT titre, progression FROM sous_objectifs "
+                "WHERE user_id = :uid AND progression < 100 ORDER BY ordre LIMIT 1"
+            ),
+            {"uid": profil.id},
+        )
+        _row = _r.mappings().first()
+        active_so = dict(_row) if _row else None
+
+        _r = await _session.execute(
+            _sa_text(
+                "SELECT titre, progression FROM sous_objectifs "
+                "WHERE user_id = :uid ORDER BY ordre"
+            ),
+            {"uid": profil.id},
+        )
+        so_rows = [dict(m) for m in _r.mappings().all()]
+
+        if profil.id:
+            try:
+                _r = await _session.execute(
+                    _sa_text(
+                        "SELECT field, value FROM agent_collected_info "
+                        "WHERE user_id = :uid ORDER BY collected_at DESC LIMIT 20"
+                    ),
+                    {"uid": profil.id},
+                )
+                _rows = _r.mappings().all()
+                if _rows:
+                    collected_context = "\nINFOS COLLECTEES:\n" + "\n".join(
+                        f"  {m['field']}: {m['value']}" for m in _rows
+                    )
+            except Exception:
+                pass
+
     so_ctx = "\n".join(
-        f"- {r['titre']} ({r['progression']:.0f}%)" + (" [ACTIF]" if active_so and r['titre'] == active_so['titre'] else "") for r in so_rows
+        f"- {r['titre']} ({r['progression']:.0f}%)"
+        + (" [ACTIF]" if active_so and r['titre'] == active_so['titre'] else "")
+        for r in so_rows
     ) if so_rows else "Aucun sous-objectif"
-    ctx = build_full_user_context(db, user_id, profil)
+    ctx = await build_full_user_context_async(db, user_id, profil)
     active_label = active_so['titre'] if active_so else "objectif principal"
     so_prioritaire = active_so['titre'] if active_so else "objectif principal"
-    # Recuperer les infos collectees par l'agent compagnon
-    collected_context = ""
-    if profil.id:
-        try:
-            rows = db.conn.execute(
-                "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 20",
-                (profil.id,),
-            ).fetchall()
-            if rows:
-                collected_context = "\nINFOS COLLECTEES:\n" + "\n".join(f"  {r['field']}: {r['value']}" for r in rows)
-        except Exception:
-            pass
-    # Recuperer l'historique des taches passees pour eviter les doublons
-    past_tasks = _get_past_task_descriptions(db, profil.id, days=60)
+    # Recuperer l'historique des taches passees pour eviter les doublons.
+    # Migration PG (2026-05-13) : utilise l'async sibling.
+    past_tasks = await _get_past_task_descriptions_async(profil.id, days=60)
     past_ctx = ""
     yesterday = (date.today() - timedelta(days=1)).isoformat()
     # Taches non completees d'hier -> a reproposer automatiquement
@@ -411,14 +484,30 @@ async def generer_taches(
             "icone": str(item.get("icone", "")),
         })
     taches_id = str(uuid.uuid4())
-    db.conn.execute(
-        "INSERT OR REPLACE INTO taches_quotidiennes "
-        "(id, user_id, date, taches_json, deadline, statut, cree_le) "
-        "VALUES (?, ?, ?, ?, ?, 'en_cours', ?)",
-        (taches_id, profil.id, today, json.dumps(taches, ensure_ascii=False),
-         deadline, now.isoformat()),
-    )
-    db.conn.commit()
+    # Migration PG (2026-05-13) : INSERT via SQLAlchemy text() async.
+    # Note : pas de INSERT OR REPLACE — on a deja verifie qu'il n'existe pas
+    # pour la date du jour (409 Conflict en haut de la fonction). Defensive :
+    # DELETE prealable au cas ou (rollback partiel d'une tentative anterieure).
+    async with _factory() as _session:
+        await _session.execute(
+            _sa_text(
+                "DELETE FROM taches_quotidiennes WHERE user_id = :uid AND date = :date"
+            ),
+            {"uid": profil.id, "date": today},
+        )
+        await _session.execute(
+            _sa_text(
+                "INSERT INTO taches_quotidiennes "
+                "(id, user_id, date, taches_json, deadline, statut, cree_le) "
+                "VALUES (:id, :uid, :date, :tj, :dl, 'en_cours', :cree)"
+            ),
+            {
+                "id": taches_id, "uid": profil.id, "date": today,
+                "tj": json.dumps(taches, ensure_ascii=False),
+                "dl": deadline, "cree": now.isoformat(),
+            },
+        )
+        await _session.commit()
     return TachesOut(
         id=taches_id, date=today,
         taches=[TacheItem(**t) for t in taches],
@@ -434,16 +523,40 @@ async def completer_tache(
     db=Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
+    """Marque une tache quotidienne comme completee + applique l'impact
+    sur le SO actif via la cascade invariant-safe.
+
+    Migration PG (2026-05-12) :
+      - SELECT/UPDATE taches_quotidiennes  → SQLAlchemy text() async
+      - apply_impact_invariant_safe_async  → cascade SO PG-compatible
+      - Sauvegarde Decision                → DecisionRepository (sync, OK pour
+        compat — la table decisions est simple)
+
+    Bug fix : variable `impact` etait non-definie (NameError pre-existant).
+    Remplace par `delta_prob` calcule depuis impact_jours.
+    """
     if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
     profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
     today = date.today().isoformat()
-    row = db.conn.execute(
-        "SELECT * FROM taches_quotidiennes WHERE user_id = ? AND date = ? AND statut = 'en_cours'",
-        (profil.id, today),
-    ).fetchone()
+
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    from api.so_invariant import apply_impact_invariant_safe_async
+    factory = get_session_factory()
+
+    # 1. Lire la tache du jour (SELECT)
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT * FROM taches_quotidiennes WHERE user_id = :uid "
+                "AND date = :date AND statut = 'en_cours'"
+            ),
+            {"uid": profil.id, "date": today},
+        )
+        row = result.mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Aucune tache en cours.")
     taches = json.loads(row["taches_json"])
@@ -455,72 +568,106 @@ async def completer_tache(
             break
     if not tache_trouvee:
         raise HTTPException(status_code=404, detail="Tache non trouvee.")
-    # Time-based: each completed task gains 0.5 days
+
+    # 2. Time-based : chaque tache completee gagne 0.5 jours
     impact_jours = 0.5
+    # delta_prob equivalent : impact_jours / temps_initial * 100 (peut etre 0
+    # si temps_initial == 0 — edge case).
+    delta_prob = (
+        (impact_jours / profil.temps_initial_jours) * 100
+        if profil.temps_initial_jours > 0 else 0.0
+    )
+
     profil.temps_gagne_jours = min(
         profil.temps_initial_jours,
         profil.temps_gagne_jours + impact_jours,
     )
     profil.marquer_modification()
     profil_repo.sauvegarder(profil)
-    # Mettre a jour SEULEMENT le sous-objectif actif (premier avec progression < 100)
-    # Charger TOUS les SO pour le calcul proportionnel (invariant sum(SO_restant) = objectif_restant)
-    all_so_all = db.conn.execute(
-        "SELECT id, titre, progression, temps_estime FROM sous_objectifs WHERE user_id = ? ORDER BY ordre",
-        (profil.id,),
-    ).fetchall()
-    active_so = next((so for so in all_so_all if so["progression"] < 100), None)
+
+    # 3. Charger les SO + appliquer l'impact via cascade invariant-safe.
+    #    Tout dans UNE seule transaction async (atomique).
     impacts_so = []
     so_impacte = None
-    if active_so:
-        total_te_all = sum(max(30, so["temps_estime"] or 180) for so in all_so_all)
-        te = max(30, active_so["temps_estime"] if active_so["temps_estime"] else 180)
-        so_initial_jours = (te / total_te_all) * profil.temps_initial_jours if total_te_all > 0 else te
-        task_so_impact = (impact_jours / so_initial_jours) * 100 if so_initial_jours > 0 else 0
-        new_prog = min(100, active_so["progression"] + task_so_impact)
-        db.conn.execute(
-            "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
-            (new_prog, active_so["id"]),
-        )
-        impacts_so.append(SousObjectifUpdateIn(id=active_so["id"], progression=new_prog))
-        so_impacte = active_so["titre"]
-    db.conn.execute(
-        "UPDATE taches_quotidiennes SET taches_json = ? WHERE id = ?",
-        (json.dumps(taches, ensure_ascii=False), row["id"]),
-    )
-    if all(t["completee"] for t in taches):
-        db.conn.execute(
-            "UPDATE taches_quotidiennes SET statut = 'terminee' WHERE id = ?",
-            (row["id"],),
-        )
-    db.conn.commit()
-    # Sauvegarder comme Decision dans l historique
+    task_so_impact = 0.0
+    active_so_id = None
+    active_so_titre = None
+    async with factory() as session:
+        try:
+            so_result = await session.execute(
+                text(
+                    "SELECT id, titre, progression, temps_estime FROM sous_objectifs "
+                    "WHERE user_id = :uid ORDER BY ordre"
+                ),
+                {"uid": profil.id},
+            )
+            all_so_rows = so_result.mappings().all()
+            active_so = next(
+                (so for so in all_so_rows if (so["progression"] or 0) < 100), None,
+            )
+            if active_so:
+                active_so_id = active_so["id"]
+                active_so_titre = active_so["titre"]
+                target_used, applied = await apply_impact_invariant_safe_async(
+                    session, profil.id, active_so_id, impact_jours,
+                    profil.temps_initial_jours,
+                )
+                # Re-lire la progression apres cascade
+                new_prog_result = await session.execute(
+                    text("SELECT progression FROM sous_objectifs WHERE id = :sid"),
+                    {"sid": target_used or active_so_id},
+                )
+                new_prog_row = new_prog_result.mappings().first()
+                new_prog = float(new_prog_row["progression"]) if new_prog_row \
+                    else float(active_so["progression"] or 0)
+                task_so_impact = applied
+                impacts_so.append(SousObjectifUpdateIn(
+                    id=target_used or active_so_id, progression=new_prog,
+                ))
+                so_impacte = active_so_titre
+
+            # 4. Mettre a jour le JSON des taches (et le statut si toutes finies)
+            await session.execute(
+                text("UPDATE taches_quotidiennes SET taches_json = :j WHERE id = :id"),
+                {"j": json.dumps(taches, ensure_ascii=False), "id": row["id"]},
+            )
+            if all(t["completee"] for t in taches):
+                await session.execute(
+                    text("UPDATE taches_quotidiennes SET statut = 'terminee' WHERE id = :id"),
+                    {"id": row["id"]},
+                )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+    # 5. Sauvegarder comme Decision dans l'historique (DecisionRepository sync)
     from sylea.core.models.decision import Decision, OptionDilemme
     from sylea.core.storage.repositories import DecisionRepository
     desc_str = tache_trouvee["description"]
     opt = OptionDilemme(
         description=f"[Tache] {desc_str}",
-        impact_score=impact,
+        impact_score=delta_prob,
         explication_impact="Tache quotidienne completee",
     )
     decision = Decision(
         user_id=profil.id,
         question=f"[Tache] {desc_str}",
         options=[opt],
-        probabilite_avant=profil.probabilite_actuelle - impact,
+        probabilite_avant=profil.probabilite_actuelle - delta_prob,
         option_choisie_id=opt.id,
         probabilite_apres=profil.probabilite_actuelle,
         temps_gagne_avant=profil.temps_gagne_jours - impact_jours,
         temps_gagne_apres=profil.temps_gagne_jours,
     )
-    if active_so:
-        decision.sous_objectif_id = active_so["id"]
+    if active_so_id:
+        decision.sous_objectif_id = active_so_id
         decision.impact_sous_objectif = task_so_impact
     dec_repo = DecisionRepository(db)
     dec_repo.sauvegarder(decision)
     return CompleterTacheOut(
         tache=TacheItem(**tache_trouvee),
-        impact_principal=impact,
+        impact_principal=delta_prob,
         impacts_sous_objectifs=impacts_so,
         sous_objectif_impacte=so_impacte,
     )
@@ -532,18 +679,34 @@ async def abandonner_taches(
     db=Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
+    """Marque toutes les taches du jour comme 'abandonnee'.
+
+    Migration PG (2026-05-12) : utilise SQLAlchemy text() — compatible
+    SQLite + PostgreSQL.
+    """
     if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
     profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
     today = date.today().isoformat()
-    db.conn.execute(
-        "UPDATE taches_quotidiennes SET statut = 'abandonnee' "
-        "WHERE user_id = ? AND date = ? AND statut = 'en_cours'",
-        (profil.id, today),
-    )
-    db.conn.commit()
+
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(
+                text(
+                    "UPDATE taches_quotidiennes SET statut = 'abandonnee' "
+                    "WHERE user_id = :uid AND date = :date AND statut = 'en_cours'"
+                ),
+                {"uid": profil.id, "date": today},
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
     return {"detail": "Taches abandonnees."}
 
 
@@ -552,23 +715,29 @@ async def abandonner_taches(
 @router.get("/api/profil/personnalite", response_model=PersonnaliteOut)
 async def get_personnalite(
     profil_repo: ProfilRepository = Depends(get_profil_repo),
-    db=Depends(get_db),
+    db=Depends(get_db),  # garde pour le INSERT plus bas (write, non migre)
     user_id: str | None = Depends(get_optional_user),
 ):
+    """Migration PG partielle : SELECT migre, UPDATE garde sur DatabaseManager."""
     if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
     profil = profil_repo.charger(auth_user_id=user_id)
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
     # Verifier si la phrase est deja stockee en DB (generee une seule fois)
-    row = db.conn.execute(
-        "SELECT phrase_personnalite FROM profil_utilisateur WHERE id = ?",
-        (profil.id,),
-    ).fetchone()
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text("SELECT phrase_personnalite FROM profil_utilisateur WHERE id = :uid"),
+            {"uid": profil.id},
+        )
+        row = result.mappings().first()
     if row and row["phrase_personnalite"]:
         return PersonnaliteOut(phrase=row["phrase_personnalite"])
     # Generer une seule fois via Claude
-    ctx = build_full_user_context(db, user_id, profil)
+    ctx = await build_full_user_context_async(db, user_id, profil)
     prompt = (
         "Tu es SYLEA, une IA bienveillante et perspicace. "
         "En UNE SEULE phrase poetique et inspirante (max 15 mots), "
@@ -583,10 +752,12 @@ async def get_personnalite(
         phrase = str(data.get("phrase", "Une ame determinee en quete de grandeur."))
     except Exception:
         phrase = "Une ame determinee en quete de grandeur."
-    # Stocker definitivement en DB
-    db.conn.execute(
-        "UPDATE profil_utilisateur SET phrase_personnalite = ? WHERE id = ?",
-        (phrase, profil.id),
-    )
-    db.conn.commit()
+    # Stocker definitivement en DB.
+    # Migration PG (2026-05-13) : UPDATE via SQLAlchemy text() async.
+    async with factory() as session:
+        await session.execute(
+            text("UPDATE profil_utilisateur SET phrase_personnalite = :phrase WHERE id = :uid"),
+            {"phrase": phrase, "uid": profil.id},
+        )
+        await session.commit()
     return PersonnaliteOut(phrase=phrase)

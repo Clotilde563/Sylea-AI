@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from sylea.core.storage.database import DatabaseManager
+from tests.conftest import make_shared_db, dispose_shared_db
 
 
 @pytest.fixture
-def db():
-    d = DatabaseManager(db_path=Path(":memory:"))
-    d.connect()
-    return d
+def db(tmp_path, monkeypatch):
+    """Shared-DB (sync + async) — migration PG."""
+    d = make_shared_db(tmp_path, monkeypatch)
+    # Init user_credentials table (created lazily par credentials.py)
+    from api.credentials import ensure_credentials_tables
+    ensure_credentials_tables(d)
+    yield d
+    dispose_shared_db(d)
 
 
 @pytest.fixture(autouse=True)
@@ -25,23 +31,38 @@ def _master_key(monkeypatch):
 
 
 def _save_key(db, user_id: str, provider: str, value: str):
-    from api.credentials import save_credential
-    save_credential(db, user_id, provider, "api_key", value)
+    """Save a credential. Auto-detects sync vs running event loop.
+
+    Used both from sync test functions and async ones. asyncio.run() fails
+    if there's already a loop (async tests), so we fall back to creating a
+    task in the current loop and awaiting it via a thread-pool dispatcher.
+    """
+    from api.credentials import save_credential_async
+    try:
+        asyncio.get_running_loop()
+        # Running loop : we're in an async context → schedule + run sync
+        # via a fresh threadpool helper.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(asyncio.run, save_credential_async(user_id, provider, "api_key", value)).result()
+    except RuntimeError:
+        # No running loop : we can use asyncio.run() directly
+        asyncio.run(save_credential_async(user_id, provider, "api_key", value))
 
 
 class TestKeyResolution:
     def test_has_user_key_for_when_present(self, db):
         from api.web_providers import has_user_key_for
         _save_key(db, "u1", "perplexity", "pplx-test-abc")
-        assert has_user_key_for(db, "u1", "perplexity_search") is True
+        assert asyncio.run(has_user_key_for(db, "u1", "perplexity_search")) is True
 
     def test_has_user_key_for_when_absent(self, db):
         from api.web_providers import has_user_key_for
-        assert has_user_key_for(db, "u1", "perplexity_search") is False
+        assert asyncio.run(has_user_key_for(db, "u1", "perplexity_search")) is False
 
     def test_unknown_tool(self, db):
         from api.web_providers import has_user_key_for
-        assert has_user_key_for(db, "u1", "weather_search") is False
+        assert asyncio.run(has_user_key_for(db, "u1", "weather_search")) is False
 
 
 class TestIsolation:
@@ -52,10 +73,10 @@ class TestIsolation:
         _save_key(db, "alice", "perplexity", "pplx-alice")
         _save_key(db, "bob", "brave", "BSA-bob")
 
-        assert has_user_key_for(db, "alice", "perplexity_search") is True
-        assert has_user_key_for(db, "alice", "brave_search") is False
-        assert has_user_key_for(db, "bob", "brave_search") is True
-        assert has_user_key_for(db, "bob", "perplexity_search") is False
+        assert asyncio.run(has_user_key_for(db, "alice", "perplexity_search")) is True
+        assert asyncio.run(has_user_key_for(db, "alice", "brave_search")) is False
+        assert asyncio.run(has_user_key_for(db, "bob", "brave_search")) is True
+        assert asyncio.run(has_user_key_for(db, "bob", "perplexity_search")) is False
 
 
 class TestPerplexity:

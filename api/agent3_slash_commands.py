@@ -192,8 +192,8 @@ async def _clear_handler(args: str, context: dict) -> SlashCommandResult:
     db = context.get("db")
     user_id = context.get("user_id", "")
     if db and user_id:
-        from api.routers.agent3_openclaw import _clear_agent3_messages
-        _clear_agent3_messages(db, user_id)
+        from api.routers.agent3_openclaw import _clear_agent3_messages_async
+        await _clear_agent3_messages_async(user_id)
     return SlashCommandResult(
         handled=True,
         response="Historique efface.",
@@ -208,18 +208,28 @@ async def _memory_handler(args: str, context: dict) -> SlashCommandResult:
     if not db or not user_id:
         return SlashCommandResult(handled=True, error="Non authentifie")
 
-    from api.routers.agent3_openclaw import _load_memories, _search_memories
+    from api.routers.agent3_openclaw import _load_memories_async, _search_memories
 
     args = args.strip()
 
     if args == "clear":
-        db.conn.execute("DELETE FROM agent3_memory WHERE auth_user_id = ?", (user_id,))
-        db.conn.commit()
+        from sqlalchemy import text
+        from api.database import get_session_factory
+        factory = get_session_factory()
+        try:
+            async with factory() as session:
+                await session.execute(
+                    text("DELETE FROM agent3_memory WHERE auth_user_id = :uid"),
+                    {"uid": user_id},
+                )
+                await session.commit()
+        except Exception:
+            pass
         return SlashCommandResult(handled=True, response="Toutes les memoires ont ete effacees.")
 
     if args.startswith("search "):
         query = args[7:].strip()
-        results = _search_memories(db, user_id, query, top_k=10)
+        results = await _search_memories(db, user_id, query, top_k=10)
         if not results:
             return SlashCommandResult(handled=True, response=f"Aucun resultat pour '{query}'")
         lines = [f"**Resultats pour '{query}' :**"]
@@ -228,7 +238,7 @@ async def _memory_handler(args: str, context: dict) -> SlashCommandResult:
         return SlashCommandResult(handled=True, response="\n".join(lines))
 
     # Par defaut : lister les memoires
-    memories = _load_memories(db, user_id, limit=30)
+    memories = await _load_memories_async(user_id, limit=30)
     if not memories:
         return SlashCommandResult(handled=True, response="Aucune memoire enregistree.")
     lines = [f"**{len(memories)} memoire(s) :**"]
@@ -392,7 +402,7 @@ async def _extract_handler(args: str, context: dict) -> SlashCommandResult:
         return SlashCommandResult(handled=True, error="Non authentifie")
 
     from api.routers.agent3_openclaw import _auto_extract_memories, _load_agent3_messages
-    recent = _load_agent3_messages(db, user_id, limit=20)
+    recent = await _load_agent3_messages_async(user_id, limit=20)
     turns = [
         {"role": m["role"], "content": m["content"]}
         for m in recent if m.get("content", "").strip()
@@ -417,12 +427,22 @@ async def _export_handler(args: str, context: dict) -> SlashCommandResult:
     if fmt not in ("txt", "json"):
         fmt = "txt"
 
-    # Compte le nombre de messages a exporter (preview)
+    # Compte le nombre de messages a exporter (preview) — version async.
+    n_rows = 0
     try:
-        n_rows = db.conn.execute(
-            "SELECT COUNT(*) FROM agent3_messages WHERE auth_user_id = ?",
-            (user_id,),
-        ).fetchone()[0] or 0
+        from sqlalchemy import text
+        from api.database import get_session_factory
+        factory = get_session_factory()
+        async with factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT COUNT(*) FROM agent3_messages "
+                    "WHERE auth_user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            row = result.first()
+            n_rows = int((row[0] if row else 0) or 0)
     except Exception:
         n_rows = 0
 
@@ -489,3 +509,55 @@ def get_slash_parser() -> SlashCommandParser:
         logger.info(f"Slash command parser initialized with {len(commands)} commands")
 
     return _parser
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _clear_memories_async(user_id: str) -> int:
+    """Version async de la suppression de toutes les memoires d'un user.
+
+    Utilise par /memory clear. Retourne le nombre de lignes supprimees.
+    """
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    if not user_id:
+        return 0
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text("DELETE FROM agent3_memory WHERE auth_user_id = :uid"),
+                {"uid": user_id},
+            )
+            await session.commit()
+            return int(getattr(result, "rowcount", 0) or 0)
+        except Exception as e:
+            await session.rollback()
+            logger.debug(f"_clear_memories_async failed: {e}")
+            return 0
+
+
+async def _count_export_messages_async(user_id: str) -> int:
+    """Compte le nombre de messages exportables pour un user — PG-compatible.
+
+    Utilise par /export pour preview le nombre de lignes.
+    """
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    if not user_id:
+        return 0
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT COUNT(*) FROM agent3_messages "
+                    "WHERE auth_user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            return int(result.scalar() or 0)
+        except Exception:
+            return 0

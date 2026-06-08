@@ -22,7 +22,11 @@ from api.dependencies import get_profil_repo, get_decision_repo, get_optional_us
 router = APIRouter(prefix="/api/historique", tags=["historique"])
 
 
-def _recompute_so_progressions(db, profil_id: str, exclude_decision_id: str | None = None) -> None:
+async def _recompute_so_progressions_async(
+    session, profil_id: str,
+    exclude_decision_id: str | None = None,
+    temps_gagne_override: float | None = None,
+) -> None:
     """Recalcule toutes les SO progressions pour profil_id en respectant
     l'invariant DASHBOARD critique :
 
@@ -42,22 +46,45 @@ def _recompute_so_progressions(db, profil_id: str, exclude_decision_id: str | No
 
     Le banner "Desynchronisation detectee" du Dashboard ne devrait plus
     apparaitre apres cet appel.
+
+    Migration PG (2026-05-12) : version async utilisant SQLAlchemy text() —
+    compatible SQLite ET PostgreSQL. La caller est responsable du commit.
+
+    BUG FIX (2026-05-13) : ajout de `temps_gagne_override` pour utiliser la
+    valeur POST-mutation au lieu de relire la DB (qui a la valeur PRE-mutation
+    si la caller n'a pas encore commit le profil). Sans cet override, le DELETE
+    flow recompute les SO avec l'ancien temps_gagne → drift de `impact_temps`
+    jours dans l'invariant Dashboard. Avec l'override, l'invariant tient
+    exactement apres DELETE.
     """
-    # Charger profil pour temps_initial et temps_gagne (sources de verite)
-    profil_row = db.conn.execute(
-        "SELECT temps_initial_jours, temps_gagne_jours FROM profil_utilisateur WHERE id = ?",
-        (profil_id,),
-    ).fetchone()
+    from sqlalchemy import text
+
+    # Charger profil pour temps_initial et (optionnellement) temps_gagne
+    result = await session.execute(
+        text(
+            "SELECT temps_initial_jours, temps_gagne_jours "
+            "FROM profil_utilisateur WHERE id = :pid"
+        ),
+        {"pid": profil_id},
+    )
+    profil_row = result.mappings().first()
     if not profil_row:
         return
     temps_initial = profil_row["temps_initial_jours"] or 0
-    temps_gagne = profil_row["temps_gagne_jours"] or 0
+    if temps_gagne_override is not None:
+        # Cas DELETE : le caller a deja calcule le nouveau temps_gagne
+        # post-mutation mais ne l'a pas encore commit. On l'utilise pour
+        # garantir que l'invariant Dashboard tient exactement post-DELETE.
+        temps_gagne = float(temps_gagne_override)
+    else:
+        temps_gagne = profil_row["temps_gagne_jours"] or 0
 
     # Charger les SO avec leurs temps_estime
-    so_rows = db.conn.execute(
-        "SELECT id, temps_estime FROM sous_objectifs WHERE user_id = ?",
-        (profil_id,),
-    ).fetchall()
+    result = await session.execute(
+        text("SELECT id, temps_estime FROM sous_objectifs WHERE user_id = :uid"),
+        {"uid": profil_id},
+    )
+    so_rows = result.mappings().all()
     if not so_rows:
         return
     so_te = {r["id"]: max(30, r["temps_estime"] or 180) for r in so_rows}
@@ -69,15 +96,15 @@ def _recompute_so_progressions(db, profil_id: str, exclude_decision_id: str | No
     cumul = {sid: 0.0 for sid in so_te}
     query = (
         "SELECT sous_objectif_id, impact_sous_objectif FROM decisions "
-        "WHERE user_id = ? AND sous_objectif_id IS NOT NULL "
+        "WHERE user_id = :uid AND sous_objectif_id IS NOT NULL "
     )
-    params: list = [profil_id]
+    params: dict = {"uid": profil_id}
     if exclude_decision_id:
-        query += "AND id != ? "
-        params.append(exclude_decision_id)
+        query += "AND id != :exc "
+        params["exc"] = exclude_decision_id
     query += "ORDER BY cree_le ASC"
-    rows = db.conn.execute(query, tuple(params)).fetchall()
-    for r in rows:
+    result = await session.execute(text(query), params)
+    for r in result.mappings().all():
         sid = r["sous_objectif_id"]
         impact = r["impact_sous_objectif"] or 0.0
         if sid in cumul:
@@ -103,11 +130,188 @@ def _recompute_so_progressions(db, profil_id: str, exclude_decision_id: str | No
         progressions = {sid: max(0.0, min(100.0, equal_prog)) for sid in so_te}
 
     for sid, prog in progressions.items():
-        db.conn.execute(
-            "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
-            (prog, sid),
+        await session.execute(
+            text("UPDATE sous_objectifs SET progression = :prog WHERE id = :sid"),
+            {"prog": prog, "sid": sid},
         )
-    db.conn.commit()
+    # Note : pas de commit ici — la caller gere la transaction.
+
+
+_STOPWORDS_FR = {
+    "le", "la", "les", "de", "des", "du", "un", "une", "et", "ou", "que",
+    "qui", "quoi", "dont", "pour", "par", "sur", "dans", "avec", "sans",
+    "mon", "ma", "mes", "ton", "ta", "tes", "son", "sa", "ses", "ce", "cet",
+    "cette", "ces", "il", "elle", "ils", "elles", "je", "tu", "nous", "vous",
+    "moi", "toi", "lui", "leur", "leurs", "est", "ete", "etre", "avoir",
+    "ai", "as", "ont", "avait", "avais", "avaient", "fait", "faite", "fais",
+    "etait", "etais", "etaient", "plus", "moins", "aussi", "donc", "alors",
+    "evenement", "tache", "dilemme", "decision", "action", "chose", "truc",
+    "jour", "jours", "semaine", "mois", "annee", "an", "ans", "aujourd",
+    "hui", "demain", "hier", "tous", "tout", "toute", "toutes", "rien",
+    "pas", "ne", "non", "oui", "si", "tres", "trop", "peu", "beaucoup",
+}
+
+
+def _extract_keywords(text: str, min_len: int = 4) -> set[str]:
+    """Extrait les mots clés significatifs d'un texte (>= min_len lettres,
+    non stop-words). Insensible aux accents et a la casse.
+    """
+    import unicodedata, re
+    if not text:
+        return set()
+    # Normaliser : minuscules + suppression accents
+    norm = unicodedata.normalize("NFKD", text.lower())
+    norm = "".join(c for c in norm if not unicodedata.combining(c))
+    # Tokens alphanumeriques (garde aussi les chiffres pour matcher "50000")
+    tokens = re.findall(r"\w+", norm)
+    return {
+        t for t in tokens
+        if len(t) >= min_len and t not in _STOPWORDS_FR
+    }
+
+
+async def _cleanup_collected_info_for_decision_async(
+    session, profil_id: str, user_id: str | None, decision
+) -> None:
+    """Supprime les rows agent_collected_info qui partagent suffisamment de mots
+    clés significatifs avec la décision supprimée. Heuristique : >=2 keywords
+    communs OU >=1 keyword "fort" (chiffre, mot >7 lettres).
+
+    Évite que l'Agent 1 continue à relancer un sujet (ex: "héritage 50k€")
+    après que l'utilisateur ait supprimé l'événement correspondant.
+
+    Migration PG (2026-05-12) : version async via SQLAlchemy text(). La caller
+    gere le commit.
+    """
+    if not user_id:
+        return
+    from sqlalchemy import text as sql_text
+    # Source : description de la decision + descriptions d'options
+    text_parts = [decision.question or ""]
+    for opt in (decision.options or []):
+        text_parts.append(opt.description or "")
+        text_parts.append(opt.explication_impact or "")
+    decision_keywords = _extract_keywords(" ".join(text_parts))
+    if not decision_keywords:
+        return
+
+    # Mots "forts" : chiffres OU mots longs (>7 lettres) → 1 seul match suffit
+    strong = {k for k in decision_keywords if k.isdigit() or len(k) > 7}
+
+    result = await session.execute(
+        sql_text(
+            "SELECT id, field, value FROM agent_collected_info WHERE user_id = :uid"
+        ),
+        {"uid": user_id},
+    )
+    rows = result.mappings().all()
+
+    ids_to_delete: list[int] = []
+    for r in rows:
+        row_text = f"{r['field']} {r['value']}"
+        row_keywords = _extract_keywords(row_text)
+        common = decision_keywords & row_keywords
+        common_strong = strong & row_keywords
+        # Match si >=2 keywords communs OU >=1 keyword "fort" partagé
+        if len(common) >= 2 or len(common_strong) >= 1:
+            ids_to_delete.append(r["id"])
+
+    for rid in ids_to_delete:
+        await session.execute(
+            sql_text("DELETE FROM agent_collected_info WHERE id = :rid"),
+            {"rid": rid},
+        )
+
+
+async def _cleanup_agent_messages_for_decision_async(
+    session, user_id: str | None, decision
+) -> None:
+    """Supprime les rows des tables de memoire agent qui mentionnent les mots
+    cles forts de la decision :
+      - agent_messages    : historique chat Agent 1
+      - agent2_messages   : historique chat Agent 2
+      - agent3_memory     : memoire partagee (cle/valeur) entre tous les agents
+
+    Evite que l'agent continue a se souvenir du sujet apres suppression.
+    Heuristique conservatrice : >= 1 mot-cle fort partage suffit pour delete.
+
+    Migration PG (2026-05-12) : version async via SQLAlchemy text(). La caller
+    gere le commit. SECURITE : les noms de tables/colonnes sont en whitelist
+    statique pour eviter toute SQL injection (jamais derive de l'input user).
+    """
+    if not user_id:
+        return
+    from sqlalchemy import text as sql_text
+    text_parts = [decision.question or ""]
+    for opt in (decision.options or []):
+        text_parts.append(opt.description or "")
+        text_parts.append(opt.explication_impact or "")
+    decision_keywords = _extract_keywords(" ".join(text_parts))
+    strong = {k for k in decision_keywords if k.isdigit() or len(k) > 7}
+    if not strong:
+        return
+
+    def _match(content: str | None) -> bool:
+        return bool(strong & _extract_keywords(content or ""))
+
+    # Tables (table_name, content_columns_to_check) — whitelist statique
+    targets = [
+        ('agent_messages', ['content']),
+        ('agent2_messages', ['content']),
+        ('agent3_memory', ['key', 'value']),  # memoire partagee : cle ET valeur
+    ]
+    for table, cols in targets:
+        try:
+            sel_cols = 'id, ' + ', '.join(cols)
+            result = await session.execute(
+                sql_text(f"SELECT {sel_cols} FROM {table} WHERE auth_user_id = :uid"),
+                {"uid": user_id},
+            )
+            rows = result.mappings().all()
+        except Exception:
+            continue
+        ids_to_delete: list[str] = []
+        for r in rows:
+            combined = ' '.join((r[c] or '') for c in cols)
+            if _match(combined):
+                ids_to_delete.append(r['id'])
+        for rid in ids_to_delete:
+            try:
+                await session.execute(
+                    sql_text(f"DELETE FROM {table} WHERE id = :rid"),
+                    {"rid": rid},
+                )
+            except Exception:
+                # Best-effort par row : ne pas casser le cleanup global
+                continue
+
+
+async def _cleanup_pending_for_decision_async(
+    session, user_id: str | None, decision_id: str
+) -> None:
+    """Marque les pending_actions liées à cette décision comme abandonnées.
+
+    Utile si l'utilisateur supprime l'evenement avant le check final : le
+    pending_action ne doit plus revenir le harceler.
+
+    Migration PG (2026-05-12) : version async via SQLAlchemy text(). La caller
+    gere le commit.
+    """
+    if not user_id or not decision_id:
+        return
+    from sqlalchemy import text as sql_text
+    try:
+        await session.execute(
+            sql_text(
+                "UPDATE pending_actions SET statut = 'abandoned' "
+                "WHERE auth_user_id = :uid AND source_id = :sid "
+                "AND statut IN ('pending', 'in_progress')"
+            ),
+            {"uid": user_id, "sid": decision_id},
+        )
+    except Exception:
+        # Table peut ne pas exister selon le schema en cours
+        return
 
 
 def _option_to_out(opt) -> OptionDilemmeOut:
@@ -160,6 +364,7 @@ def _decision_to_out(d: Decision) -> DecisionOut:
         impact_sous_objectif=so_impact if so_impact else None,
         temps_gagne_avant=d.temps_gagne_avant,
         temps_gagne_apres=d.temps_gagne_apres,
+        rappels=getattr(d, "rappels", None),
     )
 
 
@@ -167,10 +372,16 @@ def _decision_to_out(d: Decision) -> DecisionOut:
 async def get_historique(
     limite: int = Query(default=20, ge=1, le=1000),
     profil_repo: ProfilRepository = Depends(get_profil_repo),
-    decision_repo: DecisionRepository = Depends(get_decision_repo),
     user_id: str | None = Depends(get_optional_user),
 ):
-    """Retourne les N dernières décisions de l'utilisateur."""
+    """Retourne les N dernieres decisions de l'utilisateur.
+
+    Migration PG (2026-05-12) : utilise SQLAlchemy text() pour etre compatible
+    SQLite ET PostgreSQL. La syntaxe `:name` au lieu de `?` est portable.
+
+    Le profil_repo reste sync (charge depuis le DatabaseManager raw) — c'est
+    une migration progressive : on remplace les requetes SQL une par une.
+    """
     if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
 
@@ -178,7 +389,24 @@ async def get_historique(
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
-    decisions = decision_repo.lister_pour_utilisateur(profil.id, limite=limite)
+    # ── Migration SQLAlchemy ────────────────────────────────────────────
+    # Avant : decision_repo.lister_pour_utilisateur(profil.id, limite=limite)
+    # Apres : SQLAlchemy async avec text() — fonctionne sur SQLite et PG.
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT * FROM decisions WHERE user_id = :uid "
+                "ORDER BY cree_le DESC LIMIT :limite"
+            ),
+            {"uid": profil.id, "limite": limite},
+        )
+        rows = result.mappings().all()
+
+    # Decision.from_dict attend un dict avec les bonnes cles
+    decisions = [Decision.from_dict(dict(r)) for r in rows]
     return [_decision_to_out(d) for d in decisions]
 
 
@@ -189,10 +417,12 @@ async def get_historique_pagine(
     tri: str = Query(default="recent"),
     recherche: str = Query(default=""),
     profil_repo: ProfilRepository = Depends(get_profil_repo),
-    decision_repo: DecisionRepository = Depends(get_decision_repo),
     user_id: str | None = Depends(get_optional_user),
 ):
-    """Retourne les decisions paginées avec tri et recherche."""
+    """Retourne les decisions paginees avec tri et recherche.
+
+    Migration PG : utilise SQLAlchemy text() — compatible SQLite + PG.
+    """
     if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
     profil = profil_repo.charger(auth_user_id=user_id)
@@ -200,10 +430,42 @@ async def get_historique_pagine(
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
     rech = recherche.strip() or None
-    total = decision_repo.compter_filtre(profil.id, rech)
     import math
+    from sqlalchemy import text
+    from api.database import get_session_factory
+
+    # Tri whitelist (eviter SQL injection sur la clause ORDER BY)
+    order_clause = {
+        "recent": "cree_le DESC",
+        "ancien": "cree_le ASC",
+        "impact": "ABS(COALESCE(probabilite_apres, probabilite_avant) - probabilite_avant) DESC",
+    }.get(tri, "cree_le DESC")
+
+    offset = (max(1, page) - 1) * par_page
+    params: dict = {"uid": profil.id, "limite": par_page, "offset": offset}
+
+    where_clause = "user_id = :uid"
+    if rech:
+        where_clause += " AND question LIKE :rech"
+        params["rech"] = f"%{rech}%"
+
+    factory = get_session_factory()
+    async with factory() as session:
+        # COUNT total
+        count_sql = f"SELECT COUNT(*) FROM decisions WHERE {where_clause}"
+        count_params = {k: v for k, v in params.items() if k in ('uid', 'rech')}
+        total = (await session.execute(text(count_sql), count_params)).scalar() or 0
+
+        # SELECT paginated
+        list_sql = (
+            f"SELECT * FROM decisions WHERE {where_clause} "
+            f"ORDER BY {order_clause} LIMIT :limite OFFSET :offset"
+        )
+        result = await session.execute(text(list_sql), params)
+        rows = result.mappings().all()
+
+    decisions = [Decision.from_dict(dict(r)) for r in rows]
     pages_total = max(1, math.ceil(total / par_page))
-    decisions = decision_repo.lister_pagine(profil.id, page, par_page, tri, rech)
     return HistoriquePagineOut(
         decisions=[_decision_to_out(d) for d in decisions],
         total=total,
@@ -216,10 +478,14 @@ async def get_historique_pagine(
 @router.get("/agent-rapport", response_model=AgentRapportOut)
 async def get_agent_rapport(
     profil_repo: ProfilRepository = Depends(get_profil_repo),
-    decision_repo: DecisionRepository = Depends(get_decision_repo),
     user_id: str | None = Depends(get_optional_user),
 ):
-    """Retourne le rapport des actions effectuées par l'agent."""
+    """Retourne le rapport des actions effectuees par l'agent.
+
+    Migration PG : utilise SQLAlchemy text() — compatible SQLite + PG.
+    Optimisation : on filtre directement les rows ayant action_agent_json non-null
+    (skip celles sans action).
+    """
     if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
 
@@ -227,7 +493,21 @@ async def get_agent_rapport(
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
-    decisions = decision_repo.lister_pour_utilisateur(profil.id, limite=50)
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT * FROM decisions WHERE user_id = :uid "
+                "AND action_agent_json IS NOT NULL "
+                "ORDER BY cree_le DESC LIMIT 50"
+            ),
+            {"uid": profil.id},
+        )
+        rows = result.mappings().all()
+
+    decisions = [Decision.from_dict(dict(r)) for r in rows]
     actions = [d.action_agent for d in decisions if d.action_agent is not None]
 
     return AgentRapportOut(
@@ -243,7 +523,16 @@ async def supprimer_decision(
     decision_repo: DecisionRepository = Depends(get_decision_repo),
     user_id: str | None = Depends(get_optional_user),
 ):
-    """Supprime une décision et recalcule la probabilité actuelle."""
+    """Supprime une décision et recalcule la probabilité actuelle.
+
+    Migration PG (2026-05-12) : tous les writes liés à la décision (recompute
+    SO, cleanup contexte agent, DELETE decision) passent par UNE seule session
+    SQLAlchemy async — atomique, compatible SQLite + PostgreSQL.
+
+    Le profil_repo.sauvegarder reste en sync (transaction séparée) car il
+    cascade sur des modèles complexes (objectif, etc.) — migration différée
+    à la phase ProfilRepository.
+    """
     if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouvé.")
 
@@ -252,6 +541,8 @@ async def supprimer_decision(
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
     # 1. Charger la décision AVANT suppression pour connaître son impact
+    #    (utilise encore le sync repo : lecture rapide, pas dans la transaction
+    #    écriture)
     decision = decision_repo.obtenir_par_id(decision_id, profil.id)
     if decision is None:
         raise HTTPException(status_code=404, detail="Décision introuvable.")
@@ -266,42 +557,70 @@ async def supprimer_decision(
         impact_temps = decision.temps_gagne_apres - decision.temps_gagne_avant
 
     # 2b. Reverser la progression du sous-objectif.
+    # Refonte robustesse : on appelle TOUJOURS _recompute_so_progressions
+    # (au lieu d'un seuil > 50% sur impact_sous_objectif). Raison : detecter
+    # un cascade overflow apres-coup est impossible — meme un applied_delta
+    # de 25% peut avoir cascade jusqu'a 5+ SOs. Recompute global est le seul
+    # moyen sur de preserver l'invariant Dashboard.
     #
-    # PROBLEME identifie en QA : la simple soustraction `progression -=
-    # impact_sous_objectif` ne gere PAS le cas de l'overflow redistribution
-    # (cf. evenement.py ligne 451-487). Si l'impact original de la decision
-    # avait fait overflow le SO target a 100 et redistribue sur les autres
-    # SO, la suppression ne reverse que le SO target — laissant les autres
-    # SO avec leur progression boostee.
-    #
-    # FIX (Sprint QA pre-commercialisation) : si la decision avait potentiel
-    # d'overflow (impact_so > seuil), on recompute TOUTES les SO progressions
-    # en reappliquant chronologiquement les decisions restantes a partir de
-    # leurs impact_sous_objectif stockes. Sinon on garde la simple soustraction.
-    db = profil_repo._db
-    if decision.sous_objectif_id and decision.impact_sous_objectif:
-        try:
-            so_row = db.conn.execute(
-                "SELECT id, progression FROM sous_objectifs WHERE id = ?",
-                (decision.sous_objectif_id,),
-            ).fetchone()
-            if so_row:
-                # Heuristique : si impact_sous_objectif > 50%, l'overflow redistribution
-                # a probablement ete declenchee. On recompute TOUS les SO.
-                if abs(decision.impact_sous_objectif) > 50:
-                    _recompute_so_progressions(db, profil.id, exclude_decision_id=decision_id)
-                else:
-                    new_prog = max(0, so_row["progression"] - decision.impact_sous_objectif)
-                    db.conn.execute(
-                        "UPDATE sous_objectifs SET progression = ? WHERE id = ?",
-                        (new_prog, decision.sous_objectif_id),
-                    )
-                    db.conn.commit()
-        except Exception:
-            pass  # Best-effort : ne pas bloquer la suppression
+    # BUG FIX (2026-05-13) : on calcule le nouveau temps_gagne AVANT le
+    # recompute, et on le passe en override. Sans ca, le recompute lit le
+    # temps_gagne PRE-DELETE depuis la DB → drift de `impact_temps` jours
+    # dans l'invariant Dashboard. Avec l'override, l'invariant tient
+    # exactement post-DELETE.
+    new_temps_gagne_jours = max(0, profil.temps_gagne_jours - impact_temps)
 
-    # 3. Supprimer la décision
-    decision_repo.supprimer_par_id(decision_id, profil.id)
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            # 2b. Recompute SO progressions (invariant Dashboard).
+            # On recompute des qu'il y a un impact temps (pas seulement quand
+            # sous_objectif_id est defini) : les decisions issues du TRACKING ont
+            # sous_objectif_id=None mais un impact temps reel qui a cascade sur
+            # les SO. Sans recompute, supprimer une telle decision baisse
+            # temps_gagne sans rajuster les SO -> drift de l'invariant Dashboard
+            # ("Desynchronisation detectee"). Le recompute est global+idempotent
+            # et no-op s'il n'y a aucun SO.
+            if decision.sous_objectif_id or abs(impact_temps) > 0.001:
+                try:
+                    await _recompute_so_progressions_async(
+                        session, profil.id,
+                        exclude_decision_id=decision_id,
+                        temps_gagne_override=new_temps_gagne_jours,
+                    )
+                except Exception:
+                    pass  # Best-effort : ne pas bloquer la suppression
+
+            # 3a. Nettoyer le contexte agent lié à cette décision :
+            #   - agent_collected_info : matching heuristique mots-cles
+            #   - agent_messages / agent2_messages / agent3_memory : mots forts
+            #   - pending_actions : marquees abandoned
+            try:
+                await _cleanup_collected_info_for_decision_async(
+                    session, profil.id, user_id, decision
+                )
+                await _cleanup_agent_messages_for_decision_async(
+                    session, user_id, decision
+                )
+                await _cleanup_pending_for_decision_async(
+                    session, user_id, decision_id
+                )
+            except Exception:
+                pass  # Best-effort : ne pas bloquer la suppression
+
+            # 3. Supprimer la décision (dans la meme transaction que les
+            #    cleanups + recompute SO — atomique)
+            await session.execute(
+                text("DELETE FROM decisions WHERE id = :did AND user_id = :uid"),
+                {"did": decision_id, "uid": profil.id},
+            )
+
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
     # 4. Reverser l'impact temps de la décision supprimée
     profil.temps_gagne_jours = max(0, profil.temps_gagne_jours - impact_temps)
@@ -335,6 +654,9 @@ async def recompute_so_progressions_endpoint(
     des SO dans un etat incoherent (overflow redistribution non reverse).
     Strategy : sum(impact_sous_objectif) par SO depuis toutes les decisions
     restantes, clamped 0..100.
+
+    Migration PG (2026-05-12) : utilise SQLAlchemy async — compatible
+    SQLite + PostgreSQL.
     """
     if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Profil introuvable.")
@@ -342,13 +664,28 @@ async def recompute_so_progressions_endpoint(
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
-    db = profil_repo._db
-    _recompute_so_progressions(db, profil.id, exclude_decision_id=None)
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await _recompute_so_progressions_async(
+                session, profil.id, exclude_decision_id=None
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
-    so_rows = db.conn.execute(
-        "SELECT id, titre, progression FROM sous_objectifs WHERE user_id = ? ORDER BY ordre",
-        (profil.id,),
-    ).fetchall()
+        result = await session.execute(
+            text(
+                "SELECT id, titre, progression FROM sous_objectifs "
+                "WHERE user_id = :uid ORDER BY ordre"
+            ),
+            {"uid": profil.id},
+        )
+        so_rows = result.mappings().all()
+
     return {
         "ok": True,
         "sous_objectifs": [

@@ -18,9 +18,9 @@ Tables concernees :
   - credentials_vault (Phase 6 — chiffres mais wipe aussi)
 
 Garanties :
-  - `export_my_data()` : retourne un dict {table_name: rows} + manifest
-  - `delete_my_data()` : atomique (transaction), retourne le compte par table
-  - Isolation stricte : seules les lignes `auth_user_id = ?` sont touchees
+  - `export_my_data_async()` : retourne un dict {table_name: rows} + manifest
+  - `delete_my_data_async()` : atomique (transaction), retourne le compte par table
+  - Isolation stricte : seules les lignes `auth_user_id = :uid` sont touchees
 
 Conformite :
   - Article 15 RGPD (droit d'acces) : export
@@ -30,10 +30,7 @@ Conformite :
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,7 +39,7 @@ logger = logging.getLogger("sylea.gdpr")
 
 
 # Tables a auditer. Certaines peuvent ne pas exister selon la migration ->
-# `_table_exists()` filtre silencieusement.
+# try/except par table dans les helpers async filtre silencieusement.
 _USER_SCOPED_TABLES: list[tuple[str, str]] = [
     # (table_name, user_column)
     ("agent3_messages", "auth_user_id"),
@@ -62,92 +59,69 @@ _USER_SCOPED_TABLES: list[tuple[str, str]] = [
 ]
 
 
-def _table_exists(db: Any, name: str) -> bool:
-    try:
-        row = db.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,),
-        ).fetchone()
-        return row is not None
-    except Exception:
-        return False
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Approche portable : on tente la requete avec try/except. Si la table n'existe
+# pas, l'exception est catched et on skip. Plus simple que detecter le schema
+# via sqlite_master (SQLite-specific) ou information_schema (PG-specific).
 
 
-def _get_columns(db: Any, table: str) -> list[str]:
-    try:
-        rows = db.conn.execute(f"PRAGMA table_info({table})").fetchall()
-        return [r[1] for r in rows]
-    except Exception:
-        return []
+async def export_my_data_async(user_id: str) -> dict[str, Any]:
+    """Version async de export_my_data — PG-compatible.
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Export
-# ─────────────────────────────────────────────────────────────────────────────
-
-def export_my_data(db: Any, user_id: str) -> dict[str, Any]:
-    """Export complet des donnees du user.
-
-    Retourne un dict :
-      {
-        "manifest": {...},  # metadata
-        "data": {table_name: [rows...]},
-        "file_paths": [...]  # chemins des fichiers uploades
-      }
+    Approche portable : SELECT * FROM table WHERE user_col = :uid avec
+    try/except par table — si la table n'existe pas, skip.
     """
     if not user_id:
         return {"manifest": {}, "data": {}, "file_paths": []}
+
+    from sqlalchemy import text
+    from api.database import get_session_factory
 
     data: dict[str, list[dict]] = {}
     file_paths: list[str] = []
     tables_included: list[str] = []
     total_rows = 0
 
-    for table, user_col in _USER_SCOPED_TABLES:
-        if not _table_exists(db, table):
-            continue
-        cols = _get_columns(db, table)
-        if user_col not in cols:
-            # Schema different → skip silencieusement
-            continue
-        try:
-            rows = db.conn.execute(
-                f"SELECT * FROM {table} WHERE {user_col} = ?", (user_id,),
-            ).fetchall()
-        except Exception as e:
-            logger.warning(f"export: could not read {table}: {e}")
-            continue
+    factory = get_session_factory()
+    async with factory() as session:
+        for table, user_col in _USER_SCOPED_TABLES:
+            try:
+                # SECURITE : table et user_col viennent de _USER_SCOPED_TABLES
+                # (whitelist statique en module-level). Jamais d'input user → safe.
+                result = await session.execute(
+                    text(f"SELECT * FROM {table} WHERE {user_col} = :uid"),
+                    {"uid": user_id},
+                )
+                rows = result.mappings().all()
+            except Exception as e:
+                logger.debug(f"export async: skip {table}: {e}")
+                continue
 
-        col_names = [d[0] for d in db.conn.execute(
-            f"SELECT * FROM {table} WHERE {user_col} = ? LIMIT 0", (user_id,),
-        ).description or []]
-        if not col_names:
-            col_names = cols
+            serialized: list[dict] = []
+            for r in rows:
+                row_dict = {}
+                for k, v in r.items():
+                    if (table == "credentials_vault"
+                            and k in ("encrypted_value", "value_encrypted")):
+                        row_dict[k] = "[REDACTED — chiffre en base, non exporte en clair]"
+                    elif isinstance(v, (bytes, bytearray, memoryview)):
+                        row_dict[k] = f"[BLOB:{len(bytes(v))} bytes]"
+                    else:
+                        row_dict[k] = v
+                serialized.append(row_dict)
+                # Collecte file_paths
+                if table == "agent3_files" and "filepath" in r:
+                    fp = r["filepath"]
+                    if fp:
+                        file_paths.append(str(fp))
 
-        serialized: list[dict] = []
-        for r in rows:
-            row_dict = {}
-            for i, name in enumerate(col_names):
-                if i >= len(r):
-                    break
-                v = r[i]
-                # Redaction des champs sensibles (preserve structure, pas la valeur)
-                if table == "credentials_vault" and name in ("encrypted_value", "value_encrypted"):
-                    row_dict[name] = "[REDACTED — chiffre en base, non exporte en clair]"
-                elif isinstance(v, bytes):
-                    # BLOB (ex : embeddings) → skip le contenu, juste sa taille
-                    row_dict[name] = f"[BLOB:{len(v)} bytes]"
-                else:
-                    row_dict[name] = v
-            serialized.append(row_dict)
-            # Collecte les file_paths des uploads pour copie eventuelle
-            if table == "agent3_files" and "filepath" in col_names:
-                fp_idx = col_names.index("filepath")
-                if fp_idx < len(r) and r[fp_idx]:
-                    file_paths.append(str(r[fp_idx]))
-
-        data[table] = serialized
-        tables_included.append(table)
-        total_rows += len(serialized)
+            if serialized:
+                data[table] = serialized
+                tables_included.append(table)
+                total_rows += len(serialized)
 
     manifest = {
         "user_id": user_id,
@@ -158,81 +132,80 @@ def export_my_data(db: Any, user_id: str) -> dict[str, Any]:
         "schema_version": "sylea-agent3-v1",
         "format": "json",
     }
-
     return {"manifest": manifest, "data": data, "file_paths": file_paths}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Delete
-# ─────────────────────────────────────────────────────────────────────────────
-
-def delete_my_data(
-    db: Any, user_id: str, *, delete_uploads: bool = True,
+async def delete_my_data_async(
+    user_id: str, *, delete_uploads: bool = True,
 ) -> dict[str, Any]:
-    """Suppression ATOMIQUE de toutes les donnees du user.
+    """Version async de delete_my_data — PG-compatible.
 
-    Args:
-        delete_uploads : si True, efface aussi les fichiers disque (uploads, figures).
-
-    Retourne :
-      {
-        "deleted_by_table": {table: count, ...},
-        "files_deleted": int,
-        "total_rows": int,
-        "deleted_at": ISO,
-      }
-
-    La suppression est dans une transaction unique. Si une table echoue,
-    tout est rollback.
+    Suppression ATOMIQUE dans UNE seule transaction async. Si une table
+    echoue, tout est rollback.
     """
     if not user_id:
-        return {"deleted_by_table": {}, "files_deleted": 0, "total_rows": 0, "error": "no user_id"}
+        return {
+            "deleted_by_table": {}, "files_deleted": 0,
+            "total_rows": 0, "error": "no user_id",
+        }
+
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
 
     deleted: dict[str, int] = {}
     total = 0
-
-    # Collecte les paths de fichiers AVANT la suppression (pour cleanup disque)
     files_to_remove: list[str] = []
-    if delete_uploads and _table_exists(db, "agent3_files"):
+
+    # Collecte les paths de fichiers AVANT la suppression
+    if delete_uploads:
         try:
-            rows = db.conn.execute(
-                "SELECT filepath FROM agent3_files WHERE auth_user_id = ?", (user_id,),
-            ).fetchall()
-            files_to_remove = [r[0] for r in rows if r and r[0]]
+            async with factory() as session:
+                try:
+                    result = await session.execute(
+                        text(
+                            "SELECT filepath FROM agent3_files "
+                            "WHERE auth_user_id = :uid"
+                        ),
+                        {"uid": user_id},
+                    )
+                    rows = result.mappings().all()
+                    files_to_remove = [r["filepath"] for r in rows if r["filepath"]]
+                except Exception as e:
+                    logger.debug(f"Could not collect file paths async: {e}")
+        except Exception:
+            pass
+
+    # Transaction atomique : tout ou rien
+    async with factory() as session:
+        try:
+            for table, user_col in _USER_SCOPED_TABLES:
+                try:
+                    # SECURITE : whitelist statique, jamais d'input user
+                    result = await session.execute(
+                        text(
+                            f"DELETE FROM {table} WHERE {user_col} = :uid"
+                        ),
+                        {"uid": user_id},
+                    )
+                    count = result.rowcount or 0
+                    if count > 0:
+                        deleted[table] = count
+                        total += count
+                except Exception as e:
+                    logger.warning(f"delete async: failed on {table}: {e}")
+            await session.commit()
         except Exception as e:
-            logger.debug(f"Could not collect file paths : {e}")
+            await session.rollback()
+            logger.exception(f"delete_my_data_async transaction failed: {e}")
+            return {
+                "deleted_by_table": {},
+                "files_deleted": 0,
+                "total_rows": 0,
+                "error": f"transaction_failed: {type(e).__name__}",
+            }
 
-    # Transaction : tout ou rien
-    try:
-        db.conn.execute("BEGIN")
-        for table, user_col in _USER_SCOPED_TABLES:
-            if not _table_exists(db, table):
-                continue
-            cols = _get_columns(db, table)
-            if user_col not in cols:
-                continue
-            try:
-                cursor = db.conn.execute(
-                    f"DELETE FROM {table} WHERE {user_col} = ?", (user_id,),
-                )
-                count = cursor.rowcount or 0
-                if count > 0:
-                    deleted[table] = count
-                    total += count
-            except Exception as e:
-                logger.warning(f"delete: failed on {table}: {e}")
-        db.conn.commit()
-    except Exception as e:
-        db.conn.rollback()
-        logger.exception(f"delete_my_data transaction failed: {e}")
-        return {
-            "deleted_by_table": {},
-            "files_deleted": 0,
-            "total_rows": 0,
-            "error": f"transaction_failed: {type(e).__name__}",
-        }
-
-    # Cleanup disque (hors transaction, best-effort)
+    # Cleanup disque hors transaction
     files_deleted = 0
     if delete_uploads:
         for fp in files_to_remove:
@@ -252,4 +225,7 @@ def delete_my_data(
     }
 
 
-__all__ = ["export_my_data", "delete_my_data"]
+__all__ = [
+    "export_my_data_async",
+    "delete_my_data_async",
+]

@@ -16,7 +16,7 @@ Table `agent3_embeddings` :
 Fonctions principales :
   - ingest_text(db, user_id, text, *, source_type, source_ref, scope)
   - semantic_search(db, user_id, query, *, top_k, scope)
-  - delete_by_source(db, user_id, source_type, source_ref)
+  - delete_by_source_async(user_id, source_type, source_ref)
 
 Strategie embedding :
   1. Si OPENAI_API_KEY dispo : OpenAI text-embedding-3-small (1536 dims, ~$0.02/M tokens)
@@ -261,66 +261,79 @@ async def ingest_text(
 ) -> dict[str, Any]:
     """Ingere un texte : chunk + embed + stocke.
 
-    Args:
-        source_type : "web_fetch", "file_read", "memory", "upload", "skill_md"
-        source_ref : URL, chemin fichier, etc (pour dedupe)
-        scope : "global" (vault user) ou "session:<token>" (ephemere)
-        replace_existing : si True, purge les chunks anterieurs pour ce source_ref
-
-    Retourne : {ingested_chunks, total_chars, model}
+    Migration PG (2026-05-13) : DELETE+INSERT via SQLAlchemy text() async,
+    compatible SQLite + PostgreSQL. Le param `db` est garde pour compat de
+    signature mais on utilise get_session_factory() en interne.
     """
     if not user_id:
         return {"ingested_chunks": 0, "total_chars": 0, "model": "none", "error": "no user_id"}
-    text = (text or "").strip()
-    if len(text) < _MIN_INGEST_CHARS:
-        return {"ingested_chunks": 0, "total_chars": len(text), "model": "none", "skipped": "too_short"}
+    text_str = (text or "").strip()
+    if len(text_str) < _MIN_INGEST_CHARS:
+        return {"ingested_chunks": 0, "total_chars": len(text_str), "model": "none", "skipped": "too_short"}
 
     ensure_rag_tables(db)
 
-    if replace_existing and source_ref:
-        try:
-            db.conn.execute(
-                "DELETE FROM agent3_embeddings "
-                "WHERE auth_user_id = ? AND source_type = ? AND source_ref = ?",
-                (user_id, source_type, source_ref),
-            )
-        except Exception as e:
-            logger.debug(f"delete_existing failed: {e}")
+    from sqlalchemy import text as _sql_text
+    from api.database import get_session_factory
 
-    chunks = chunk_text(text)
+    chunks = chunk_text(text_str)
     if not chunks:
         return {"ingested_chunks": 0, "total_chars": 0, "model": "none"}
 
     vectors, model = await embed_texts(chunks)
     if len(vectors) != len(chunks):
         logger.warning(f"Embedding mismatch: {len(vectors)} vs {len(chunks)} chunks")
-        return {"ingested_chunks": 0, "total_chars": len(text), "model": model, "error": "mismatch"}
+        return {"ingested_chunks": 0, "total_chars": len(text_str), "model": model, "error": "mismatch"}
 
     dims = len(vectors[0]) if vectors else 0
     now = datetime.now(timezone.utc).isoformat()
     meta_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
 
-    for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
+    factory = get_session_factory()
+    async with factory() as session:
         try:
-            db.conn.execute(
-                "INSERT INTO agent3_embeddings "
-                "(id, auth_user_id, scope, source_type, source_ref, chunk_idx, "
-                " content_text, embedding, embedding_dims, embedding_model, "
-                " metadata_json, token_count, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    str(uuid.uuid4()), user_id, scope, source_type, source_ref or "",
-                    i, chunk, _embedding_to_blob(vec), dims, model, meta_json,
-                    len(chunk) // 4,  # approximation 1 token ~ 4 chars
-                    now,
-                ),
-            )
-        except Exception as e:
-            logger.warning(f"RAG insert chunk {i} failed: {e}")
-    db.conn.commit()
+            if replace_existing and source_ref:
+                try:
+                    await session.execute(
+                        _sql_text(
+                            "DELETE FROM agent3_embeddings "
+                            "WHERE auth_user_id = :uid AND source_type = :stype "
+                            "AND source_ref = :sref"
+                        ),
+                        {"uid": user_id, "stype": source_type, "sref": source_ref},
+                    )
+                except Exception as e:
+                    logger.debug(f"delete_existing failed: {e}")
+
+            for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
+                try:
+                    await session.execute(
+                        _sql_text(
+                            "INSERT INTO agent3_embeddings "
+                            "(id, auth_user_id, scope, source_type, source_ref, "
+                            "chunk_idx, content_text, embedding, embedding_dims, "
+                            "embedding_model, metadata_json, token_count, created_at) "
+                            "VALUES (:id, :uid, :scope, :stype, :sref, :idx, :content, "
+                            ":embed, :dims, :model, :meta, :toks, :created_at)"
+                        ),
+                        {
+                            "id": str(uuid.uuid4()), "uid": user_id, "scope": scope,
+                            "stype": source_type, "sref": source_ref or "",
+                            "idx": i, "content": chunk,
+                            "embed": _embedding_to_blob(vec), "dims": dims,
+                            "model": model, "meta": meta_json,
+                            "toks": len(chunk) // 4, "created_at": now,
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"RAG insert chunk {i} failed: {e}")
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
     return {
         "ingested_chunks": len(chunks),
-        "total_chars": len(text),
+        "total_chars": len(text_str),
         "model": model,
         "dims": dims,
     }
@@ -358,36 +371,43 @@ async def semantic_search(
         logger.warning(f"semantic_search embed failed: {e}")
         return []
 
-    # Fetch les chunks compatibles (meme dims => meme modele)
+    # Fetch les chunks compatibles via SQLAlchemy async (Migration PG)
+    from sqlalchemy import text as _sql_text
+    from api.database import get_session_factory
     sql = (
         "SELECT id, scope, source_type, source_ref, content_text, "
         "embedding, embedding_dims, metadata_json, created_at "
-        "FROM agent3_embeddings WHERE auth_user_id = ? AND embedding_dims = ?"
+        "FROM agent3_embeddings WHERE auth_user_id = :uid AND embedding_dims = :dims"
     )
-    params: list[Any] = [user_id, q_dims]
+    params: dict[str, Any] = {"uid": user_id, "dims": q_dims}
     if scope is not None:
-        sql += " AND scope = ?"
-        params.append(scope)
+        sql += " AND scope = :scope"
+        params["scope"] = scope
     if source_types:
-        placeholders = ",".join("?" * len(source_types))
-        sql += f" AND source_type IN ({placeholders})"
-        params.extend(source_types)
+        # Named expansion : :stype_0, :stype_1, ...
+        named = [f":stype_{i}" for i in range(len(source_types))]
+        sql += f" AND source_type IN ({','.join(named)})"
+        for i, st in enumerate(source_types):
+            params[f"stype_{i}"] = st
     sql += " ORDER BY created_at DESC LIMIT 10000"
 
+    factory = get_session_factory()
     try:
-        rows = db.conn.execute(sql, tuple(params)).fetchall()
+        async with factory() as session:
+            result = await session.execute(_sql_text(sql), params)
+            rows = result.mappings().all()
     except Exception as e:
         logger.warning(f"semantic_search query failed: {e}")
         return []
 
     # Score chaque chunk
-    scored: list[tuple[float, tuple]] = []
+    scored: list[tuple[float, dict]] = []
     for r in rows:
         try:
-            vec = _blob_to_embedding(r[5], r[6])
+            vec = _blob_to_embedding(r["embedding"], r["embedding_dims"])
             score = cosine_similarity(q_vec, vec)
             if score >= min_similarity:
-                scored.append((score, r))
+                scored.append((score, dict(r)))
         except Exception:
             continue
 
@@ -396,57 +416,74 @@ async def semantic_search(
     out = []
     for score, r in scored[:top_k]:
         meta = None
-        if r[7]:
+        if r.get("metadata_json"):
             try:
-                meta = json.loads(r[7])
+                meta = json.loads(r["metadata_json"])
             except Exception:
                 pass
         out.append({
-            "content": r[4],
-            "source_type": r[2],
-            "source_ref": r[3] or "",
+            "content": r["content_text"],
+            "source_type": r["source_type"],
+            "source_ref": r["source_ref"] or "",
             "score": round(score, 4),
-            "scope": r[1],
+            "scope": r["scope"],
             "metadata": meta,
-            "created_at": r[8],
+            "created_at": r["created_at"],
         })
     return out
 
 
-def delete_by_source(
-    db: Any, user_id: str, source_type: str, source_ref: str,
+async def delete_by_source_async(
+    user_id: str, source_type: str, source_ref: str,
 ) -> int:
-    """Supprime tous les chunks d'une source (ex: URL modifiee, fichier supprime)."""
+    """Version async — PG-compatible."""
     if not user_id:
         return 0
-    ensure_rag_tables(db)
-    cursor = db.conn.execute(
-        "DELETE FROM agent3_embeddings "
-        "WHERE auth_user_id = ? AND source_type = ? AND source_ref = ?",
-        (user_id, source_type, source_ref),
-    )
-    db.conn.commit()
-    return cursor.rowcount or 0
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "DELETE FROM agent3_embeddings "
+                    "WHERE auth_user_id = :uid AND source_type = :stype "
+                    "AND source_ref = :sref"
+                ),
+                {"uid": user_id, "stype": source_type, "sref": source_ref},
+            )
+            await session.commit()
+            return result.rowcount or 0
+        except Exception:
+            await session.rollback()
+            return 0
 
 
-def get_rag_stats(db: Any, user_id: str) -> dict[str, Any]:
-    """Stats du vault RAG pour un user."""
+async def get_rag_stats_async(user_id: str) -> dict[str, Any]:
+    """Version async — PG-compatible."""
     if not user_id:
         return {"total_chunks": 0}
-    ensure_rag_tables(db)
-    total = db.conn.execute(
-        "SELECT COUNT(*) FROM agent3_embeddings WHERE auth_user_id = ?",
-        (user_id,),
-    ).fetchone()[0]
-    by_type_rows = db.conn.execute(
-        "SELECT source_type, COUNT(*) FROM agent3_embeddings "
-        "WHERE auth_user_id = ? GROUP BY source_type",
-        (user_id,),
-    ).fetchall()
-    return {
-        "total_chunks": total,
-        "by_source_type": {r[0]: r[1] for r in by_type_rows},
-    }
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                text("SELECT COUNT(*) FROM agent3_embeddings WHERE auth_user_id = :uid"),
+                {"uid": user_id},
+            )
+            total = int(result.scalar() or 0)
+            result = await session.execute(
+                text(
+                    "SELECT source_type, COUNT(*) AS n FROM agent3_embeddings "
+                    "WHERE auth_user_id = :uid GROUP BY source_type"
+                ),
+                {"uid": user_id},
+            )
+            by_type = {r["source_type"]: r["n"] for r in result.mappings().all()}
+    except Exception:
+        return {"total_chunks": 0}
+    return {"total_chunks": total, "by_source_type": by_type}
 
 
 __all__ = [
@@ -456,6 +493,7 @@ __all__ = [
     "cosine_similarity",
     "ingest_text",
     "semantic_search",
-    "delete_by_source",
+    "delete_by_source_async",
     "get_rag_stats",
+    "get_rag_stats_async",
 ]

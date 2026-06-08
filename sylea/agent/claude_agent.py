@@ -18,6 +18,102 @@ from sylea.core.models.user import ProfilUtilisateur
 from sylea.core.models.decision import OptionDilemme
 
 
+# ── Helper : parser JSON robuste ──────────────────────────────────────────────
+#
+# Claude renvoie parfois du JSON casse :
+#   - Wrapping markdown (```json ... ```)
+#   - Smart quotes (« » " ") au lieu des straight quotes
+#   - Trailing commas dans objets/arrays
+#   - Newlines non-echappes dans les string values
+#   - Texte explicatif avant/apres le JSON
+# Cette fonction tente plusieurs strategies de reparation. Retourne None
+# si aucune ne marche (le caller decidera quoi faire : retry, fallback, etc.).
+
+def _try_parse_json_robust(content: str) -> dict | None:
+    """Tente de parser le JSON de la reponse Claude avec plusieurs strategies.
+    Retourne le dict parse ou None si echec total."""
+    if not content or not content.strip():
+        return None
+
+    # Strategie 1 : strip markdown code blocks
+    cleaned = content.strip()
+    # Retire ```json ... ``` ou ``` ... ```
+    cleaned = re.sub(r'^```(?:json)?\s*\n?', '', cleaned)
+    cleaned = re.sub(r'\n?```\s*$', '', cleaned)
+    cleaned = cleaned.strip()
+
+    # Strategie 2 : normalise les smart quotes (peuvent venir d'un copier-coller
+    # ou d'un LLM qui auto-corrige le francais).
+    smart_quote_map = {
+        '“': '"', '”': '"',  # double smart quotes
+        '‘': "'", '’': "'",  # single smart quotes
+        '«': '"', '»': '"',  # french guillemets
+        '…': '...',  # ellipsis
+    }
+    for smart, straight in smart_quote_map.items():
+        cleaned = cleaned.replace(smart, straight)
+
+    # Strategie 3 : extraire le block JSON (entre { ... }) si du texte
+    # entoure encore
+    json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    if not json_match:
+        return None
+    raw = json_match.group()
+
+    # Strategie 4 : trailing commas
+    raw_no_trail = re.sub(r',\s*}', '}', raw)
+    raw_no_trail = re.sub(r',\s*]', ']', raw_no_trail)
+
+    # 1ere tentative : tel quel
+    try:
+        return json.loads(raw_no_trail)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategie 5 : echapper les newlines bruts DANS les string values.
+    # Erreur frequente de Claude : il met des vrais \n au lieu de \\n.
+    # On detecte les strings via regex tres approximative et on echappe.
+    try:
+        # Approche simple : remplace les \n et \r dans les valeurs string.
+        # On parcourt char par char en tracking si on est dans une string.
+        escaped = []
+        in_string = False
+        prev = ''
+        for ch in raw_no_trail:
+            if ch == '"' and prev != '\\':
+                in_string = not in_string
+            if in_string and ch == '\n':
+                escaped.append('\\n')
+            elif in_string and ch == '\r':
+                escaped.append('\\r')
+            elif in_string and ch == '\t':
+                escaped.append('\\t')
+            else:
+                escaped.append(ch)
+            prev = ch
+        repaired = ''.join(escaped)
+        return json.loads(repaired)
+    except (json.JSONDecodeError, Exception):
+        pass
+
+    # Strategie 6 : derniere chance — tente d'extraire le plus grand prefixe
+    # parsable (pour gerer un JSON tronque). On reduit progressivement la
+    # chaine et on rajoute les fermetures `}` manquantes.
+    for cut in range(len(raw_no_trail), max(50, len(raw_no_trail) // 2), -50):
+        partial = raw_no_trail[:cut]
+        # Compte les accolades ouvertes
+        opens = partial.count('{') - partial.count('}')
+        opens_arr = partial.count('[') - partial.count(']')
+        if opens > 0 or opens_arr > 0:
+            partial += ']' * opens_arr + '}' * opens
+        try:
+            return json.loads(partial)
+        except json.JSONDecodeError:
+            continue
+
+    return None
+
+
 # ── Prompts système ──────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """Tu es SYLÉA, un assistant de vie IA bienveillant, direct et précis.
@@ -166,13 +262,25 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
         objectif_desc = (
             profil.objectif.description if profil.objectif else "Non défini"
         )
-        prob_calculee = getattr(profil.objectif, 'probabilite_calculee', 0) if profil.objectif else 0
-        prob_totale = profil.probabilite_actuelle + prob_calculee
-        prob_totale = max(0.01, min(99.99, prob_totale))
-        # Calculer le temps estime
-        _tj = min(73000, max(1, round(900 * ((100 - prob_totale) / prob_totale) ** 0.675)))
+
+        # FIX (2026-05-28) : on derive temps_restant DIRECTEMENT depuis
+        # temps_initial - temps_gagne au lieu de la formule probabiliste basee
+        # sur prob_actuelle + prob_calculee. Raison : depuis l'invariant
+        # Dashboard (cf. ProfilRepository.sauvegarder), probabilite_actuelle
+        # est dej la progression reelle des SO. L'ancienne formule sommait
+        # cette progression a une prob_calculee orpheline -> 81% -> 11 mois
+        # de temps_restant -> Claude propageait ce nombre erronne dans le
+        # verdict ("Lucas n'a que 11 mois restants").
+        temps_initial = max(1, int(profil.temps_initial_jours or 0))
+        temps_gagne = min(temps_initial, max(0.0, float(profil.temps_gagne_jours or 0)))
+        _tj = max(1, int(round(temps_initial - temps_gagne)))
         _ta, _rm = _tj // 365, (_tj % 365) // 30
         temps_estime_str = f"{_ta} ans {_rm} mois" if _ta > 0 else f"{_rm} mois"
+
+        # prob_totale = progression reelle (% temps_gagne / temps_initial),
+        # utilisee par d'autres parties du prompt (facteurs neuro etc).
+        prob_totale = round(temps_gagne / temps_initial * 100, 2)
+        prob_totale = max(0.01, min(99.99, prob_totale))
 
         # Construire la liste d'options dynamiquement
         lettres = [chr(65 + i) for i in range(len(options))]
@@ -185,108 +293,202 @@ Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte avant/après) :
         )
 
 
-        # Contexte temporel pour l'IA
+        # Cadre temporel formate de maniere lisible pour Claude (sans fourchettes
+        # imposees — on lui laisse la liberte de raisonner sur l'amplitude).
         if impact_temporel_jours is not None and impact_temporel_jours > 0:
             cadre_jours = impact_temporel_jours
             if cadre_jours <= 1:
                 cadre_str = "1 jour (24 heures)"
-                unite_impact = "heures (ex: +2.5 = 2h30 gagnees, -1.0 = 1h perdue)"
+                unite_indication = "Pour ce cadre court, tu peux exprimer impact_jours en fractions de jour. Ex : 2h de productivite gagnees = 0.083 (=2/24)."
             elif cadre_jours <= 7:
                 cadre_str = f"{cadre_jours} jours"
-                unite_impact = "heures (ex: +8.0 = 8h gagnees, -3.5 = 3h30 perdues)"
+                unite_indication = "Pour ce cadre court, exprime impact_jours en fractions si necessaire. Ex : 3h gagnees = 0.125 (=3/24)."
             elif cadre_jours <= 30:
                 cadre_str = f"~1 mois ({cadre_jours} jours)"
-                unite_impact = "jours (ex: +5.0 = 5 jours gagnes, -2.0 = 2 jours perdus)"
+                unite_indication = "Exprime impact_jours en jours."
             elif cadre_jours <= 365:
                 cadre_str = f"~{cadre_jours // 30} mois ({cadre_jours} jours)"
-                unite_impact = "jours (ex: +30.0 = 1 mois gagne, -15.0 = 15 jours perdus)"
+                unite_indication = "Exprime impact_jours en jours."
             else:
-                cadre_str = f"TOUTE LA DUREE DE L'OBJECTIF ({temps_estime_str}, soit {_tj} jours)"
-                unite_impact = "jours (ex: +90.0 = 3 mois gagnes, -30.0 = 1 mois perdu)"
+                cadre_str = f"long terme — {temps_estime_str} ({_tj} jours)"
+                unite_indication = "Exprime impact_jours en jours."
         else:
             cadre_jours = _tj
-            cadre_str = f"TOUTE LA DUREE DE L'OBJECTIF ({temps_estime_str}, soit {_tj} jours)"
-            unite_impact = "jours (ex: +90.0 = 3 mois gagnes, -30.0 = 1 mois perdu)"
+            cadre_str = f"long terme — {temps_estime_str} ({_tj} jours)"
+            unite_indication = "Exprime impact_jours en jours."
 
-        prompt = f"""Tu es un robot probabiliste froid et factuel. Tu analyses un dilemme de vie.
-ZERO emotion, ZERO encouragement. Tu raisonnes en TEMPS, pas en pourcentage.
+        prompt = f"""Tu es Syléa, un analyste de decisions de vie froid, factuel, intellectuellement honnete.
+Tu raisonnes comme un expert qui connait l'utilisateur : son profil complet, son etat
+neuro-physiologique, son objectif de vie, et le cadre temporel exact de la decision.
 
-PROFIL RESUME :
+═══════════ CONTEXTE COMPLET DE L'UTILISATEUR ═══════════
+
 {profil_resume}
 {device_context}
 {collected_context}
 
-OBJECTIF ULTIME : {objectif_desc}
-PROBABILITE ACTUELLE : {prob_totale:.2f}%
-TEMPS ESTIME RESTANT : {temps_estime_str} ({_tj} jours)
+OBJECTIF DE VIE : {objectif_desc}
+PROBABILITE ACTUELLE D'ATTEINDRE CET OBJECTIF : {prob_totale:.2f}%
+TEMPS ESTIME RESTANT POUR L'OBJECTIF : {temps_estime_str} ({_tj} jours)
 
-CADRE TEMPOREL DE CE CHOIX : {cadre_str}
+═══════════ DONNEES NUMERIQUES VERIFIEES (a citer telles quelles) ═══════════
+
+Tu N'INVENTES JAMAIS de nombre de jours/mois/annees concernant l'utilisateur.
+Si tu mentionnes une duree, c'est UNIQUEMENT depuis cette liste verifiee :
+- Temps restant pour l'objectif : {temps_estime_str} ({_tj} jours)
+- Probabilite actuelle : {prob_totale:.2f}%
+- Cadre temporel de ce choix : {cadre_str if impact_temporel_jours else "long terme"}
+- Age de l'utilisateur : {profil.age} ans
+
+Toute autre duree ou statistique chiffree doit etre tiree du contexte ci-dessus
+ou citee comme estimation explicite ("environ", "approximativement"). NE PAS
+fabriquer de nombres precis qui n'apparaissent pas dans les sources.
+
+═══════════ CADRE TEMPOREL DE CE CHOIX ═══════════
+
+{cadre_str}
+
+C'est CRUCIAL : l'utilisateur s'engage sur ce cadre exact. Si c'est 1 jour, la
+decision impacte sa journee. Si c'est 1 an, c'est UNE ANNEE ENTIERE de sa vie
+qui est engagee. Si c'est long terme, c'est toute la duree restante de
+l'objectif. L'amplitude de l'impact_jours doit refleter cette realite.
+
+═══════════ DILEMME ═══════════
 
 QUESTION : {question}
 
 {options_text}
 
-METHODE DE CALCUL (OBLIGATOIRE) :
-1. PENSE EN TEMPS D'ABORD : combien de temps (heures ou jours) cette option fait-elle
-   REELLEMENT gagner ou perdre sur l'objectif, DANS LA LIMITE du cadre temporel ({cadre_str}) ?
-2. Le champ "impact_jours" doit contenir ce temps en {unite_impact}.
-3. L'impact ne peut JAMAIS depasser le cadre temporel ({cadre_jours} jours max en valeur absolue).
-4. REGLE CRITIQUE : Chaque option DOIT avoir un impact DIFFERENT et NON NUL.
-   Meme si l'impact est minime, il existe toujours une difference entre deux choix.
-   Si les deux options sont mauvaises, les deux impacts peuvent etre NEGATIFS.
-   Si les deux options sont bonnes, les deux impacts peuvent etre POSITIFS mais differents.
-   JAMAIS 0 pour les deux options. JAMAIS le meme impact pour deux options differentes.
-5. Exemples concrets pour un cadre de 1 jour :
-   - Soiree avec un ami motivant = +0.5h (energie positive le lendemain)
-   - Soiree avec un ami demotivant = -1.5h (energie drainee, perte de focus le lendemain)
-   - Dormir 8h au lieu de coder = +2.0 (heures de productivite gagnees)
-   - Aller courir 1h = +0.5 (heures de clarte mentale gagnees)
-6. Exemples concrets pour un cadre de 1 mois :
-   - Apprendre l'anglais vs l'espagnol = l'anglais fait gagner ~5-10 jours, l'espagnol ~1-3 jours
-7. Sois REALISTE et FACTUEL. Pas d'impact par encouragement.
+═══════════ TA MISSION ═══════════
 
-REGLE CRITIQUE POUR LES IMPACTS COURTS (1 jour, 1 semaine) :
-- Il DOIT y avoir une DIFFERENCE d'impact entre les options. Jamais 0 pour les deux.
-- Pour un cadre de 1 jour (24h), exprime l'impact en HEURES et FRACTIONS D'HEURES.
-  Exemple : si une option fait gagner 2h de productivite, impact_jours = 0.083 (2h/24h)
-- Pour un cadre de 1 semaine, exprime en jours et fractions.
-- L'option recommandee DOIT avoir un meilleur impact que les autres.
-- Si les deux options sont mauvaises, les deux impacts sont negatifs mais differents.
+Pour CHAQUE option, raisonne intellectuellement honnetement :
 
-ETUDE SCIENTIFIQUE :
-- Cite UNE etude scientifique REELLE et verifiable en rapport avec le dilemme pose.
-- Inclus : auteurs, annee, revue/institution, et lien avec le dilemme.
-- Varie l'etude selon le contexte. Sources : Nature, Science, The Lancet, PNAS, etc.
+1. **Pros / Cons** : 3-6 mots-cles concis chacun (PAS de phrases). Tiens compte de :
+   - L'alignement avec l'objectif de vie
+   - L'etat neuro-physiologique de l'user (sommeil, stress, sante, energie, bonheur)
+   - Sa situation concrete (revenu, charges, competences, temps disponible)
+   - Le cadre temporel ({cadre_str}) — un meme choix n'a pas le meme impact
+     sur 1 jour vs 1 an vs long terme
+   - Les facteurs scientifiques pertinents (neurosciences, economie, sante...)
 
-REGLES DE FORMAT STRICTES :
-- pros/cons : tableau de mots-cles de 3 a 6 mots MAXIMUM chacun. JAMAIS de phrase complete.
-- resume : 3 a 6 mots MAXIMUM
-- verdict : 1 seule phrase de 15 mots MAXIMUM
+2. **impact_jours** : combien de jours cette option fait-elle GAGNER (positif) ou
+   PERDRE (negatif) sur l'atteinte de l'objectif, DANS LE CADRE TEMPOREL donne.
+   {unite_indication}
 
-Reponds UNIQUEMENT avec ce JSON :
+   Tu es libre de l'amplitude. Reflechis avec ton bon sens :
+   - Sur 1 jour, l'impact ne peut pas etre de 100 jours.
+   - Sur 1 an entier d'engagement, l'impact peut etre tres significatif si
+     l'activite est au coeur (ou totalement hors-sujet) de l'objectif.
+   - L'impact est CAPE par le cadre : abs(impact_jours) <= {cadre_jours}.
+   - Deux options ne peuvent JAMAIS avoir le meme impact ni etre TOUTES DEUX a 0.
+
+3. **resume** : 3-6 mots qui synthetisent l'essence du choix.
+
+═══════════ ETUDE SCIENTIFIQUE ═══════════
+
+Cite UNE etude reelle et verifiable en lien direct avec le dilemme. Inclus :
+auteurs, annee, revue/institution. Varie selon le contexte (Nature, Science,
+PNAS, The Lancet, Journal of Applied Psychology, NEJM, etc.).
+
+═══════════ FORMAT REPONSE ═══════════
+
+JSON STRICT (aucun texte avant/apres, aucun bloc markdown) :
 {{
   {json_options},
-  "verdict": "2-3 phrases naturelles. NE PAS mentionner de pourcentage. Explique pourquoi cette option est meilleure.",
-  "etude_scientifique": "Selon l etude de [Auteurs] ([Annee], [Revue]) sur [sujet], [conclusion cle].",
+  "verdict": "2-3 phrases naturelles. INTERDIT : (1) mentionner un pourcentage de probabilite, (2) inventer un nombre de mois/jours/annees. Cite uniquement '{temps_estime_str}' si tu evoques le temps restant. Explique pourquoi l'option recommandee est la meilleure pour CET utilisateur dans CE cadre temporel.",
+  "etude_scientifique": "Selon l etude de [Auteurs] ([Annee], [Revue]) sur [sujet], [conclusion cle en lien avec le dilemme].",
   "option_recommandee": "{lettres[0]}"
-}}"""
+}}
+
+RAPPELS :
+- pros/cons : mots-cles 3-6 mots MAX, JAMAIS de phrases
+- resume : 3-6 mots MAX
+- verdict : 2 phrases max, ton naturel et direct
+- impact_jours : ta meilleure estimation realiste, bornee par {cadre_jours}j en valeur absolue
+- Aucune option a impact 0 si l'autre est non-nulle, jamais deux impacts identiques
+- Pas d'encouragement gratuit — sois honnete sur les choix mediocres ou mauvais"""
 
         data = self._appeler_claude(prompt)
 
-        def _clean_verdict(v: str) -> str:
-            """Nettoyer le verdict: supprimer %, limiter longueur."""
+        def _clean_verdict(v: str, ref_temps_estime: str = "") -> str:
+            """Nettoyer le verdict : supprimer pourcentages + corriger les
+            durees hallucinees + nettoyer phrases bancales.
+
+            Probleme historique :
+              - Supression naive de "45.57%" creait "et  de probabilite" -> fix par
+                pattern enveloppant "et X% de probabilite"
+              - Claude continue d'halluciner "N mois restants" qui ne matchent
+                pas temps_estime_str -> remplace par la valeur reelle
+              - Cleanup naif gobait trop d'espaces -> "absorberait 80% de" -> "absorberaitde"
+                Fix : preserver un espace de chaque cote du nombre supprime.
+            """
             import re as _re
-            v = " ".join(v.split()[:50])
-            # Supprimer les pourcentages
-            v = _re.sub(r'\d+[.,]?\d*\s*%', '', v)
-            # Nettoyer les artefacts
-            v = v.replace('À  sur', 'Sur').replace('A  sur', 'Sur')
-            v = v.replace('Avec et ', 'Sur un horizon de ').replace('Avec  et ', 'Sur un horizon de ')
-            v = v.replace('À et ', 'Sur ').replace('A et ', 'Sur ')
-            v = v.replace('À sur', 'Sur').replace('A sur ', 'Sur ')
-            # Nettoyer les doubles espaces
+            v = " ".join(v.split()[:55])  # marge pour ne pas couper en plein mot
+
+            # 1. Supprimer expressions completes "et X% de probabilite",
+            #    "avec X% de probabilite", "X% de probabilite", etc.
+            v = _re.sub(
+                r'\s+(?:et|avec)\s+\d+[.,]?\d*\s*%\s*(?:de\s+probabilite|probabilite)\b',
+                '',
+                v,
+                flags=_re.IGNORECASE,
+            )
+            v = _re.sub(
+                r'\b\d+[.,]?\d*\s*%\s+de\s+probabilite\b',
+                '',
+                v,
+                flags=_re.IGNORECASE,
+            )
+            # 2. Supprimer pourcentages isoles en preservant les espaces autour
+            #    "elle absorberait 80% de son temps" -> "elle absorberait de son temps"
+            v = _re.sub(r'\s*\d+[.,]?\d*\s*%\s*', ' ', v)
+            # 3. Supprimer "et de probabilite" / "avec de probabilite" residuels
+            v = _re.sub(
+                r'\s+(?:et|avec|de)\s+de\s+probabilite\b',
+                '',
+                v,
+                flags=_re.IGNORECASE,
+            )
+            v = _re.sub(
+                r'\s+(?:et|avec)\s+de\s+(?=,|\.|$)',
+                '',
+                v,
+                flags=_re.IGNORECASE,
+            )
+
+            # 4. CORRIGER LES HALLUCINATIONS DE DUREE. Claude invente parfois
+            #    "11 mois restants", "8 mois", etc. qui ne correspondent pas
+            #    au temps reel. On detecte les patterns "N mois (restant|s|
+            #    devant)" et on remplace par la duree verifiee.
+            #
+            #    Idempotent : si le verdict contient deja ref_temps_estime,
+            #    on ne touche pas (evite "2 ans 2 ans 11 mois").
+            if ref_temps_estime and ref_temps_estime.lower() not in v.lower():
+                # "N mois restants/devant lui/devant moi" -> remplace
+                # Mais PAS si precede de "ans " (= deja correct comme
+                # "2 ans 11 mois restants")
+                v = _re.sub(
+                    r'(?<!ans\s)\b(?:que\s+)?\d+\s*mois\s+(?:restants?|devant\s+(?:lui|moi|nous)|qui\s+restent?)\b',
+                    ref_temps_estime + ' restants',
+                    v,
+                    flags=_re.IGNORECASE,
+                )
+                # "avec N mois pour", "n'a que N mois pour" -> remplace
+                v = _re.sub(
+                    r'(?:avec|que)\s+\d+\s*mois\s+(?=pour\s)',
+                    'avec ' + ref_temps_estime + ' ',
+                    v,
+                    flags=_re.IGNORECASE,
+                )
+
+            # 5. Nettoyer artefacts ponctuation/espaces
+            v = _re.sub(r'\s+([,.;:])', r'\1', v)
             v = _re.sub(r'\s+', ' ', v).strip()
-            # Si commence par "de" ou "sur" en minuscule, capitaliser
+            # Tronquer a 50 mots SANS couper au milieu d'un mot
+            words = v.split()
+            if len(words) > 50:
+                v = " ".join(words[:50])
+            # Capitaliser si commence par minuscule
             if v and v[0].islower():
                 v = v[0].upper() + v[1:]
             return v
@@ -332,7 +534,7 @@ Reponds UNIQUEMENT avec ce JSON :
 
         return AnalyseDilemme(
             options=parsed_options,
-            verdict=_clean_verdict(data.get('verdict', '')),
+            verdict=_clean_verdict(data.get('verdict', ''), ref_temps_estime=temps_estime_str),
             option_recommandee=data.get("option_recommandee", lettres[0]),
             etude_scientifique=data.get("etude_scientifique", ""),
         )
@@ -367,11 +569,16 @@ Reponds UNIQUEMENT avec ce JSON :
 
     def _appeler_claude(self, prompt: str) -> dict:
         """
-        Appelle l'API Claude et parse la réponse JSON.
+        Appelle l'API Claude et parse la reponse JSON.
+
+        Strategie defensive : si le JSON est mal forme, on tente plusieurs
+        reparations (trailing commas, smart quotes, markdown blocks, newlines
+        non-echappes dans strings) avant d'abandonner. En dernier recours,
+        on retry une fois avec une instruction explicite "JSON UNIQUEMENT".
 
         Raises:
-            ValueError: si la réponse n'est pas du JSON valide
-            anthropic.APIError: si l'appel API échoue
+            ValueError: si la reponse n'est pas du JSON valide apres tous les retries
+            anthropic.APIError: si l'appel API echoue
         """
         message = self._client.messages.create(
             model=CLAUDE_MODEL,
@@ -380,17 +587,37 @@ Reponds UNIQUEMENT avec ce JSON :
             messages=[{"role": "user", "content": prompt}],
         )
         content = message.content[0].text.strip()
+        parsed = _try_parse_json_robust(content)
+        if parsed is not None:
+            return parsed
 
-        # Extraire le JSON même si Claude ajoute du texte autour
-        json_match = re.search(r"\{.*\}", content, re.DOTALL)
-        if not json_match:
-            raise ValueError(f"Réponse Claude non parsable : {content[:200]}")
+        # Retry une fois avec instruction explicite "JSON ONLY"
+        import logging as _lg
+        _lg.getLogger("sylea.claude").warning(
+            "[claude_agent] JSON invalide a la 1ere tentative, retry avec instruction stricte. "
+            "Reponse initiale (200 chars) : %s",
+            content[:200],
+        )
 
-        raw_json = json_match.group()
-        # Nettoyer les trailing commas (erreur frequente de Claude)
-        raw_json = re.sub(r',\s*}', '}', raw_json)
-        raw_json = re.sub(r',\s*]', ']', raw_json)
-        try:
-            return json.loads(raw_json)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"JSON invalide dans la réponse Claude : {e}") from e
+        retry_prompt = (
+            prompt
+            + "\n\nIMPORTANT : Reponds UNIQUEMENT en JSON valide. "
+            + "Aucun texte avant ni apres. Aucun bloc markdown. "
+            + "Toute valeur de string doit echapper les guillemets internes et "
+            + "remplacer les retours a la ligne par \\n."
+        )
+        message2 = self._client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1500,
+            system=_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": retry_prompt}],
+        )
+        content2 = message2.content[0].text.strip()
+        parsed2 = _try_parse_json_robust(content2)
+        if parsed2 is not None:
+            return parsed2
+
+        raise ValueError(
+            f"JSON invalide dans la reponse Claude apres retry. "
+            f"Debut de la 2e reponse : {content2[:200]}"
+        )

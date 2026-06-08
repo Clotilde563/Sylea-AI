@@ -23,6 +23,7 @@ Couverture :
   - Workspace folder naming
 """
 
+import asyncio
 import json
 import os
 import re
@@ -34,6 +35,7 @@ from pathlib import Path
 import pytest
 
 from sylea.core.storage.database import DatabaseManager
+from tests.conftest import make_shared_db, dispose_shared_db
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -44,38 +46,26 @@ TEST_USER_ID = "test-unit-agent3"
 
 
 @pytest.fixture()
-def db():
-    """Base SQLite en memoire avec schema complet + tables Agent 3."""
-    manager = DatabaseManager(db_path=Path(":memory:"))
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    manager._conn = conn
-    manager._initialiser_schema()
-
-    # Migration colonne optionnelle
-    try:
-        conn.execute(
-            "ALTER TABLE profil_utilisateur ADD COLUMN objectif_probabilite_calculee REAL DEFAULT 0.0"
-        )
-    except Exception:
-        pass
+def db(tmp_path, monkeypatch):
+    """DB SQLite partagee (sync + async) via fichier temp + tables Agent 3.
+    Migration shared-DB : remplace `:memory:` pour permettre a l'async
+    session_factory de pointer sur la meme DB."""
+    manager = make_shared_db(tmp_path, monkeypatch)
 
     # Inserer un utilisateur test
-    conn.execute(
+    manager._conn.execute(
         "INSERT INTO users (id, email, hashed_password, provider, created_at) "
         "VALUES (?, ?, ?, ?, datetime('now'))",
         (TEST_USER_ID, "test-unit-agent3@test.com", "fake_hash", "local"),
     )
-    conn.commit()
+    manager._conn.commit()
 
     # Initialiser les tables Agent 3
-    from api.routers.agent3_openclaw import _ensure_agent3_tables
-    _ensure_agent3_tables(manager)
+    from api.routers.agent3_openclaw import _ensure_agent3_tables_async
+    asyncio.run(_ensure_agent3_tables_async())
 
     yield manager
-    manager.disconnect()
+    dispose_shared_db(manager)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -116,10 +106,10 @@ class TestAgent3Tables:
         assert row is not None
 
     def test_ensure_tables_idempotent(self, db):
-        """Appeler _ensure_agent3_tables plusieurs fois ne crashe pas."""
-        from api.routers.agent3_openclaw import _ensure_agent3_tables
-        _ensure_agent3_tables(db)
-        _ensure_agent3_tables(db)
+        """Appeler _ensure_agent3_tables_async plusieurs fois ne crashe pas."""
+        from api.routers.agent3_openclaw import _ensure_agent3_tables_async
+        asyncio.run(_ensure_agent3_tables_async())
+        asyncio.run(_ensure_agent3_tables_async())
 
     def test_cron_table_columns(self, db):
         """Verifier les colonnes de agent3_cron."""
@@ -150,36 +140,36 @@ class TestUserPreferences:
     """Tests CRUD des preferences utilisateur Agent 3."""
 
     def test_default_preferences(self, db):
-        from api.routers.agent3_openclaw import _get_user_preferences
-        prefs = _get_user_preferences(db, TEST_USER_ID)
+        from api.routers.agent3_openclaw import _get_user_preferences_async
+        prefs = asyncio.run(_get_user_preferences_async(TEST_USER_ID))
         assert prefs == {"confirm_destructive": True}
 
     def test_save_and_load_preferences(self, db):
-        from api.routers.agent3_openclaw import _get_user_preferences, _save_user_preferences
+        from api.routers.agent3_openclaw import _get_user_preferences_async, _save_user_preferences_async
         custom = {"confirm_destructive": False, "language": "fr", "theme": "dark"}
-        _save_user_preferences(db, TEST_USER_ID, custom)
-        loaded = _get_user_preferences(db, TEST_USER_ID)
+        asyncio.run(_save_user_preferences_async(TEST_USER_ID, custom))
+        loaded = asyncio.run(_get_user_preferences_async(TEST_USER_ID))
         assert loaded == custom
 
     def test_update_preferences(self, db):
-        from api.routers.agent3_openclaw import _get_user_preferences, _save_user_preferences
-        _save_user_preferences(db, TEST_USER_ID, {"confirm_destructive": True})
-        _save_user_preferences(db, TEST_USER_ID, {"confirm_destructive": False, "new_field": 42})
-        loaded = _get_user_preferences(db, TEST_USER_ID)
+        from api.routers.agent3_openclaw import _get_user_preferences_async, _save_user_preferences_async
+        asyncio.run(_save_user_preferences_async(TEST_USER_ID, {"confirm_destructive": True}))
+        asyncio.run(_save_user_preferences_async(TEST_USER_ID, {"confirm_destructive": False, "new_field": 42}))
+        loaded = asyncio.run(_get_user_preferences_async(TEST_USER_ID))
         assert loaded["confirm_destructive"] is False
         assert loaded["new_field"] == 42
 
     def test_preferences_isolation_between_users(self, db):
-        from api.routers.agent3_openclaw import _get_user_preferences, _save_user_preferences
+        from api.routers.agent3_openclaw import _get_user_preferences_async, _save_user_preferences_async
         db.conn.execute(
             "INSERT INTO users (id, email, hashed_password, provider, created_at) "
             "VALUES ('user-b', 'b@test.com', 'hash', 'local', datetime('now'))"
         )
         db.conn.commit()
-        _save_user_preferences(db, TEST_USER_ID, {"theme": "dark"})
-        _save_user_preferences(db, "user-b", {"theme": "light"})
-        assert _get_user_preferences(db, TEST_USER_ID)["theme"] == "dark"
-        assert _get_user_preferences(db, "user-b")["theme"] == "light"
+        asyncio.run(_save_user_preferences_async(TEST_USER_ID, {"theme": "dark"}))
+        asyncio.run(_save_user_preferences_async("user-b", {"theme": "light"}))
+        assert asyncio.run(_get_user_preferences_async(TEST_USER_ID))["theme"] == "dark"
+        assert asyncio.run(_get_user_preferences_async("user-b"))["theme"] == "light"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -190,35 +180,35 @@ class TestMemory:
     """Tests de la memoire persistante de l'Agent 3."""
 
     def test_save_and_load_memory(self, db):
-        from api.routers.agent3_openclaw import _save_memory, _load_memories
-        _save_memory(db, TEST_USER_ID, "nom_client", "Jean Dupont", "contact")
-        memories = _load_memories(db, TEST_USER_ID)
+        from api.routers.agent3_openclaw import _save_memory_async, _load_memories_async
+        asyncio.run(_save_memory_async(TEST_USER_ID, "nom_client", "Jean Dupont", "contact"))
+        memories = asyncio.run(_load_memories_async(TEST_USER_ID))
         assert len(memories) == 1
         assert memories[0]["key"] == "nom_client"
         assert memories[0]["value"] == "Jean Dupont"
         assert memories[0]["category"] == "contact"
 
     def test_save_multiple_memories(self, db):
-        from api.routers.agent3_openclaw import _save_memory, _load_memories
-        _save_memory(db, TEST_USER_ID, "skill_1", "Python", "competence")
-        _save_memory(db, TEST_USER_ID, "skill_2", "React", "competence")
-        _save_memory(db, TEST_USER_ID, "projet", "Startup IA", "projet")
-        memories = _load_memories(db, TEST_USER_ID)
+        from api.routers.agent3_openclaw import _save_memory_async, _load_memories_async
+        asyncio.run(_save_memory_async(TEST_USER_ID, "skill_1", "Python", "competence"))
+        asyncio.run(_save_memory_async(TEST_USER_ID, "skill_2", "React", "competence"))
+        asyncio.run(_save_memory_async(TEST_USER_ID, "projet", "Startup IA", "projet"))
+        memories = asyncio.run(_load_memories_async(TEST_USER_ID))
         assert len(memories) == 3
 
     def test_update_existing_memory(self, db):
-        from api.routers.agent3_openclaw import _save_memory, _load_memories
-        _save_memory(db, TEST_USER_ID, "ville", "Paris", "preference")
-        _save_memory(db, TEST_USER_ID, "ville", "Lyon", "preference")
-        memories = _load_memories(db, TEST_USER_ID)
+        from api.routers.agent3_openclaw import _save_memory_async, _load_memories_async
+        asyncio.run(_save_memory_async(TEST_USER_ID, "ville", "Paris", "preference"))
+        asyncio.run(_save_memory_async(TEST_USER_ID, "ville", "Lyon", "preference"))
+        memories = asyncio.run(_load_memories_async(TEST_USER_ID))
         assert len(memories) == 1
         assert memories[0]["value"] == "Lyon"
 
     def test_memory_limit(self, db):
-        from api.routers.agent3_openclaw import _save_memory, _load_memories
+        from api.routers.agent3_openclaw import _save_memory_async, _load_memories_async
         for i in range(10):
-            _save_memory(db, TEST_USER_ID, f"key_{i}", f"value_{i}")
-        all_mem = _load_memories(db, TEST_USER_ID, limit=5)
+            asyncio.run(_save_memory_async(TEST_USER_ID, f"key_{i}", f"value_{i}"))
+        all_mem = asyncio.run(_load_memories_async(TEST_USER_ID, limit=5))
         assert len(all_mem) == 5
 
     def test_format_memories_empty(self):
@@ -237,7 +227,7 @@ class TestMemory:
         assert "[projet] projet: Startup" in result
 
     def test_cleanup_old_memories_removes_old(self, db):
-        from api.routers.agent3_openclaw import _cleanup_old_memories
+        from api.routers.agent3_openclaw import _cleanup_old_memories_async
         # Inserer un vieux souvenir (> 90 jours)
         old_date = (datetime.now() - timedelta(days=100)).isoformat()
         db.conn.execute(
@@ -246,28 +236,28 @@ class TestMemory:
             (str(uuid.uuid4()), TEST_USER_ID, old_date, old_date),
         )
         db.conn.commit()
-        deleted = _cleanup_old_memories(db, TEST_USER_ID)
+        deleted = asyncio.run(_cleanup_old_memories_async(TEST_USER_ID))
         assert deleted >= 1
 
     def test_cleanup_old_memories_keeps_recent(self, db):
-        from api.routers.agent3_openclaw import _save_memory, _load_memories, _cleanup_old_memories
-        _save_memory(db, TEST_USER_ID, "recent_key", "recent_value")
-        deleted = _cleanup_old_memories(db, TEST_USER_ID)
+        from api.routers.agent3_openclaw import _save_memory_async, _load_memories_async, _cleanup_old_memories_async
+        asyncio.run(_save_memory_async(TEST_USER_ID, "recent_key", "recent_value"))
+        deleted = asyncio.run(_cleanup_old_memories_async(TEST_USER_ID))
         assert deleted == 0
-        memories = _load_memories(db, TEST_USER_ID)
+        memories = asyncio.run(_load_memories_async(TEST_USER_ID))
         assert len(memories) == 1
 
     def test_memory_isolation_between_users(self, db):
-        from api.routers.agent3_openclaw import _save_memory, _load_memories
+        from api.routers.agent3_openclaw import _save_memory_async, _load_memories_async
         db.conn.execute(
             "INSERT INTO users (id, email, hashed_password, provider, created_at) "
             "VALUES ('user-c', 'c@test.com', 'hash', 'local', datetime('now'))"
         )
         db.conn.commit()
-        _save_memory(db, TEST_USER_ID, "secret", "my_data")
-        _save_memory(db, "user-c", "secret", "other_data")
-        mem_a = _load_memories(db, TEST_USER_ID)
-        mem_c = _load_memories(db, "user-c")
+        asyncio.run(_save_memory_async(TEST_USER_ID, "secret", "my_data"))
+        asyncio.run(_save_memory_async("user-c", "secret", "other_data"))
+        mem_a = asyncio.run(_load_memories_async(TEST_USER_ID))
+        mem_c = asyncio.run(_load_memories_async("user-c"))
         assert mem_a[0]["value"] == "my_data"
         assert mem_c[0]["value"] == "other_data"
 
@@ -280,60 +270,60 @@ class TestMessages:
     """Tests CRUD des messages Agent 3."""
 
     def test_save_and_load_message(self, db):
-        from api.routers.agent3_openclaw import _save_agent3_message, _load_agent3_messages
-        _save_agent3_message(db, TEST_USER_ID, "user", "Bonjour", "text")
-        msgs = _load_agent3_messages(db, TEST_USER_ID)
+        from api.routers.agent3_openclaw import _save_agent3_message_async, _load_agent3_messages_async
+        asyncio.run(_save_agent3_message_async(TEST_USER_ID, "user", "Bonjour", "text"))
+        msgs = asyncio.run(_load_agent3_messages_async(TEST_USER_ID))
         assert len(msgs) == 1
         assert msgs[0]["role"] == "user"
         assert msgs[0]["content"] == "Bonjour"
         assert msgs[0]["type"] == "text"
 
     def test_save_multiple_messages(self, db):
-        from api.routers.agent3_openclaw import _save_agent3_message, _load_agent3_messages
-        _save_agent3_message(db, TEST_USER_ID, "user", "Question 1")
-        _save_agent3_message(db, TEST_USER_ID, "agent", "Reponse 1")
-        _save_agent3_message(db, TEST_USER_ID, "user", "Question 2")
-        msgs = _load_agent3_messages(db, TEST_USER_ID)
+        from api.routers.agent3_openclaw import _save_agent3_message_async, _load_agent3_messages_async
+        asyncio.run(_save_agent3_message_async(TEST_USER_ID, "user", "Question 1"))
+        asyncio.run(_save_agent3_message_async(TEST_USER_ID, "agent", "Reponse 1"))
+        asyncio.run(_save_agent3_message_async(TEST_USER_ID, "user", "Question 2"))
+        msgs = asyncio.run(_load_agent3_messages_async(TEST_USER_ID))
         assert len(msgs) == 3
         # Ordre chronologique (reversed dans load)
         assert msgs[0]["role"] == "user"
         assert msgs[2]["role"] == "user"
 
     def test_count_messages(self, db):
-        from api.routers.agent3_openclaw import _save_agent3_message, _count_agent3_messages
-        assert _count_agent3_messages(db, TEST_USER_ID) == 0
-        _save_agent3_message(db, TEST_USER_ID, "user", "Message 1")
-        _save_agent3_message(db, TEST_USER_ID, "agent", "Reponse 1")
-        assert _count_agent3_messages(db, TEST_USER_ID) == 2
+        from api.routers.agent3_openclaw import _save_agent3_message_async, _count_agent3_messages_async
+        assert asyncio.run(_count_agent3_messages_async(TEST_USER_ID)) == 0
+        asyncio.run(_save_agent3_message_async(TEST_USER_ID, "user", "Message 1"))
+        asyncio.run(_save_agent3_message_async(TEST_USER_ID, "agent", "Reponse 1"))
+        assert asyncio.run(_count_agent3_messages_async(TEST_USER_ID)) == 2
 
     def test_clear_messages(self, db):
         from api.routers.agent3_openclaw import (
-            _save_agent3_message, _clear_agent3_messages, _count_agent3_messages
+            _save_agent3_message_async, _clear_agent3_messages_async, _count_agent3_messages_async
         )
-        _save_agent3_message(db, TEST_USER_ID, "user", "A supprimer")
-        _save_agent3_message(db, TEST_USER_ID, "agent", "A supprimer aussi")
-        assert _count_agent3_messages(db, TEST_USER_ID) == 2
-        _clear_agent3_messages(db, TEST_USER_ID)
-        assert _count_agent3_messages(db, TEST_USER_ID) == 0
+        asyncio.run(_save_agent3_message_async(TEST_USER_ID, "user", "A supprimer"))
+        asyncio.run(_save_agent3_message_async(TEST_USER_ID, "agent", "A supprimer aussi"))
+        assert asyncio.run(_count_agent3_messages_async(TEST_USER_ID)) == 2
+        asyncio.run(_clear_agent3_messages_async(TEST_USER_ID))
+        assert asyncio.run(_count_agent3_messages_async(TEST_USER_ID)) == 0
 
     def test_message_load_limit(self, db):
-        from api.routers.agent3_openclaw import _save_agent3_message, _load_agent3_messages
+        from api.routers.agent3_openclaw import _save_agent3_message_async, _load_agent3_messages_async
         for i in range(20):
-            _save_agent3_message(db, TEST_USER_ID, "user", f"Message {i}")
-        msgs = _load_agent3_messages(db, TEST_USER_ID, limit=5)
+            asyncio.run(_save_agent3_message_async(TEST_USER_ID, "user", f"Message {i}"))
+        msgs = asyncio.run(_load_agent3_messages_async(TEST_USER_ID, limit=5))
         assert len(msgs) == 5
 
     def test_message_with_audio(self, db):
-        from api.routers.agent3_openclaw import _save_agent3_message, _load_agent3_messages
-        _save_agent3_message(db, TEST_USER_ID, "user", "Vocal", "voice", audio_data="base64audio==")
-        msgs = _load_agent3_messages(db, TEST_USER_ID)
+        from api.routers.agent3_openclaw import _save_agent3_message_async, _load_agent3_messages_async
+        asyncio.run(_save_agent3_message_async(TEST_USER_ID, "user", "Vocal", "voice", audio_data="base64audio=="))
+        msgs = asyncio.run(_load_agent3_messages_async(TEST_USER_ID))
         assert msgs[0]["type"] == "voice"
         assert msgs[0]["audio_data"] == "base64audio=="
 
     def test_message_fields_complete(self, db):
-        from api.routers.agent3_openclaw import _save_agent3_message, _load_agent3_messages
-        _save_agent3_message(db, TEST_USER_ID, "user", "Test fields")
-        msg = _load_agent3_messages(db, TEST_USER_ID)[0]
+        from api.routers.agent3_openclaw import _save_agent3_message_async, _load_agent3_messages_async
+        asyncio.run(_save_agent3_message_async(TEST_USER_ID, "user", "Test fields"))
+        msg = asyncio.run(_load_agent3_messages_async(TEST_USER_ID))[0]
         assert "id" in msg
         assert "role" in msg
         assert "content" in msg
@@ -648,7 +638,7 @@ class TestPromptBuilder:
 
     def test_prompt_without_profil(self):
         from api.routers.agent3_openclaw import _build_agent3_prompt
-        prompt = _build_agent3_prompt(None, [], [])
+        prompt = asyncio.run(_build_agent3_prompt(None, [], []))
         assert "Agent Sylea 3" in prompt
         assert "AUCUN PROFIL" in prompt
 
@@ -667,7 +657,7 @@ class TestPromptBuilder:
             "objectif_description": "Devenir CTO",
             "probabilite_actuelle": 45.0,
         }
-        prompt = _build_agent3_prompt(profil, [], [])
+        prompt = asyncio.run(_build_agent3_prompt(profil, [], []))
         assert "Jean Dupont" in prompt
         assert "Developpeur" in prompt
         assert "CTO" in prompt
@@ -678,19 +668,19 @@ class TestPromptBuilder:
         decisions = [
             {"question": "Accepter le projet", "choix": "Oui", "impact": 5.2},
         ]
-        prompt = _build_agent3_prompt(None, decisions, [])
+        prompt = asyncio.run(_build_agent3_prompt(None, decisions, []))
         assert "Accepter le projet" in prompt
 
     def test_prompt_with_sous_objectifs(self):
         from api.routers.agent3_openclaw import _build_agent3_prompt
         so = [{"titre": "Apprendre Docker", "progression": 60.0}]
-        prompt = _build_agent3_prompt(None, [], so)
+        prompt = asyncio.run(_build_agent3_prompt(None, [], so))
         assert "Apprendre Docker" in prompt
         assert "60" in prompt
 
     def test_prompt_contains_action_syntax(self):
         from api.routers.agent3_openclaw import _build_agent3_prompt
-        prompt = _build_agent3_prompt(None, [], [])
+        prompt = asyncio.run(_build_agent3_prompt(None, [], []))
         assert "[ACTION:PDF]" in prompt
         assert "[ACTION:SEARCH]" in prompt
         assert "[ACTION:EMAIL]" in prompt
@@ -698,20 +688,20 @@ class TestPromptBuilder:
 
     def test_prompt_contains_identity(self):
         from api.routers.agent3_openclaw import _build_agent3_prompt
-        prompt = _build_agent3_prompt(None, [], [])
+        prompt = asyncio.run(_build_agent3_prompt(None, [], []))
         assert "SYLEA" in prompt
         assert "Claude" in prompt  # "tu n'es PAS Claude"
 
     def test_prompt_with_memory_context(self):
         from api.routers.agent3_openclaw import _build_agent3_prompt
         memory = "\n=== MEMOIRE ===\n[contact] Jean: PDG de Startup"
-        prompt = _build_agent3_prompt(None, [], [], memory_context=memory)
+        prompt = asyncio.run(_build_agent3_prompt(None, [], [], memory_context=memory))
         assert "MEMOIRE" in prompt
 
     def test_prompt_with_files_context(self):
         from api.routers.agent3_openclaw import _build_agent3_prompt
         files = "Fichier: rapport.pdf (2.3 MB)"
-        prompt = _build_agent3_prompt(None, [], [], files_context=files)
+        prompt = asyncio.run(_build_agent3_prompt(None, [], [], files_context=files))
         assert "rapport.pdf" in prompt
 
 
@@ -977,12 +967,13 @@ class TestSemanticMemory:
             assert isinstance(results[0], MemoryMatch)
 
     def test_search_memories_via_db(self, db):
-        from api.routers.agent3_openclaw import _save_memory, _search_memories
-        _save_memory(db, TEST_USER_ID, "python_level", "Expert en Python depuis 10 ans")
-        _save_memory(db, TEST_USER_ID, "hobby", "Joue de la guitare")
-        _save_memory(db, TEST_USER_ID, "framework", "Specialise en FastAPI et Django")
+        # Migration PG (2026-05-14) : _search_memories est devenu async.
+        from api.routers.agent3_openclaw import _save_memory_async, _search_memories
+        asyncio.run(_save_memory_async(TEST_USER_ID, "python_level", "Expert en Python depuis 10 ans"))
+        asyncio.run(_save_memory_async(TEST_USER_ID, "hobby", "Joue de la guitare"))
+        asyncio.run(_save_memory_async(TEST_USER_ID, "framework", "Specialise en FastAPI et Django"))
 
-        results = _search_memories(db, TEST_USER_ID, "Python programmation")
+        results = asyncio.run(_search_memories(db, TEST_USER_ID, "Python programmation"))
         # Should find Python-related memories
         assert isinstance(results, list)
 
@@ -1019,12 +1010,12 @@ class TestWorkspaceFolderName:
     """Tests du nommage du dossier workspace."""
 
     def test_default_name_without_profil(self, db):
-        from api.routers.agent3_openclaw import get_workspace_folder_name
-        name = get_workspace_folder_name(db, TEST_USER_ID)
+        from api.routers.agent3_openclaw import get_workspace_folder_name_async
+        name = asyncio.run(get_workspace_folder_name_async(TEST_USER_ID))
         assert name == "Documents_Sylea"
 
     def test_name_from_objective(self, db):
-        from api.routers.agent3_openclaw import get_workspace_folder_name
+        from api.routers.agent3_openclaw import get_workspace_folder_name_async
         import uuid
         pid = str(uuid.uuid4())
         cols = [r[1] for r in db.conn.execute("PRAGMA table_info(profil_utilisateur)").fetchall()]
@@ -1041,13 +1032,13 @@ class TestWorkspaceFolderName:
         placeholders = ", ".join(["?"] * len(base_vals))
         db.conn.execute(f"INSERT INTO profil_utilisateur ({col_names}) VALUES ({placeholders})", list(base_vals.values()))
         db.conn.commit()
-        name = get_workspace_folder_name(db, TEST_USER_ID)
+        name = asyncio.run(get_workspace_folder_name_async(TEST_USER_ID))
         # May return objective-based name or default
         assert isinstance(name, str)
         assert len(name) > 0
 
     def test_special_chars_stripped(self, db):
-        from api.routers.agent3_openclaw import get_workspace_folder_name
+        from api.routers.agent3_openclaw import get_workspace_folder_name_async
         import uuid
         db.conn.execute(
             "INSERT INTO users (id, email, hashed_password, provider, created_at) "
@@ -1068,7 +1059,7 @@ class TestWorkspaceFolderName:
         placeholders = ", ".join(["?"] * len(base_vals))
         db.conn.execute(f"INSERT INTO profil_utilisateur ({col_names}) VALUES ({placeholders})", list(base_vals.values()))
         db.conn.commit()
-        name = get_workspace_folder_name(db, "user-special")
+        name = asyncio.run(get_workspace_folder_name_async("user-special"))
         assert "@" not in name
         assert "#" not in name
         assert "$" not in name
@@ -1630,20 +1621,20 @@ class TestFamiliarityLevel:
 
     def test_level_0_no_data(self, db):
         """Nouvel utilisateur sans aucune donnee → niveau 0."""
-        from api.routers.agent3_openclaw import _compute_familiarity_level
-        level = _compute_familiarity_level(db, "unknown-user", None, [], 0)
+        from api.routers.agent3_openclaw import _compute_familiarity_level_async
+        level = asyncio.run(_compute_familiarity_level_async("unknown-user", None, [], 0))
         assert level == 0
 
     def test_level_1_partial_profil(self, db):
         """Utilisateur avec profil partiel → niveau 1."""
-        from api.routers.agent3_openclaw import _compute_familiarity_level
+        from api.routers.agent3_openclaw import _compute_familiarity_level_async
         profil = {"nom": "Jean", "profession": "", "ville": "", "objectif_description": ""}
-        level = _compute_familiarity_level(db, "user-1", profil, [], 0)
+        level = asyncio.run(_compute_familiarity_level_async("user-1", profil, [], 0))
         assert level == 1
 
     def test_level_increases_with_messages(self, db):
         """Plus de messages = niveau plus eleve."""
-        from api.routers.agent3_openclaw import _compute_familiarity_level
+        from api.routers.agent3_openclaw import _compute_familiarity_level_async
         uid = TEST_USER_ID
         # Inserer 25 messages
         for i in range(25):
@@ -1653,12 +1644,12 @@ class TestFamiliarityLevel:
             )
         db.conn.commit()
         profil = {"nom": "Jean", "profession": "Dev", "ville": "Paris", "objectif_description": "CTO"}
-        level = _compute_familiarity_level(db, uid, profil, [], 0)
+        level = asyncio.run(_compute_familiarity_level_async(uid, profil, [], 0))
         assert level >= 2
 
     def test_level_3_with_full_data(self, db):
         """Utilisateur avec beaucoup de donnees → niveau 3."""
-        from api.routers.agent3_openclaw import _compute_familiarity_level
+        from api.routers.agent3_openclaw import _compute_familiarity_level_async
         uid = TEST_USER_ID
         # 60 messages
         for i in range(60):
@@ -1669,26 +1660,26 @@ class TestFamiliarityLevel:
         db.conn.commit()
         profil = {"nom": "Jean", "profession": "Dev", "ville": "Paris", "objectif_description": "Devenir CTO"}
         decisions = [{"impact": 2.0}] * 6
-        level = _compute_familiarity_level(db, uid, profil, decisions, 12)
+        level = asyncio.run(_compute_familiarity_level_async(uid, profil, decisions, 12))
         assert level == 3
 
     def test_level_monotonically_increases(self, db):
         """Le niveau ne diminue jamais quand on ajoute des donnees."""
-        from api.routers.agent3_openclaw import _compute_familiarity_level
+        from api.routers.agent3_openclaw import _compute_familiarity_level_async
         uid = TEST_USER_ID
         profil = None
         levels = []
 
         # Pas de donnees
-        levels.append(_compute_familiarity_level(db, uid, profil, [], 0))
+        levels.append(asyncio.run(_compute_familiarity_level_async(uid, profil, [], 0)))
 
         # Profil partiel
         profil = {"nom": "Test", "profession": "", "ville": "", "objectif_description": ""}
-        levels.append(_compute_familiarity_level(db, uid, profil, [], 0))
+        levels.append(asyncio.run(_compute_familiarity_level_async(uid, profil, [], 0)))
 
         # Profil complet
         profil = {"nom": "Test", "profession": "Dev", "ville": "Lyon", "objectif_description": "Objectif"}
-        levels.append(_compute_familiarity_level(db, uid, profil, [], 0))
+        levels.append(asyncio.run(_compute_familiarity_level_async(uid, profil, [], 0)))
 
         # + messages
         for i in range(10):
@@ -1697,11 +1688,11 @@ class TestFamiliarityLevel:
                 (str(uuid.uuid4()), uid, "user", f"msg {i}"),
             )
         db.conn.commit()
-        levels.append(_compute_familiarity_level(db, uid, profil, [], 0))
+        levels.append(asyncio.run(_compute_familiarity_level_async(uid, profil, [], 0)))
 
         # + decisions
         decisions = [{"impact": 1.0}] * 5
-        levels.append(_compute_familiarity_level(db, uid, profil, decisions, 5))
+        levels.append(asyncio.run(_compute_familiarity_level_async(uid, profil, decisions, 5)))
 
         # Verifier que ca monte (ou reste stable)
         for i in range(1, len(levels)):
@@ -2211,15 +2202,15 @@ class TestPromptWithScratchpad:
 
     def test_prompt_without_scratchpad(self):
         from api.routers.agent3_openclaw import _build_agent3_prompt
-        prompt = _build_agent3_prompt(None, [], [])
+        prompt = asyncio.run(_build_agent3_prompt(None, [], []))
         assert "MEMOIRE DE TRAVAIL" not in prompt
 
     def test_prompt_with_scratchpad(self):
         from api.routers.agent3_openclaw import _build_agent3_prompt
-        prompt = _build_agent3_prompt(
+        prompt = asyncio.run(_build_agent3_prompt(
             None, [], [],
-            scratchpad_context="=== MEMOIRE DE TRAVAIL ===\n- search_results: AI trends"
-        )
+            scratchpad_context="=== MEMOIRE DE TRAVAIL ===\n- search_results: AI trends",
+        ))
         assert "MEMOIRE DE TRAVAIL" in prompt
         assert "search_results" in prompt
 
@@ -2377,9 +2368,7 @@ class TestParallelExecutor:
         import asyncio
         from api.routers.agent3_openclaw import ParallelExecutor
         async def noop(t, d): return {"success": True, "result": None}
-        results = asyncio.get_event_loop().run_until_complete(
-            ParallelExecutor.execute_parallel([], noop)
-        )
+        results = asyncio.run(ParallelExecutor.execute_parallel([], noop))
         assert results == []
 
     def test_execute_all_succeed(self):
@@ -2392,9 +2381,7 @@ class TestParallelExecutor:
             {"id": "t2", "type": "SEARCH", "data": {"n": 2}},
             {"id": "t3", "type": "SEARCH", "data": {"n": 3}},
         ]
-        results = asyncio.get_event_loop().run_until_complete(
-            ParallelExecutor.execute_parallel(tasks, ok_exec)
-        )
+        results = asyncio.run(ParallelExecutor.execute_parallel(tasks, ok_exec))
         assert len(results) == 3
         assert all(r["success"] for r in results)
 
@@ -2409,9 +2396,7 @@ class TestParallelExecutor:
             {"id": "t1", "type": "A", "data": {}},
             {"id": "t2", "type": "B", "data": {"fail": True}},
         ]
-        results = asyncio.get_event_loop().run_until_complete(
-            ParallelExecutor.execute_parallel(tasks, mixed_exec)
-        )
+        results = asyncio.run(ParallelExecutor.execute_parallel(tasks, mixed_exec))
         assert len(results) == 2
         successes = [r for r in results if r["success"]]
         failures = [r for r in results if not r["success"]]
@@ -2425,7 +2410,7 @@ class TestParallelExecutor:
             await asyncio.sleep(10)
             return {"success": True, "result": "done"}
         tasks = [{"id": "slow", "type": "A", "data": {}}]
-        results = asyncio.get_event_loop().run_until_complete(
+        results = asyncio.run(
             ParallelExecutor.execute_parallel(tasks, slow_exec, timeout_per_task=0.1)
         )
         assert len(results) == 1

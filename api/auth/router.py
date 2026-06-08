@@ -1,5 +1,6 @@
 """Authentication routes: register, login, OAuth."""
 
+import logging
 import os
 import random
 import smtplib
@@ -10,11 +11,36 @@ from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+logger = logging.getLogger("sylea.auth")
+
+
+def _is_prod() -> bool:
+    """True si on tourne en PostgreSQL (= prod). Meme heuristique que repositories._is_pg."""
+    url = os.environ.get("DATABASE_URL", "")
+    return url.startswith(("postgresql://", "postgresql+", "postgres://"))
+
+
+def _mask_email(email: str) -> str:
+    """Masque un email pour les logs : 'lucas@gmail.com' -> 'l***@gmail.com'.
+
+    Evite de logger des PII en clair (RGPD) tout en gardant un identifiant
+    debuggable.
+    """
+    try:
+        local, _, domain = email.partition("@")
+        if not domain:
+            return "***"
+        head = local[0] if local else "*"
+        return f"{head}***@{domain}"
+    except Exception:
+        return "***"
+
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from api.auth.models import RegisterIn, LoginIn, TokenOut, UserOut, OAuthIn
+from api.auth.models import RegisterIn, LoginIn, TokenOut, UserOut, OAuthIn, AppleOAuthIn
 from api.auth.security import hash_password, verify_password, create_access_token
 from api.dependencies import get_db
 
@@ -33,7 +59,16 @@ class VerifyCodeIn(BaseModel):
 
 
 def _generate_code() -> str:
-    return "".join(random.choices(string.digits, k=6))
+    """Génère un code de vérification 6 chiffres cryptographiquement sûr.
+
+    Avant : utilisait `random.choices()` qui n'est PAS sûr cryptographiquement
+    (mersenne twister prédictible si on observe quelques sorties). Risque : un
+    attaquant pouvait potentiellement prédire les codes de récupération.
+
+    Maintenant : `secrets.choice()` utilise os.urandom() (CSPRNG OS-level).
+    """
+    import secrets
+    return "".join(secrets.choice(string.digits) for _ in range(6))
 
 
 def _cleanup_expired():
@@ -49,8 +84,15 @@ def send_verification_email(to_email: str, code: str):
     smtp_password = os.getenv("SMTP_PASSWORD", "")
 
     if not smtp_email or not smtp_password:
-        # Fallback: just print the code (dev mode)
-        print(f"[DEV] Verification code for {to_email}: {code}")
+        # SMTP non configure.
+        # PROD : on REFUSE de continuer silencieusement — sinon le code finirait
+        # dans les logs en clair (RGPD/sec). On leve une 503 explicite.
+        if _is_prod():
+            logger.error("SMTP non configure en production — impossible d'envoyer le code a %s", _mask_email(to_email))
+            raise HTTPException(status_code=503, detail="Service d'email indisponible. Reessayez plus tard.")
+        # DEV uniquement : on surface le code en console pour le test local
+        # (email masque, jamais en prod).
+        logger.warning("[DEV] Code de verification pour %s : %s", _mask_email(to_email), code)
         return
 
     msg = MIMEMultipart()
@@ -79,9 +121,14 @@ def send_verification_email(to_email: str, code: str):
             server.login(smtp_email, smtp_password)
             server.send_message(msg)
     except Exception as e:
-        # Si l'email échoue, on log l'erreur mais on continue (le code est en mémoire)
-        print(f"[SMTP ERROR] Could not send email to {to_email}: {e}")
-        print(f"[DEV FALLBACK] Verification code for {to_email}: {code}")
+        # Echec d'envoi SMTP.
+        # On log l'ERREUR (email masque, JAMAIS le code) pour diagnostic.
+        logger.error("Echec envoi email de verification a %s : %s", _mask_email(to_email), e)
+        if _is_prod():
+            # PROD : on ne fallback PAS sur la console (le code fuirait dans les logs).
+            raise HTTPException(status_code=503, detail="Service d'email indisponible. Reessayez plus tard.")
+        # DEV uniquement : surface le code masque pour le test local.
+        logger.warning("[DEV FALLBACK] Code de verification pour %s : %s", _mask_email(to_email), code)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -93,25 +140,167 @@ def _get_conn(db):
     return db
 
 
-def _get_user_by_email(db, email: str) -> dict | None:
-    conn = _get_conn(db)
-    row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-    if not row:
+# ═══════════════════════════════════════════════════════════════════════════
+#  Helpers async (migration PG, 2026-05-15) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _get_user_by_email_async(email: str) -> dict | None:
+    """Async version — PG-compatible."""
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    factory = _gsf()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                _sa_text("SELECT * FROM users WHERE email = :email"),
+                {"email": email},
+            )
+            row = result.mappings().first()
+    except Exception:
         return None
-    cols = [d[0] for d in conn.execute("SELECT * FROM users LIMIT 0").description]
-    return dict(zip(cols, row))
+    return dict(row) if row else None
+
+
+async def _get_user_by_provider_async(provider: str, provider_id: str) -> dict | None:
+    """Async version — PG-compatible."""
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    factory = _gsf()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                _sa_text(
+                    "SELECT * FROM users WHERE provider = :prov AND provider_id = :pid"
+                ),
+                {"prov": provider, "pid": provider_id},
+            )
+            row = result.mappings().first()
+    except Exception:
+        return None
+    return dict(row) if row else None
+
+
+async def _create_user_async(
+    email: str,
+    hashed_password: str | None = None,
+    provider: str = "local",
+    provider_id: str | None = None,
+) -> dict:
+    """Async version — PG-compatible."""
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    factory = _gsf()
+    user_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    async with factory() as session:
+        try:
+            await session.execute(
+                _sa_text(
+                    "INSERT INTO users "
+                    "(id, email, hashed_password, provider, provider_id, created_at) "
+                    "VALUES (:id, :email, :pw, :prov, :pid, :now)"
+                ),
+                {
+                    "id": user_id, "email": email, "pw": hashed_password,
+                    "prov": provider, "pid": provider_id, "now": now,
+                },
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+    return {"id": user_id, "email": email, "provider": provider}
+
+
+async def _upsert_google_integration_async(
+    user_id: str,
+    services_scopes: dict,
+    access_token: str,
+    refresh_token: str,
+    expires_at: int | str,
+    granted_scope: str,
+    now_iso: str,
+) -> None:
+    """Helper async pour upserter les integrations Google apres login OAuth."""
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    factory = _gsf()
+    for _svc, _scopes_needed in services_scopes.items():
+        if not any(sc in granted_scope for sc in _scopes_needed):
+            continue
+        async with factory() as session:
+            try:
+                # SELECT existant
+                result = await session.execute(
+                    _sa_text(
+                        "SELECT id FROM user_integrations "
+                        "WHERE auth_user_id = :uid AND provider = :prov"
+                    ),
+                    {"uid": user_id, "prov": _svc},
+                )
+                existing = result.first()
+                if existing:
+                    await session.execute(
+                        _sa_text(
+                            "UPDATE user_integrations SET access_token = :acc, "
+                            "refresh_token = :ref, token_expires_at = :exp, "
+                            "scopes = :sc, updated_at = :now "
+                            "WHERE auth_user_id = :uid AND provider = :prov"
+                        ),
+                        {
+                            "acc": access_token, "ref": refresh_token,
+                            "exp": str(expires_at), "sc": granted_scope,
+                            "now": now_iso, "uid": user_id, "prov": _svc,
+                        },
+                    )
+                else:
+                    await session.execute(
+                        _sa_text(
+                            "INSERT INTO user_integrations "
+                            "(id, auth_user_id, provider, access_token, refresh_token, "
+                            " token_expires_at, scopes, connected_at, updated_at) "
+                            "VALUES (:id, :uid, :prov, :acc, :ref, :exp, :sc, :now, :now)"
+                        ),
+                        {
+                            "id": str(uuid.uuid4()), "uid": user_id, "prov": _svc,
+                            "acc": access_token, "ref": refresh_token,
+                            "exp": str(expires_at), "sc": granted_scope,
+                            "now": now_iso,
+                        },
+                    )
+                await session.commit()
+            except Exception:
+                await session.rollback()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Sync wrappers (retro-compat pour callers sync/CLI)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _run_async(coro):
+    """Helper: execute une coroutine depuis un contexte sync.
+
+    Si on est deja dans un event loop (FastAPI), delegue a un thread separe
+    via ThreadPoolExecutor pour eviter le RuntimeWarning 'coroutine never awaited'.
+    """
+    import asyncio as _aio
+    try:
+        return _aio.run(coro)
+    except RuntimeError:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_aio.run, coro)
+            return future.result()
+
+
+def _get_user_by_email(db, email: str) -> dict | None:
+    """Sync wrapper — delegue toujours a async (PG-compatible)."""
+    return _run_async(_get_user_by_email_async(email))
 
 
 def _get_user_by_provider(db, provider: str, provider_id: str) -> dict | None:
-    conn = _get_conn(db)
-    row = conn.execute(
-        "SELECT * FROM users WHERE provider = ? AND provider_id = ?",
-        (provider, provider_id),
-    ).fetchone()
-    if not row:
-        return None
-    cols = [d[0] for d in conn.execute("SELECT * FROM users LIMIT 0").description]
-    return dict(zip(cols, row))
+    """Sync wrapper — delegue toujours a async (PG-compatible)."""
+    return _run_async(_get_user_by_provider_async(provider, provider_id))
 
 
 def _create_user(
@@ -121,15 +310,8 @@ def _create_user(
     provider: str = "local",
     provider_id: str | None = None,
 ) -> dict:
-    conn = _get_conn(db)
-    user_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        "INSERT INTO users (id, email, hashed_password, provider, provider_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (user_id, email, hashed_password, provider, provider_id, now),
-    )
-    conn.commit()
-    return {"id": user_id, "email": email, "provider": provider}
+    """Sync wrapper — delegue toujours a async (PG-compatible)."""
+    return _run_async(_create_user_async(email, hashed_password, provider, provider_id))
 
 
 # ── Register ──────────────────────────────────────────────────────────────────
@@ -139,7 +321,7 @@ async def register(data: RegisterIn, db=Depends(get_db)):
     if len(data.password) < 4:
         raise HTTPException(status_code=400, detail="Mot de passe trop court (min 4 caracteres)")
 
-    existing = _get_user_by_email(db, data.email)
+    existing = await _get_user_by_email_async(data.email)
     if existing:
         raise HTTPException(status_code=409, detail="Un compte existe deja avec cet email")
 
@@ -162,6 +344,8 @@ async def register(data: RegisterIn, db=Depends(get_db)):
 
 @router.post("/verify", response_model=TokenOut)
 async def verify_code(data: VerifyCodeIn, db=Depends(get_db)):
+    import hmac
+
     _cleanup_expired()
 
     pending = pending_verifications.get(data.email)
@@ -172,11 +356,27 @@ async def verify_code(data: VerifyCodeIn, db=Depends(get_db)):
         del pending_verifications[data.email]
         raise HTTPException(status_code=400, detail="Le code a expire. Veuillez vous reinscrire.")
 
-    if pending["code"] != data.code:
+    # ANTI-BRUTEFORCE (P0 2026-06) : compteur de tentatives par compte.
+    # Au-dela de 5 essais errones, on invalide la verification (l'user doit
+    # se reinscrire pour obtenir un nouveau code). Borne le bruteforce a
+    # 5 essais peu importe le rate-limit IP (defense en profondeur).
+    attempts = int(pending.get("attempts", 0)) + 1
+    if attempts > 5:
+        del pending_verifications[data.email]
+        raise HTTPException(
+            status_code=429,
+            detail="Trop de tentatives. Veuillez vous reinscrire pour obtenir un nouveau code.",
+        )
+    pending["attempts"] = attempts
+
+    # TIMING-SAFE compare (P0 2026-06) : `!=` sur des str fuit le code via
+    # timing attack (comparaison court-circuitee au 1er char different).
+    # hmac.compare_digest est constant-time.
+    if not hmac.compare_digest(str(pending["code"]), str(data.code)):
         raise HTTPException(status_code=400, detail="Code de verification incorrect")
 
     # Code is valid — create the user
-    user = _create_user(db, data.email, pending["password_hash"])
+    user = await _create_user_async(data.email, pending["password_hash"])
     del pending_verifications[data.email]
 
     token = create_access_token(user["id"])
@@ -187,15 +387,78 @@ async def verify_code(data: VerifyCodeIn, db=Depends(get_db)):
 
 @router.post("/login", response_model=TokenOut)
 async def login(data: LoginIn, db=Depends(get_db)):
-    user = _get_user_by_email(db, data.email)
-    if not user or not user.get("hashed_password"):
+    user = await _get_user_by_email_async(data.email)
+    if not user:
+        # Email totalement inconnu — 401 classique
         raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
+
+    if not user.get("hashed_password"):
+        # Compte existant SANS mot de passe = compte OAuth-only (Google/Apple/GitHub).
+        # Plutot que de renvoyer 401 "mdp incorrect" (trompeur), on signale clairement
+        # avec un 409 Conflict + code + provider — le client (web/desktop) peut
+        # alors afficher "Connecte-toi avec <provider>" et orienter l'user vers le
+        # bon bouton. Politique "1 compte = 1 methode" (Option A grandfather : les
+        # comptes existants qui ont DEJA un mdp + provider OAuth continuent a
+        # marcher des 2 cotes, mais les nouveaux comptes OAuth-only ne peuvent
+        # pas se connecter en email/mdp.)
+        provider = user.get("provider") or "oauth"
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "USE_OAUTH",
+                "provider": provider,
+                "message": f"Ce compte se connecte avec {provider.capitalize()}. Utilise le bouton {provider.capitalize()}.",
+            },
+        )
 
     if not verify_password(data.password, user["hashed_password"]):
         raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
 
     token = create_access_token(user["id"])
     return TokenOut(access_token=token)
+
+
+# ── Logout (revocation) ─────────────────────────────────────────────────────
+
+@router.post("/logout")
+async def logout(request: Request, db=Depends(get_db)):
+    """Revoque TOUS les tokens de l'utilisateur courant (logout everywhere).
+
+    Pose users.tokens_invalidated_before = now() : tout JWT dont iat < now
+    sera rejete a la prochaine requete (cf api/dependencies.get_optional_user).
+    Idempotent. Necessite un Bearer token valide.
+
+    Note : le frontend doit AUSSI purger son localStorage (deja fait cote
+    authStore.logout). Cet endpoint ajoute la revocation server-side qui
+    manquait — un token vole devient inutilisable apres logout.
+    """
+    from api.dependencies import get_optional_user
+    user_id = await get_optional_user(request)
+    if not user_id:
+        # Pas de session → rien a revoquer, succes idempotent.
+        return {"ok": True, "detail": "Aucune session active."}
+
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        factory = get_session_factory()
+        async with factory() as session:
+            await session.execute(
+                _sa_text("UPDATE users SET tokens_invalidated_before = :now WHERE id = :uid"),
+                {"now": now_iso, "uid": user_id},
+            )
+            await session.commit()
+        # Invalide le cache de securite immediatement (sinon TTL 30s de delai).
+        try:
+            from api.dependencies import _sec_cache
+            _sec_cache.pop(user_id, None)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error("Echec logout (revocation) pour %s : %s", user_id, e)
+        raise HTTPException(status_code=500, detail="Echec de la deconnexion. Reessaye.")
+    return {"ok": True, "detail": "Deconnecte. Tous les tokens ont ete revoques."}
 
 
 # ── OAuth Google ──────────────────────────────────────────────────────────────
@@ -220,7 +483,29 @@ async def oauth_google(data: OAuthIn, db=Depends(get_db)):
             },
         )
     if token_resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Code Google invalide")
+        # Log Google's actual error for debugging (sans le code lui-meme).
+        # Google renvoie un JSON {error, error_description} en cas d'echec.
+        try:
+            err_body = token_resp.json()
+        except Exception:
+            err_body = {"raw": token_resp.text[:200]}
+        import logging as _lg
+        _lg.getLogger("sylea.auth").warning(
+            "[oauth-google] Google token exchange failed (status=%s) — "
+            "redirect_uri=%s, error=%s",
+            token_resp.status_code,
+            data.redirect_uri,
+            err_body,
+        )
+        # Expose le message Google a l'user (utile pour debug : 'redirect_uri_mismatch',
+        # 'invalid_grant', etc.)
+        google_err = err_body.get("error", "unknown") if isinstance(err_body, dict) else "unknown"
+        google_desc = err_body.get("error_description", "") if isinstance(err_body, dict) else ""
+        raise HTTPException(
+            status_code=401,
+            detail=f"Google OAuth a refuse le code : {google_err}"
+                   + (f" ({google_desc})" if google_desc else ""),
+        )
 
     token_data = token_resp.json()
     access_token = token_data.get("access_token")
@@ -238,21 +523,55 @@ async def oauth_google(data: OAuthIn, db=Depends(get_db)):
     google_id = google_user.get("id", "")
     email = google_user.get("email", "")
 
-    # Find or create user
-    user = _get_user_by_provider(db, "google", google_id)
+    # Find or create user (async, PG-compatible)
+    user = await _get_user_by_provider_async("google", google_id)
     if not user:
         # Check if email exists with local account
-        existing = _get_user_by_email(db, email)
+        existing = await _get_user_by_email_async(email)
         if existing:
-            # Link Google to existing account
-            _get_conn(db).execute(
-                "UPDATE users SET provider = 'google', provider_id = ? WHERE id = ?",
-                (google_id, existing["id"]),
-            )
-            _get_conn(db).commit()
+            # Politique "1 compte = 1 methode" :
+            #   - Si l'email existe avec provider='local' ET mdp set → REFUSE la
+            #     liaison Google. L'user doit se connecter avec son mdp.
+            #   - Si l'email existe avec provider OAuth different (rare) → REFUSE.
+            #   - Sinon (cas legacy Chloé : provider=google ET mdp set, dual-auth
+            #     historique pre-migration), c'est qu'on retrouve le compte par
+            #     email mais que _get_user_by_provider n'a pas matche. On accepte
+            #     et on met juste a jour le provider_id pour synchroniser.
+            existing_provider = existing.get("provider") or "local"
+            has_password = bool(existing.get("hashed_password"))
+
+            if existing_provider == "local" and has_password:
+                # Compte email/mdp existant -> ne PAS lier Google
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "USE_PASSWORD",
+                        "email": email,
+                        "message": f"Ce compte ({email}) se connecte avec email/mot de passe. Utilise le formulaire de connexion classique.",
+                    },
+                )
+
+            # Compte legacy dual-auth ou OAuth different : on synchronise le provider_id
+            from sqlalchemy import text as _sa_text
+            from api.database import get_session_factory as _gsf
+            _factory = _gsf()
+            async with _factory() as _session:
+                try:
+                    await _session.execute(
+                        _sa_text(
+                            "UPDATE users SET provider = 'google', "
+                            "provider_id = :gid WHERE id = :uid"
+                        ),
+                        {"gid": google_id, "uid": existing["id"]},
+                    )
+                    await _session.commit()
+                except Exception:
+                    await _session.rollback()
             user = existing
         else:
-            user = _create_user(db, email, provider="google", provider_id=google_id)
+            user = await _create_user_async(
+                email, provider="google", provider_id=google_id,
+            )
 
     jwt_token = create_access_token(user["id"])
 
@@ -286,33 +605,19 @@ async def oauth_google(data: OAuthIn, db=Depends(get_db)):
         except Exception:
             pass
 
-        for _svc, _scopes_needed in _required_scopes.items():
-            # Si aucun scope correspondant n'est present, on skip (pas d'auto-
-            # connexion) -> evite d'ecraser une integration valide existante
-            # avec un token login-only inutilisable.
-            if not any(sc in _granted_scope for sc in _scopes_needed):
-                continue
-            try:
-                existing = _get_conn(db).execute(
-                    "SELECT id FROM user_integrations WHERE auth_user_id = ? AND provider = ?",
-                    (_user_id, _svc),
-                ).fetchone()
-                if existing:
-                    _get_conn(db).execute(
-                        "UPDATE user_integrations SET access_token = ?, refresh_token = ?, "
-                        "token_expires_at = ?, scopes = ?, updated_at = ? "
-                        "WHERE auth_user_id = ? AND provider = ?",
-                        (_google_access, _google_refresh, str(_google_expires), _granted_scope, _now_iso, _user_id, _svc),
-                    )
-                else:
-                    _get_conn(db).execute(
-                        "INSERT INTO user_integrations (id, auth_user_id, provider, access_token, refresh_token, "
-                        "token_expires_at, scopes, connected_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (str(uuid.uuid4()), _user_id, _svc, _google_access, _google_refresh, str(_google_expires), _granted_scope, _now_iso, _now_iso),
-                    )
-                _get_conn(db).commit()
-            except Exception:
-                pass
+        # Upsert async pour toutes les integrations Google (compat PG + SQLite).
+        try:
+            await _upsert_google_integration_async(
+                user_id=_user_id,
+                services_scopes=_required_scopes,
+                access_token=_google_access,
+                refresh_token=_google_refresh,
+                expires_at=_google_expires,
+                granted_scope=_granted_scope,
+                now_iso=_now_iso,
+            )
+        except Exception:
+            pass
 
     return TokenOut(access_token=jwt_token)
 
@@ -442,22 +747,235 @@ async def oauth_github(data: OAuthIn, db=Depends(get_db)):
     if not email:
         email = github_user.get("email") or f"github-{github_id}@sylea.ai"
 
-    # Find or create user
-    user = _get_user_by_provider(db, "github", github_id)
+    # Find or create user (async, PG-compatible).
+    user = await _get_user_by_provider_async("github", github_id)
     if not user:
-        existing = _get_user_by_email(db, email)
+        existing = await _get_user_by_email_async(email)
         if existing:
-            _get_conn(db).execute(
-                "UPDATE users SET provider = 'github', provider_id = ? WHERE id = ?",
-                (github_id, existing["id"]),
-            )
-            _get_conn(db).commit()
+            from sqlalchemy import text as _sa_text
+            from api.database import get_session_factory as _gsf
+            _factory = _gsf()
+            async with _factory() as _session:
+                try:
+                    await _session.execute(
+                        _sa_text(
+                            "UPDATE users SET provider = 'github', "
+                            "provider_id = :gid WHERE id = :uid"
+                        ),
+                        {"gid": github_id, "uid": existing["id"]},
+                    )
+                    await _session.commit()
+                except Exception:
+                    await _session.rollback()
             user = existing
         else:
-            user = _create_user(db, email, provider="github", provider_id=github_id)
+            user = await _create_user_async(
+                email, provider="github", provider_id=github_id,
+            )
 
     jwt_token = create_access_token(user["id"])
     return TokenOut(access_token=jwt_token)
+
+
+# ── OAuth Apple ───────────────────────────────────────────────────────────────
+
+@router.get("/oauth/apple/url")
+async def oauth_apple_url(redirect_uri: str = "", state: str = ""):
+    """Génère l'URL d'autorisation Apple. Le frontend redirige l'utilisateur dessus.
+
+    Note : Apple impose `response_mode=form_post` quand scope inclut name/email,
+    donc le redirect_uri DOIT pointer vers une URL backend qui accepte POST.
+    """
+    from api.auth.apple_oauth import build_authorize_url, get_apple_oauth_config
+
+    cfg = get_apple_oauth_config()
+    if not cfg["configured"]:
+        raise HTTPException(status_code=501, detail="Apple OAuth non configuré")
+
+    if not redirect_uri:
+        redirect_uri = os.environ.get("APPLE_REDIRECT_URI", "")
+    if not redirect_uri:
+        raise HTTPException(status_code=400, detail="redirect_uri requis")
+
+    # Génère un state anti-CSRF si non fourni
+    if not state:
+        state = uuid.uuid4().hex
+
+    url = build_authorize_url(redirect_uri=redirect_uri, state=state)
+    return {"url": url, "state": state}
+
+
+@router.post("/oauth/apple", response_model=TokenOut)
+async def oauth_apple(data: AppleOAuthIn, db=Depends(get_db)):
+    """Échange un code Apple contre un JWT Syléa.
+
+    Deux modes d'appel selon le canal :
+      - Web (Sign in with Apple JS) : le frontend reçoit le code et nous le
+        relaie, on échange contre id_token côté serveur (sécurisé : la clé
+        privée Apple reste server-side).
+      - Native (mobile / desktop natif) : la lib native renvoie déjà l'id_token
+        validé Apple ; on peut le passer directement via `id_token` pour éviter
+        l'aller-retour /auth/token (ce code reste accepté quand même).
+
+    Au PREMIER login, Apple ne renvoie le nom de l'utilisateur QUE dans le form
+    POST initial (pas dans l'id_token). Le frontend doit nous le transmettre
+    via `first_name` / `last_name` à ce moment-là.
+    """
+    from api.auth.apple_oauth import (
+        AppleUser,
+        exchange_code,
+        get_apple_oauth_config,
+        verify_id_token,
+    )
+
+    cfg = get_apple_oauth_config()
+    if not cfg["configured"]:
+        raise HTTPException(status_code=501, detail="Apple OAuth non configuré")
+
+    # Mode 1 : id_token déjà fourni (native flow) → vérification directe
+    if data.id_token:
+        try:
+            apple_user: AppleUser = await verify_id_token(data.id_token)
+        except ValueError as e:
+            raise HTTPException(status_code=401, detail=f"id_token Apple invalide : {e}")
+    else:
+        # Mode 2 : code → exchange → id_token → verify (web flow)
+        if not data.code:
+            raise HTTPException(status_code=400, detail="code ou id_token requis")
+        redirect_uri = data.redirect_uri or os.environ.get("APPLE_REDIRECT_URI", "")
+        if not redirect_uri:
+            raise HTTPException(status_code=400, detail="redirect_uri requis")
+        try:
+            tokens = await exchange_code(data.code, redirect_uri=redirect_uri)
+            apple_user = await verify_id_token(tokens.id_token)
+        except (ValueError, RuntimeError) as e:
+            # On NE log JAMAIS le code (one-time) ni les tokens
+            raise HTTPException(status_code=401, detail=f"Échec auth Apple : {e}")
+
+    apple_id = apple_user.sub
+    # Email obligatoire pour créer un compte. Si Apple ne nous le donne pas
+    # (cas relais privé révoqué), on génère un placeholder stable.
+    email = apple_user.email or f"apple-{apple_id}@privaterelay.appleid.com"
+
+    # 1) Compte Apple déjà lié ?
+    user = await _get_user_by_provider_async("apple", apple_id)
+    if user:
+        jwt_token = create_access_token(user["id"])
+        return TokenOut(access_token=jwt_token)
+
+    # 2) Sinon : email déjà connu en local ? On lie le compte.
+    existing = await _get_user_by_email_async(email)
+    if existing:
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        _factory = _gsf()
+        async with _factory() as _session:
+            try:
+                await _session.execute(
+                    _sa_text(
+                        "UPDATE users SET provider = 'apple', "
+                        "provider_id = :aid WHERE id = :uid"
+                    ),
+                    {"aid": apple_id, "uid": existing["id"]},
+                )
+                await _session.commit()
+            except Exception:
+                await _session.rollback()
+        user = existing
+    else:
+        # 3) Création d'un nouveau compte.
+        user = await _create_user_async(
+            email, provider="apple", provider_id=apple_id,
+        )
+
+    jwt_token = create_access_token(user["id"])
+    return TokenOut(access_token=jwt_token)
+
+
+@router.post("/oauth/apple/callback")
+async def oauth_apple_form_post_callback(
+    request: Request,
+    code: str = Form(...),
+    state: str = Form(""),
+    id_token: str | None = Form(None),
+    user: str | None = Form(None),  # JSON string : {"name":{"firstName":"...","lastName":"..."},"email":"..."}
+    error: str | None = Form(None),
+):
+    """Endpoint POST appelé par Apple (form_post mode) après authentification.
+
+    Apple impose `response_mode=form_post` quand scope inclut name/email.
+    Le browser de l'utilisateur fait donc un POST vers ce endpoint avec le
+    code, l'id_token et les données utilisateur en form-encoded.
+
+    On convertit en redirection 302 GET vers /auth/callback côté frontend
+    avec les query params attendus par AuthCallbackPage (state="apple_login",
+    code=..., first_name=..., last_name=...).
+    """
+    import json
+    import urllib.parse
+
+    frontend_base = os.environ.get("FRONTEND_BASE_URL", "http://localhost:5173").rstrip("/")
+
+    if error:
+        # Apple renvoie une erreur (ex. user_cancelled_authorize)
+        params = urllib.parse.urlencode({
+            "error": error,
+            "state": state or "apple_login",
+        })
+        return RedirectResponse(url=f"{frontend_base}/auth/callback?{params}", status_code=303)
+
+    # Parse les infos utilisateur (envoyées uniquement au PREMIER login)
+    first_name = ""
+    last_name = ""
+    if user:
+        try:
+            user_data = json.loads(user)
+            name = user_data.get("name", {}) if isinstance(user_data, dict) else {}
+            first_name = name.get("firstName", "") or ""
+            last_name = name.get("lastName", "") or ""
+        except Exception:
+            pass  # Apple peut envoyer du JSON malformé exceptionnellement
+
+    # Force state à apple_login pour que le frontend route correctement
+    forwarded_state = state if state.startswith("apple_") else "apple_login"
+
+    params = {
+        "code": code,
+        "state": forwarded_state,
+    }
+    if first_name:
+        params["first_name"] = first_name
+    if last_name:
+        params["last_name"] = last_name
+    if id_token:
+        # Optionnel : permet au frontend de vérifier le JWT sans réappel API
+        params["id_token"] = id_token
+
+    query = urllib.parse.urlencode(params)
+    return RedirectResponse(url=f"{frontend_base}/auth/callback?{query}", status_code=303)
+
+
+# ── CSRF token (apps natives Tauri/mobile sans gestion cookie cross-origin) ──
+
+@router.get("/csrf-token")
+async def get_csrf_token_endpoint():
+    """Retourne un token CSRF signé en JSON (sans cookie).
+
+    Utilisé par les clients natifs (Tauri desktop, app mobile) qui ne peuvent
+    pas garantir la propagation cross-origin du cookie sylea_csrf.
+
+    Le token retourné est valide pour le mode "signed-token only" du
+    CSRFMiddleware : envoyé en header X-CSRF-Token sur les POST/PUT/PATCH/
+    DELETE, il est accepté si sa signature HMAC est valide (sans nécessité
+    de cookie match).
+
+    Sécurité : la signature HMAC empêche un attaquant de forger un token
+    sans connaître SYLEA_CSRF_SECRET. Combinée au Bearer JWT (auth), elle
+    offre une protection équivalente au double-submit pour les apps
+    natives.
+    """
+    from api.csrf_middleware import generate_csrf_token
+    return {"csrf_token": generate_csrf_token()}
 
 
 # ── Me (current user info) ────────────────────────────────────────────────────
@@ -467,7 +985,15 @@ async def get_me(
     db=Depends(get_db),
     user: dict = Depends(__import__('api.auth.dependencies', fromlist=['require_auth']).require_auth),
 ):
-    row = _get_conn(db).execute("SELECT id, email, provider FROM users WHERE id = ?", (user["id"],)).fetchone()
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    _factory = _gsf()
+    async with _factory() as _session:
+        _result = await _session.execute(
+            _sa_text("SELECT id, email, provider FROM users WHERE id = :uid"),
+            {"uid": user["id"]},
+        )
+        row = _result.first()
     if not row:
         raise HTTPException(status_code=404, detail="Utilisateur non trouve")
     return UserOut(id=row[0], email=row[1], provider=row[2])

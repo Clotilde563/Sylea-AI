@@ -1,5 +1,18 @@
 // Types TypeScript miroir des schémas Pydantic de l'API Syléa.AI
 
+export interface AgentProposal {
+  id: string
+  agent_label: string         // 'agent1' | 'agent2'
+  type: string                // 'evenement' | 'decision_majeure' | 'info_profil_critique'
+  description: string
+  impact_jours: number
+  resume: string
+  rationale: string
+  target_so_hint: string
+  statut: string              // 'pending' | 'confirmed' | 'rejected'
+  created_at: string
+}
+
 export interface DeviceContext {
   heure: number
   minute: number
@@ -123,6 +136,21 @@ export interface ActionAgent {
   execute_le: string
 }
 
+export interface RappelPeriode {
+  index: number
+  label: string
+  description: string
+  responded_at: string | null
+  repondu: boolean
+}
+
+export interface DecisionRappels {
+  mode: 'validated' | 'abandoned'
+  nb_periodes: number
+  nb_repondu: number
+  periodes: RappelPeriode[]
+}
+
 export interface Decision {
   id: string
   user_id: string
@@ -140,6 +168,8 @@ export interface Decision {
   sous_objectif_impacte?: string | null
   sous_objectif_id?: string | null
   impact_sous_objectif?: number | null
+  // Detail des rappels (dilemmes issus du suivi/tracking). null sinon.
+  rappels?: DecisionRappels | null
 }
 
 export interface ProbabiliteResult {
@@ -239,4 +269,65 @@ export interface CompleterTacheResult {
 // Personnalite IA
 export interface PersonnaliteIA {
   phrase: string
+}
+
+// ─── Dilemme tracking (nouveau systeme) ───────────────────────────────────
+export type TrackingStatus = 'tracking' | 'awaiting_validation' | 'validated' | 'cancelled'
+
+export interface TrackingOption {
+  lettre: string
+  description: string
+  impact_jours: number
+  pros: string[]
+  cons: string[]
+  resume: string
+}
+
+export interface TrackingChoice {
+  periode_idx: number
+  choice: string | null  // "0", "1", ..., "none", ou null si pas encore repondu
+  responded_at: string | null
+  retry_count: number
+}
+
+export interface TrackingItem {
+  id: string
+  question: string
+  options: TrackingOption[]
+  verdict: string
+  etude_scientifique: string
+  impact_temporel_jours: number
+  nb_periodes: number
+  device_tz: string
+  choices: TrackingChoice[]
+  status: TrackingStatus
+  impact_final_jours: number | null
+  impact_final_probabilite: number | null
+  so_impactes: { titre: string; progression_avant: number; progression_apres: number; est_cible: boolean }[]
+  cancellation_mode: 'zero' | 'partial' | null
+  next_notif_at: string | null
+  created_at: string
+  validated_at: string | null
+  cancelled_at: string | null
+}
+
+export interface TrackingRecapBreakdown {
+  option: string  // "0", "1", ..., "none"
+  label: string
+  nb_clicks: number
+  percentage: number
+  impact_pondere: number
+}
+
+export interface TrackingRecap {
+  ok: boolean
+  tracking_id: string
+  status: TrackingStatus
+  recap: {
+    breakdown: TrackingRecapBreakdown[]
+    impact_total_jours: number
+    nb_periodes: number
+  }
+  delta_probabilite_preview: number
+  probabilite_actuelle: number
 }

@@ -177,18 +177,22 @@ class TestDispatcherFriendlyErrors:
         assert r["raw"]["friendly"] == r["content"]
 
     async def test_exception_in_dispatcher_also_friendly(self, dispatcher):
+        # Note : BROWSER est devenu un handler natif (Phase 14I) qui passe par
+        # Playwright direct, plus par openclaw_invoke_tool. On utilise donc EXEC
+        # (un des 38 outils OpenClaw directs) pour valider que les exceptions
+        # cote Gateway produisent un message friendly via _openclaw_direct.
         from httpx import TimeoutException
         with patch(
             "api.openclaw_bridge.openclaw_invoke_tool",
-            new=AsyncMock(side_effect=TimeoutException("Navigation timeout after 30s")),
+            new=AsyncMock(side_effect=TimeoutException("Operation timeout after 30s")),
         ):
-            r = await dispatcher.execute("BROWSER", {"args": {"url": "https://x.com"}})
+            r = await dispatcher.execute("EXEC", {"args": {"command": "ls"}})
         assert r["is_error"] is True
-        # "timeout" doit etre dans le message FR (pattern specifique browser
-        # OU fallback commun "timeout" du _COMMON_OPENCLAW_ERRORS).
-        assert ("navigation" in r["content"].lower()
-                or "temps" in r["content"].lower()
-                or "delai" in r["content"].lower())
+        # "timeout" doit etre dans le message FR via friendly_exception_message
+        # ("Operation interrompue : delai depasse.").
+        assert ("temps" in r["content"].lower()
+                or "delai" in r["content"].lower()
+                or "interrompue" in r["content"].lower())
 
     async def test_rate_limit_propagated_friendly(self, dispatcher):
         fake_resp = {"success": False, "error": "429 rate limit exceeded for Perplexity API"}

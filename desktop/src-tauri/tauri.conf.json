@@ -23,7 +23,10 @@
         "transparent": true,
         "shadow": true
       }
-    ]
+    ],
+    "security": {
+      "csp": "default-src 'self' data: blob:; connect-src 'self' http://localhost:8000 ws://localhost:8000 http://127.0.0.1:8000 ws://127.0.0.1:8000 https://api.anthropic.com https://api.openai.com; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self' 'unsafe-inline'"
+    }
   },
   "bundle": {
     "active": true,
@@ -32,21 +35,49 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.ico"
+      "icons/icon.ico",
+      "icons/icon.icns"
     ],
-    "shortDescription": "Assistant AI Sylea — moteur OpenClaw local",
-    "longDescription": "Sylea installe son moteur AI OpenClaw (licence MIT, 38 outils) et connecte vos skills ClawHub preferes — calendrier, email, notes, communication, taches — pour vous accompagner dans vos decisions au quotidien.",
+    "shortDescription": "Assistant AI Syléa — moteur OpenClaw local",
+    "longDescription": "Syléa installe son moteur AI OpenClaw (licence MIT) et connecte vos skills ClawHub préférés — calendrier, email, notes, communication, tâches — pour vous accompagner dans vos décisions au quotidien.",
     "category": "Productivity",
-    "copyright": "(c) 2026 Sylea"
+    "copyright": "(c) 2026 Syléa",
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "exceptionDomain": "",
+      "signingIdentity": null,
+      "providerShortName": null,
+      "entitlements": "entitlements.plist",
+      "frameworks": []
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libssl3"]
+      },
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    }
   },
   "plugins": {
     "updater": {
-      "active": true,
+      "active": false,
       "endpoints": [
         "https://github.com/Clotilde563/Sylea-AI/releases/latest/download/latest.json"
       ],
       "dialog": false,
       "pubkey": ""
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["sylea"]
+      },
+      "mobile": [
+        {
+          "host": "sylea.ai",
+          "pathPrefix": ["/auth/callback"]
+        }
+      ]
     }
   }
 }

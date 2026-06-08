@@ -138,8 +138,8 @@ class AnalyseOptionOut(BaseModel):
     description: str
     pros: List[str]
     cons: List[str]
-    impact_probabilite: float = 0.0  # kept for backward compat
-    impact_jours: float = 0.0
+    impact_probabilite: float = Field(0.0, ge=-100.0, le=100.0)  # kept for backward compat
+    impact_jours: float = Field(0.0, ge=-36525.0, le=36525.0)  # borne anti-cheat (max 100 ans) — rejet 422 si hors borne, puis clamp server-side vs temps_initial
     resume: str
 
 
@@ -180,6 +180,24 @@ class ActionAgentOut(BaseModel):
     execute_le: str
 
 
+class RappelPeriodeOut(BaseModel):
+    """Une periode (rappel) d'un dilemme suivi en mode TRACKING."""
+    index: int
+    label: str
+    description: str = ""
+    responded_at: Optional[str] = None
+    repondu: bool = False
+
+
+class RappelsOut(BaseModel):
+    """Detail des rappels d'un dilemme issu du TRACKING (valide ou abandonne).
+    None pour les decisions classiques."""
+    mode: str  # 'validated' | 'abandoned'
+    nb_periodes: int = 0
+    nb_repondu: int = 0
+    periodes: List[RappelPeriodeOut] = []
+
+
 class DecisionOut(BaseModel):
     id: str
     user_id: str
@@ -198,9 +216,31 @@ class DecisionOut(BaseModel):
     sous_objectif_id: Optional[str] = None
     impact_sous_objectif: Optional[float] = None
 
+    # Cascade detail : tous les SOs touches (cible + ceux affectes par
+    # l'overflow). None si pas applicable (ex: dilemme classique).
+    sous_objectifs_impactes: Optional[List["SousObjectifImpactItem"]] = None
+
     # Temps-based fields
     temps_gagne_avant: float = 0.0
     temps_gagne_apres: float = 0.0
+
+    # Detail des rappels (dilemmes issus du mode TRACKING). None sinon.
+    rappels: Optional[RappelsOut] = None
+
+
+class SousObjectifImpactItem(BaseModel):
+    """Detail de l'impact d'une decision sur un sous-objectif particulier.
+
+    Utilise pour expliquer a l'utilisateur le cascade d'overflow lorsqu'un
+    event depasse la capacite du SO cible.
+    """
+    so_id: str
+    titre: str
+    progression_avant: float
+    progression_apres: float
+    delta_pct: float          # progression_apres - progression_avant
+    est_cible: bool           # True si l'IA a designe ce SO comme cible principale
+    est_complete: bool        # True si progression_apres == 100
 
 
 # ── Probabilité ───────────────────────────────────────────────────────────────
@@ -261,16 +301,16 @@ class EvenementIn(BaseModel):
 
 class AnalyseEvenementOut(BaseModel):
     resume: str
-    impact_probabilite: float = 0.0  # kept for backward compat
-    impact_jours: float = 0.0
+    impact_probabilite: float = Field(0.0, ge=-100.0, le=100.0)  # kept for backward compat
+    impact_jours: float = Field(0.0, ge=-36525.0, le=36525.0)  # borne anti-cheat (max 100 ans) — rejet 422 si hors borne, puis clamp server-side vs temps_initial
     explication: str
     conseil: str
 
 
 class ConfirmerEvenementIn(BaseModel):
     description: str
-    impact_probabilite: float = 0.0  # kept for backward compat
-    impact_jours: float = 0.0
+    impact_probabilite: float = Field(0.0, ge=-100.0, le=100.0)  # kept for backward compat
+    impact_jours: float = Field(0.0, ge=-36525.0, le=36525.0)  # borne anti-cheat (max 100 ans) — rejet 422 si hors borne, puis clamp server-side vs temps_initial
     resume: str
     contexte_appareil: Optional[DeviceContextIn] = None
 
@@ -404,3 +444,28 @@ class HistoriquePagineOut(BaseModel):
     page: int
     par_page: int
     pages_total: int
+
+
+# -- Pending actions (decisions en attente de confirmation) ------------------
+# Migration 2026-05-16 : ajout pour /api/pending router.
+
+class PendingActionOut(BaseModel):
+    """Decision/evenement en attente de confirmation utilisateur."""
+    id: str
+    source_type: str            # 'event' | 'dilemma'
+    source_id: Optional[str] = None
+    description: str
+    impact_jours: float
+    cree_le: str
+    echeance_le: str
+    prochaine_verification_le: str
+    statut: str                 # 'pending' | 'in_progress' | 'completed' | 'abandoned'
+    verifications_ok_count: int = 0
+    derniere_reponse_le: Optional[str] = None
+    is_long_terme: bool = False
+    is_final_check: bool = False
+
+
+class PendingRespondIn(BaseModel):
+    """Reponse Oui/Non a une pending_action."""
+    response: bool   # True = Oui (continuer ou completer), False = Non (abandon)

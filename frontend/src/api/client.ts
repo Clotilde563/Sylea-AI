@@ -16,19 +16,81 @@ import type {
   CompleterTacheResult,
   PersonnaliteIA,
   DeviceContext,
+  AgentProposal,
 } from '../types'
 
 export const API_BASE = import.meta.env.VITE_API_URL || ''
 const BASE = `${API_BASE}/api`
 const AUTH_TOKEN_KEY = 'sylea_auth_token'
+const CSRF_COOKIE_NAME = 'sylea_csrf'
+const CSRF_HEADER_NAME = 'X-CSRF-Token'
 
-export function getAuthHeaders(): Record<string, string> {
+/**
+ * Lit le cookie CSRF posé par le backend sur chaque GET.
+ *
+ * Le cookie est non-HttpOnly (lisible JS) pour que ce double-submit
+ * pattern fonctionne : on lit le cookie côté JS et on le renvoie en
+ * header `X-CSRF-Token` sur tous les POST/PUT/PATCH/DELETE.
+ *
+ * Voir api/csrf_middleware.py côté backend.
+ */
+function getCsrfToken(): string {
+  try {
+    const match = document.cookie
+      .split('; ')
+      .find((c) => c.startsWith(`${CSRF_COOKIE_NAME}=`))
+    return match ? match.split('=')[1] : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * Méthodes HTTP qui nécessitent un token CSRF côté backend.
+ * Doit matcher api/csrf_middleware.py _UNSAFE_METHODS.
+ */
+const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+export function getAuthHeaders(method?: string): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const token = localStorage.getItem(AUTH_TOKEN_KEY)
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
   }
+  // FIX P1 (2026-06) : on attache le X-CSRF-Token DES QU'un cookie existe,
+  // quelle que soit la methode. Avant, ~19 fetch hand-rolled appelaient
+  // getAuthHeaders() SANS method -> aucun CSRF -> 403 (ou bypass si le backend
+  // skippait). Le backend ne VALIDE le token que sur POST/PUT/PATCH/DELETE
+  // (cf _UNSAFE_METHODS), donc l'envoyer sur un GET est inoffensif. `method`
+  // reste accepte pour compat mais n'est plus la condition.
+  void method  // conserve la signature (compat appelants existants)
+  const csrf = getCsrfToken()
+  if (csrf) {
+    headers[CSRF_HEADER_NAME] = csrf
+  }
   return headers
+}
+
+/**
+ * Garantit qu'on a un cookie CSRF avant la première requête mutante.
+ *
+ * Le cookie est posé par le backend sur n'importe quel GET. On déclenche
+ * donc un GET léger (/api/health) si on n'a pas encore de cookie en
+ * localStorage flag. Idempotent — appelable plusieurs fois sans coût.
+ */
+let _csrfReady = false
+async function ensureCsrfCookie(): Promise<void> {
+  if (_csrfReady || getCsrfToken()) {
+    _csrfReady = true
+    return
+  }
+  try {
+    await fetch(`${API_BASE}/api/health`, { credentials: 'include' })
+    _csrfReady = true
+  } catch {
+    // si /api/health échoue, on ne bloque pas — le backend renverra l'erreur réelle
+    // sur l'appel mutant
+  }
 }
 
 // Messages FR user-friendly par status HTTP.
@@ -51,11 +113,29 @@ async function request<T>(
   path: string,
   options?: RequestInit,
 ): Promise<T> {
+  const method = (options?.method || 'GET').toUpperCase()
+  // Avant un POST/PUT/PATCH/DELETE : on s'assure qu'on a bien un cookie CSRF.
+  // Le cookie est posé par le backend sur n'importe quel GET (cf. CSRFMiddleware).
+  if (UNSAFE_METHODS.has(method)) {
+    await ensureCsrfCookie()
+  }
+
+  // Merge des headers : custom headers passés par l'appelant > auth/CSRF.
+  // On utilise un Headers object pour gérer la casse correctement.
+  const finalHeaders: Record<string, string> = {
+    ...getAuthHeaders(method),
+    ...(options?.headers as Record<string, string> | undefined),
+  }
+
   let res: Response
   try {
     res = await fetch(`${BASE}${path}`, {
-      headers: getAuthHeaders(),
       ...options,
+      headers: finalHeaders,
+      // credentials: 'include' = envoie les cookies cross-origin
+      // (localhost:5173 frontend <-> localhost:8000 backend).
+      // Nécessaire pour que le cookie sylea_csrf soit propagé.
+      credentials: 'include',
     })
   } catch (e) {
     // Erreurs réseau (offline, CORS, DNS) — pas de res.ok
@@ -80,7 +160,17 @@ async function request<T>(
     }
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     const friendly = HTTP_STATUS_FR[res.status]
-    const detail = err.detail || friendly || `Erreur ${res.status}`
+    // err.detail peut etre une string OU un objet structure (e.g. 409 USE_OAUTH
+    // / USE_PASSWORD avec {code, provider, message}). On extrait le message
+    // dans les deux cas pour eviter un "[object Object]" peu utile a l'user.
+    let detail: string
+    if (typeof err.detail === 'string') {
+      detail = err.detail
+    } else if (err.detail && typeof err.detail === 'object' && typeof err.detail.message === 'string') {
+      detail = err.detail.message
+    } else {
+      detail = friendly || `Erreur ${res.status}`
+    }
     throw new Error(detail)
   }
   return res.json() as Promise<T>
@@ -116,10 +206,18 @@ export const api = {
     const token = localStorage.getItem(AUTH_TOKEN_KEY)
     const fd = new FormData()
     fd.append('file', file)
+    // FIX (2026-05-28) : ajouter le header CSRF (POST est dans UNSAFE_METHODS,
+    // sinon le backend renvoie 403 csrf_missing). Idem credentials:'include'
+    // pour envoyer le cookie de session.
+    const headers: Record<string, string> = {}
+    if (token) headers.Authorization = `Bearer ${token}`
+    const csrf = getCsrfToken()
+    if (csrf) headers[CSRF_HEADER_NAME] = csrf
     const r = await fetch(`${BASE}/profil/photo`, {
       method: 'POST',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      headers,
       body: fd,
+      credentials: 'include',
     })
     if (!r.ok) {
       const err = await r.json().catch(() => ({}))
@@ -164,6 +262,75 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+
+  // ── Dilemme tracking (nouveau systeme avec notifications) ────────────────
+
+  // Cree un tracking : pas d'impact immediat, l'user repondra via notifs
+  trackingCreate: (data: {
+    question: string
+    options: {
+      lettre: string
+      description: string
+      impact_jours: number
+      pros: string[]
+      cons: string[]
+      resume: string
+    }[]
+    impact_temporel_jours: number
+    verdict?: string
+    etude_scientifique?: string
+    device_tz?: string
+  }): Promise<{ ok: boolean; tracking: TrackingItem }> =>
+    request('/dilemme/tracking/create', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  // Liste les trackings de l'user (filtrable par status)
+  trackingList: (status?: TrackingStatus): Promise<{ ok: boolean; items: TrackingItem[] }> =>
+    request(`/dilemme/tracking${status ? `?status=${status}` : ''}`),
+
+  // Detail d'un tracking
+  trackingGet: (id: string): Promise<{ ok: boolean; tracking: TrackingItem }> =>
+    request(`/dilemme/tracking/${id}`),
+
+  // Repondre a une periode (depuis notif OS, banner in-app, ou Mes dilemmes)
+  trackingRespond: (id: string, periode_idx: number, choice: string): Promise<{
+    ok: boolean; all_responded: boolean; nb_responded: number; nb_total: number;
+    next_notif_at: string | null;
+  }> =>
+    request(`/dilemme/tracking/${id}/respond`, {
+      method: 'POST',
+      body: JSON.stringify({ periode_idx, choice }),
+    }),
+
+  // Recuperer le recap pondere avant validation finale
+  trackingRecap: (id: string): Promise<TrackingRecap> =>
+    request(`/dilemme/tracking/${id}/recap`),
+
+  // Valider definitivement -> applique impact sur profil + cascade SO
+  trackingValidate: (id: string): Promise<{
+    ok: boolean; impact_jours_applique: number; delta_probabilite: number;
+    so_impactes: { titre: string; progression_avant: number; progression_apres: number; est_cible: boolean }[];
+    recap?: TrackingRecap['recap'];
+  }> =>
+    request(`/dilemme/tracking/${id}/validate`, { method: 'POST' }),
+
+  // Annuler (zero = aucun impact, partial = applique l'impact deja accumule)
+  // = "Abandonner" cote UI : conserve dans l'historique avec status='cancelled'
+  trackingCancel: (id: string, mode: 'zero' | 'partial'): Promise<{
+    ok: boolean; mode: string; impact_jours_applique: number; delta_probabilite: number;
+  }> =>
+    request(`/dilemme/tracking/${id}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }),
+
+  // Supprimer = "Supprimer" cote UI : retire completement de la DB, aucune
+  // trace dans l'historique. Aucun impact applique. Pour les dilemmes
+  // crees par erreur ou regrettes.
+  trackingDelete: (id: string): Promise<{ ok: boolean; deleted: boolean; tracking_id: string }> =>
+    request(`/dilemme/tracking/${id}`, { method: 'DELETE' }),
 
   // ── Historique ────────────────────────────────────────────────────────────
 
@@ -298,8 +465,8 @@ export const api = {
 
   // ── Agent companion (Agent Sylea 1) ──────────────────────────────────
 
-  agentChat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; audioData?: string }> =>
-    request<{ message: string; choices?: string[]; audioData?: string }>('/agent/chat', {
+  agentChat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; audioData?: string; proposal?: AgentProposal | null }> =>
+    request<{ message: string; choices?: string[]; audioData?: string; proposal?: AgentProposal | null }>('/agent/chat', {
       method: 'POST',
       body: JSON.stringify({ messages, contexte_appareil, audio_data: audioData }),
     }),
@@ -313,16 +480,40 @@ export const api = {
   agentProactive: (): Promise<{ message: string | null }> =>
     request('/agent/proactive', { method: 'POST' }),
 
+  // ── Agent proposals (boutons Confirmer/Refuser dans la chat) ────────────
+  listAgentProposals: (): Promise<AgentProposal[]> =>
+    request('/agent/proposals'),
+
+  confirmAgentProposal: (id: string): Promise<{ detail: string; decision_id: string; sous_objectif_impacte: string | null; temps_gagne_jours: number; probabilite_actuelle: number }> =>
+    request(`/agent/proposals/${id}/confirm`, { method: 'POST' }),
+
+  rejectAgentProposal: (id: string): Promise<{ detail: string }> =>
+    request(`/agent/proposals/${id}/reject`, { method: 'POST' }),
+
   agentCheckContext: (type: string, question: string, options?: string[], deviceContext?: DeviceContext): Promise<{ needs_context: boolean; agent_question: string | null; choices: string[] | null }> =>
     request('/agent/check-context', {
       method: 'POST',
       body: JSON.stringify({ type, question, options, contexte_appareil: deviceContext }),
     }),
 
-  agentSaveContext: (contextText: string, relatedTo: string, type?: string, question?: string, options?: string[]): Promise<{ ok: boolean; sufficient: boolean; feedback: string | null }> =>
+  agentSaveContext: (
+    contextText: string,
+    relatedTo: string,
+    type?: string,
+    question?: string,
+    options?: string[],
+    attempt?: number,
+  ): Promise<{ ok: boolean; sufficient: boolean; feedback: string | null }> =>
     request('/agent/save-context', {
       method: 'POST',
-      body: JSON.stringify({ context_text: contextText, related_to: relatedTo, type: type || 'dilemme', question: question || '', options }),
+      body: JSON.stringify({
+        context_text: contextText,
+        related_to: relatedTo,
+        type: type || 'dilemme',
+        question: question || '',
+        options,
+        attempt: attempt || 1,
+      }),
     }),
 
   agentTTS: async (text: string): Promise<Blob | null> => {
@@ -364,6 +555,11 @@ export const api = {
   authMe: (): Promise<{ id: string; email: string; provider: string }> =>
     request('/auth/me'),
 
+  // Logout server-side : revoque tous les tokens (tokens_invalidated_before).
+  // Best-effort — le client purge son localStorage quoi qu'il arrive.
+  authLogout: (): Promise<{ ok: boolean; detail: string }> =>
+    request('/auth/logout', { method: 'POST' }),
+
   // Google OAuth
   authGoogleUrl: (redirectUri?: string, state: string = 'login'): Promise<{ url: string }> => {
     const params = new URLSearchParams()
@@ -391,10 +587,34 @@ export const api = {
       body: JSON.stringify({ code, redirect_uri: redirectUri }),
     }),
 
+  // Apple Sign-In
+  authAppleUrl: (redirectUri?: string, state: string = 'login'): Promise<{ url: string; state: string }> => {
+    const params = new URLSearchParams()
+    if (redirectUri) params.set('redirect_uri', redirectUri)
+    params.set('state', state)
+    return request(`/auth/oauth/apple/url?${params.toString()}`)
+  },
+
+  authOAuthApple: (
+    code: string,
+    redirectUri: string,
+    options?: { firstName?: string; lastName?: string; idToken?: string },
+  ): Promise<{ access_token: string }> =>
+    request('/auth/oauth/apple', {
+      method: 'POST',
+      body: JSON.stringify({
+        code,
+        redirect_uri: redirectUri,
+        first_name: options?.firstName,
+        last_name: options?.lastName,
+        id_token: options?.idToken,
+      }),
+    }),
+
   // ── Agent assistant (Agent Sylea 2) ──────────────────────────────────
 
-  agent2Chat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string }> =>
-    request<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string }>('/agent2/chat', {
+  agent2Chat: (messages: Array<{ role: string; content: string; type?: string }>, contexte_appareil?: DeviceContext, audioData?: string): Promise<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string; proposal?: AgentProposal | null }> =>
+    request<{ message: string; choices?: string[]; actions?: Array<{ type: string; data: Record<string, string> }>; audioData?: string; proposal?: AgentProposal | null }>('/agent2/chat', {
       method: 'POST',
       body: JSON.stringify({ messages, contexte_appareil, audio_data: audioData }),
     }),
@@ -1873,9 +2093,9 @@ export const api = {
 
   getPlan: (): Promise<{
     plan: {
-      name: 'free' | 'pro' | 'team'
+      name: 'free' | 'advanced' | 'pro' | 'team'
       display_name: string
-      price_usd: number
+      price_eur: number
       limits: Record<string, number>
       started_at?: string
       expires_at?: string
@@ -2164,14 +2384,17 @@ export const api = {
   stripeConfig: (): Promise<{ configured: boolean }> =>
     request('/agent3/stripe/config'),
 
-  stripeCheckout: (plan: 'pro' | 'team'): Promise<{
+  stripeCheckout: (
+    plan: 'advanced' | 'team',
+    opts: { coupon?: string } = {},
+  ): Promise<{
     ok: boolean
     url?: string
     session_id?: string
     error?: string
   }> => request('/agent3/stripe/checkout', {
     method: 'POST',
-    body: JSON.stringify({ plan }),
+    body: JSON.stringify({ plan, ...opts }),
   }),
 
   stripePortal: (): Promise<{

@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from sylea.core.storage.repositories import ProfilRepository
 from api.schemas import BilanIn, BilanOut, BilanCheckOut
-from api.dependencies import get_profil_repo, get_db, get_optional_user
+from api.dependencies import get_profil_repo, get_optional_user
 
 router = APIRouter(prefix="/api/bilan", tags=["bilan"])
 
@@ -25,9 +25,11 @@ router = APIRouter(prefix="/api/bilan", tags=["bilan"])
 async def check_bilan_aujourdhui(
     user_id: str | None = Depends(get_optional_user),
     profil_repo: ProfilRepository = Depends(get_profil_repo),
-    db=Depends(get_db),
 ):
-    """Verifie si un bilan existe pour aujourd'hui."""
+    """Verifie si un bilan existe pour aujourd'hui.
+
+    Migration PG : SELECT via SQLAlchemy text() — compatible SQLite + PG.
+    """
     if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
 
@@ -36,10 +38,15 @@ async def check_bilan_aujourdhui(
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
     today = date.today().isoformat()
-    row = db.conn.execute(
-        "SELECT * FROM bilans_quotidiens WHERE user_id = ? AND date = ?",
-        (profil.id, today),
-    ).fetchone()
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text("SELECT * FROM bilans_quotidiens WHERE user_id = :uid AND date = :date"),
+            {"uid": profil.id, "date": today},
+        )
+        row = result.mappings().first()
 
     if row:
         return BilanCheckOut(
@@ -68,9 +75,12 @@ async def creer_bilan(
     data: BilanIn,
     user_id: str | None = Depends(get_optional_user),
     profil_repo: ProfilRepository = Depends(get_profil_repo),
-    db=Depends(get_db),
 ):
-    """Cree le bilan du jour et met a jour les scores du profil."""
+    """Cree le bilan du jour et met a jour les scores du profil.
+
+    Migration PG : SELECT-then-UPDATE/INSERT via SQLAlchemy text() —
+    portable SQLite + PostgreSQL (remplace `INSERT OR REPLACE`).
+    """
     if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
 
@@ -82,22 +92,83 @@ async def creer_bilan(
     now = datetime.now().isoformat()
     bilan_id = str(uuid.uuid4())
 
-    # Inserer ou remplacer le bilan du jour
-    db.conn.execute(
-        """INSERT OR REPLACE INTO bilans_quotidiens
-           (id, user_id, date, niveau_sante, niveau_stress, niveau_energie, niveau_bonheur,
-            heures_travail, heures_sommeil, heures_loisirs, heures_transport, heures_objectif,
-            description, cree_le)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            bilan_id, profil.id, today,
-            data.niveau_sante, data.niveau_stress, data.niveau_energie, data.niveau_bonheur,
-            data.heures_travail, data.heures_sommeil, data.heures_loisirs,
-            data.heures_transport, data.heures_objectif,
-            data.description, now,
-        ),
-    )
-    db.conn.commit()
+    # Inserer ou remplacer le bilan du jour (SELECT puis UPDATE/INSERT pour PG-compat)
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            existing = await session.execute(
+                text(
+                    "SELECT id FROM bilans_quotidiens "
+                    "WHERE user_id = :uid AND date = :date"
+                ),
+                {"uid": profil.id, "date": today},
+            )
+            existing_row = existing.first()
+
+            if existing_row is not None:
+                # UPDATE — on garde l'id existant
+                bilan_id = existing_row[0]
+                await session.execute(
+                    text(
+                        "UPDATE bilans_quotidiens SET "
+                        " niveau_sante = :ns, niveau_stress = :nstr, "
+                        " niveau_energie = :ne, niveau_bonheur = :nb, "
+                        " heures_travail = :ht, heures_sommeil = :hs, "
+                        " heures_loisirs = :hl, heures_transport = :htr, "
+                        " heures_objectif = :ho, description = :desc, "
+                        " cree_le = :now "
+                        "WHERE id = :id"
+                    ),
+                    {
+                        "ns": data.niveau_sante,
+                        "nstr": data.niveau_stress,
+                        "ne": data.niveau_energie,
+                        "nb": data.niveau_bonheur,
+                        "ht": data.heures_travail,
+                        "hs": data.heures_sommeil,
+                        "hl": data.heures_loisirs,
+                        "htr": data.heures_transport,
+                        "ho": data.heures_objectif,
+                        "desc": data.description,
+                        "now": now,
+                        "id": bilan_id,
+                    },
+                )
+            else:
+                # INSERT
+                await session.execute(
+                    text(
+                        "INSERT INTO bilans_quotidiens "
+                        "(id, user_id, date, niveau_sante, niveau_stress, "
+                        " niveau_energie, niveau_bonheur, heures_travail, "
+                        " heures_sommeil, heures_loisirs, heures_transport, "
+                        " heures_objectif, description, cree_le) "
+                        "VALUES (:id, :uid, :date, :ns, :nstr, :ne, :nb, "
+                        " :ht, :hs, :hl, :htr, :ho, :desc, :now)"
+                    ),
+                    {
+                        "id": bilan_id,
+                        "uid": profil.id,
+                        "date": today,
+                        "ns": data.niveau_sante,
+                        "nstr": data.niveau_stress,
+                        "ne": data.niveau_energie,
+                        "nb": data.niveau_bonheur,
+                        "ht": data.heures_travail,
+                        "hs": data.heures_sommeil,
+                        "hl": data.heures_loisirs,
+                        "htr": data.heures_transport,
+                        "ho": data.heures_objectif,
+                        "desc": data.description,
+                        "now": now,
+                    },
+                )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
     # Mettre a jour le profil avec les nouveaux scores
     profil.niveau_sante = data.niveau_sante
@@ -134,9 +205,11 @@ async def historique_bilans(
     limite: int = 30,
     user_id: str | None = Depends(get_optional_user),
     profil_repo: ProfilRepository = Depends(get_profil_repo),
-    db=Depends(get_db),
 ):
-    """Liste des bilans recents."""
+    """Liste des bilans recents.
+
+    Migration PG : SELECT via SQLAlchemy text() — compatible SQLite + PG.
+    """
     if not profil_repo.existe(auth_user_id=user_id):
         raise HTTPException(status_code=404, detail="Aucun profil trouve.")
 
@@ -144,10 +217,15 @@ async def historique_bilans(
     if profil is None:
         raise HTTPException(status_code=404, detail="Profil introuvable.")
 
-    rows = db.conn.execute(
-        "SELECT * FROM bilans_quotidiens WHERE user_id = ? ORDER BY date DESC LIMIT ?",
-        (profil.id, limite),
-    ).fetchall()
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text("SELECT * FROM bilans_quotidiens WHERE user_id = :uid ORDER BY date DESC LIMIT :limite"),
+            {"uid": profil.id, "limite": limite},
+        )
+        rows = result.mappings().all()
 
     return [
         BilanOut(

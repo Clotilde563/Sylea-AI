@@ -140,6 +140,12 @@ class Decision:
     impact_sous_objectif: float = 0.0
     temps_gagne_avant: float = 0.0
     temps_gagne_apres: float = 0.0
+    # Detail des rappels (dilemmes issus du mode TRACKING uniquement) : reponses
+    # periode par periode. None pour les decisions classiques. Structure :
+    #   {"mode": "validated"|"abandoned", "nb_periodes": int, "nb_repondu": int,
+    #    "periodes": [{"index": int, "label": str, "description": str,
+    #                  "responded_at": str|None, "repondu": bool}, ...]}
+    rappels: Optional[dict] = None
     cree_le: datetime = field(default_factory=datetime.now)
 
     def get_option_choisie(self) -> Optional[OptionDilemme]:
@@ -173,6 +179,11 @@ class Decision:
             "impact_sous_objectif": self.impact_sous_objectif,
             "temps_gagne_avant": self.temps_gagne_avant,
             "temps_gagne_apres": self.temps_gagne_apres,
+            "rappels_json": (
+                json.dumps(self.rappels, ensure_ascii=False)
+                if self.rappels
+                else None
+            ),
         }
 
     @classmethod
@@ -207,4 +218,10 @@ class Decision:
         )
         decision.id = data["id"]
         decision.cree_le = datetime.fromisoformat(data["cree_le"])
+        rappels_raw = data.get("rappels_json")
+        if rappels_raw:
+            try:
+                decision.rappels = json.loads(rappels_raw)
+            except (ValueError, TypeError):
+                decision.rappels = None
         return decision

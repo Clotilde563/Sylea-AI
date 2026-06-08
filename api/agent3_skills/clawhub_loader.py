@@ -57,6 +57,11 @@ logger = logging.getLogger("sylea.agent3.clawhub_loader")
 # Garde pour migration / fallback backward-compat.
 LEGACY_USER_SKILLS_DIR = Path(os.path.expanduser("~/.openclaw/skills")).resolve()
 
+# Phase 14M : ClawHub CLI v2+ installe dans `~/.openclaw/workspace/skills/`
+# au lieu de `~/.openclaw/skills/`. Hoisted comme variable de module pour
+# permettre le monkeypatch dans les tests (cf. test_clawhub_loader_phase4).
+WORKSPACE_USER_SKILLS_DIR = Path(os.path.expanduser("~/.openclaw/workspace/skills")).resolve()
+
 
 def _sylea_users_root() -> Path:
     """Racine des donnees utilisateur Sylea. Overridable via SYLEA_USER_SKILLS_ROOT
@@ -441,9 +446,12 @@ def scan_all_skills(
     # 1bis) Phase 14M : ClawHub CLI v2+ installe dans ~/.openclaw/workspace/skills/
     # au lieu de ~/.openclaw/skills/. On scanne aussi ce dossier pour rendre
     # les skills auto-installees via clawhub_install() visibles a l'agent.
+    # Lecture via globals() pour respecter le monkeypatch des tests.
     if include_user:
         try:
-            workspace_user_dir = Path(os.path.expanduser("~/.openclaw/workspace/skills")).resolve()
+            workspace_user_dir = globals().get(
+                "WORKSPACE_USER_SKILLS_DIR", WORKSPACE_USER_SKILLS_DIR
+            )
             if workspace_user_dir.exists() and workspace_user_dir != user_dir:
                 for skill_md in _iter_skill_md_in(workspace_user_dir):
                     meta = parse_skill_md(skill_md)

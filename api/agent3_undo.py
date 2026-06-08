@@ -202,52 +202,77 @@ class UndoManager:
         return results
 
     async def _execute_rollback(self, snap: Snapshot) -> bool:
-        """Execute le rollback dans la base de donnees."""
-        if not self.db:
-            logger.warning("No DB for rollback")
-            return False
-
+        """Execute le rollback dans la base de donnees (version async)."""
         info = snap.rollback_info
         at = snap.action_type
+
+        from sqlalchemy import text
+        from api.database import get_session_factory
+        factory = get_session_factory()
 
         try:
             if at == "memory":
                 key = info.get("key", "")
                 restore = info.get("restore_value", "")
-                if restore:
-                    # Restaurer l'ancienne valeur
-                    self.db.conn.execute(
-                        "UPDATE agent3_memory SET value = ? WHERE auth_user_id = ? AND key = ?",
-                        (restore, self.user_id, key),
-                    )
-                else:
-                    # Supprimer (c'etait une nouvelle entree)
-                    self.db.conn.execute(
-                        "DELETE FROM agent3_memory WHERE auth_user_id = ? AND key = ?",
-                        (self.user_id, key),
-                    )
-                self.db.conn.commit()
-                return True
+                async with factory() as session:
+                    try:
+                        if restore:
+                            await session.execute(
+                                text(
+                                    "UPDATE agent3_memory SET value = :val "
+                                    "WHERE auth_user_id = :uid AND key = :key"
+                                ),
+                                {"val": restore, "uid": self.user_id, "key": key},
+                            )
+                        else:
+                            await session.execute(
+                                text(
+                                    "DELETE FROM agent3_memory "
+                                    "WHERE auth_user_id = :uid AND key = :key"
+                                ),
+                                {"uid": self.user_id, "key": key},
+                            )
+                        await session.commit()
+                        return True
+                    except Exception:
+                        await session.rollback()
+                        raise
 
             elif at == "cron":
                 cron_id = info.get("cron_id", "")
                 if cron_id:
-                    self.db.conn.execute(
-                        "DELETE FROM agent3_cron WHERE id = ? AND auth_user_id = ?",
-                        (cron_id, self.user_id),
-                    )
-                    self.db.conn.commit()
-                    return True
+                    async with factory() as session:
+                        try:
+                            await session.execute(
+                                text(
+                                    "DELETE FROM agent3_cron "
+                                    "WHERE id = :id AND auth_user_id = :uid"
+                                ),
+                                {"id": cron_id, "uid": self.user_id},
+                            )
+                            await session.commit()
+                            return True
+                        except Exception:
+                            await session.rollback()
+                            raise
 
             elif at == "task":
                 task_id = info.get("task_id", "")
                 if task_id:
-                    self.db.conn.execute(
-                        "DELETE FROM agent3_tasks WHERE id = ? AND auth_user_id = ?",
-                        (task_id, self.user_id),
-                    )
-                    self.db.conn.commit()
-                    return True
+                    async with factory() as session:
+                        try:
+                            await session.execute(
+                                text(
+                                    "DELETE FROM agent3_tasks "
+                                    "WHERE id = :id AND auth_user_id = :uid"
+                                ),
+                                {"id": task_id, "uid": self.user_id},
+                            )
+                            await session.commit()
+                            return True
+                        except Exception:
+                            await session.rollback()
+                            raise
 
             elif at == "file":
                 filename = info.get("filename", "")
@@ -266,19 +291,32 @@ class UndoManager:
                 restore = info.get("restore_value")
                 if key and restore is not None:
                     import json
-                    row = self.db.conn.execute(
-                        "SELECT preferences_json FROM agent3_preferences WHERE auth_user_id = ?",
-                        (self.user_id,),
-                    ).fetchone()
-                    if row:
-                        prefs = json.loads(row[0] or "{}")
-                        prefs[key] = restore
-                        self.db.conn.execute(
-                            "UPDATE agent3_preferences SET preferences_json = ? WHERE auth_user_id = ?",
-                            (json.dumps(prefs), self.user_id),
-                        )
-                        self.db.conn.commit()
-                        return True
+                    async with factory() as session:
+                        try:
+                            result = await session.execute(
+                                text(
+                                    "SELECT preferences_json FROM agent3_preferences "
+                                    "WHERE auth_user_id = :uid"
+                                ),
+                                {"uid": self.user_id},
+                            )
+                            row = result.first()
+                            if row:
+                                prefs = json.loads(row[0] or "{}")
+                                prefs[key] = restore
+                                await session.execute(
+                                    text(
+                                        "UPDATE agent3_preferences "
+                                        "SET preferences_json = :prefs "
+                                        "WHERE auth_user_id = :uid"
+                                    ),
+                                    {"prefs": json.dumps(prefs), "uid": self.user_id},
+                                )
+                                await session.commit()
+                                return True
+                        except Exception:
+                            await session.rollback()
+                            raise
 
             return False
 
@@ -321,3 +359,191 @@ def get_undo_manager(user_id: str, db=None) -> UndoManager:
     elif db and not _managers[user_id].db:
         _managers[user_id].db = db
     return _managers[user_id]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _execute_rollback_async(snap: Snapshot, user_id: str) -> bool:
+    """Version async/PG-compatible de UndoManager._execute_rollback.
+
+    Plus de parametre `db` : utilise get_session_factory() directement.
+    Encapsule la logique SQL pour les types `memory`, `cron`, `task`, `file`
+    et `setting`. Retourne True si le rollback a reussi, False sinon.
+    """
+    import json as _json
+    from sqlalchemy import text
+    from api.database import get_session_factory
+
+    info = snap.rollback_info
+    at = snap.action_type
+    factory = get_session_factory()
+
+    try:
+        if at == "memory":
+            key = info.get("key", "")
+            restore = info.get("restore_value", "")
+            async with factory() as session:
+                try:
+                    if restore:
+                        await session.execute(
+                            text(
+                                "UPDATE agent3_memory SET value = :val "
+                                "WHERE auth_user_id = :uid AND key = :key"
+                            ),
+                            {"val": restore, "uid": user_id, "key": key},
+                        )
+                    else:
+                        await session.execute(
+                            text(
+                                "DELETE FROM agent3_memory "
+                                "WHERE auth_user_id = :uid AND key = :key"
+                            ),
+                            {"uid": user_id, "key": key},
+                        )
+                    await session.commit()
+                    return True
+                except Exception:
+                    await session.rollback()
+                    raise
+
+        elif at == "cron":
+            cron_id = info.get("cron_id", "")
+            if cron_id:
+                async with factory() as session:
+                    try:
+                        await session.execute(
+                            text(
+                                "DELETE FROM agent3_cron "
+                                "WHERE id = :id AND auth_user_id = :uid"
+                            ),
+                            {"id": cron_id, "uid": user_id},
+                        )
+                        await session.commit()
+                        return True
+                    except Exception:
+                        await session.rollback()
+                        raise
+
+        elif at == "task":
+            task_id = info.get("task_id", "")
+            if task_id:
+                async with factory() as session:
+                    try:
+                        await session.execute(
+                            text(
+                                "DELETE FROM agent3_tasks "
+                                "WHERE id = :id AND auth_user_id = :uid"
+                            ),
+                            {"id": task_id, "uid": user_id},
+                        )
+                        await session.commit()
+                        return True
+                    except Exception:
+                        await session.rollback()
+                        raise
+
+        elif at == "file":
+            filename = info.get("filename", "")
+            was_new = info.get("was_new", True)
+            if was_new and filename:
+                import os
+                if os.path.exists(filename):
+                    os.remove(filename)
+                    return True
+                return True
+            return False
+
+        elif at == "setting":
+            key = info.get("key", "")
+            restore = info.get("restore_value")
+            if key and restore is not None:
+                async with factory() as session:
+                    try:
+                        result = await session.execute(
+                            text(
+                                "SELECT preferences_json FROM agent3_preferences "
+                                "WHERE auth_user_id = :uid"
+                            ),
+                            {"uid": user_id},
+                        )
+                        row = result.first()
+                        if row:
+                            prefs = _json.loads(row[0] or "{}")
+                            prefs[key] = restore
+                            await session.execute(
+                                text(
+                                    "UPDATE agent3_preferences "
+                                    "SET preferences_json = :json "
+                                    "WHERE auth_user_id = :uid"
+                                ),
+                                {"json": _json.dumps(prefs), "uid": user_id},
+                            )
+                            await session.commit()
+                            return True
+                    except Exception:
+                        await session.rollback()
+                        raise
+
+        return False
+
+    except Exception as e:
+        logger.error(f"Rollback async execution failed for {at}: {e}")
+        return False
+
+
+async def rollback_async(
+    manager: UndoManager, snapshot_id: str,
+) -> tuple[bool, str]:
+    """Version PG-compatible de UndoManager.rollback.
+
+    Identique en logique mais delegue le SQL au helper _execute_rollback_async,
+    qui utilise SQLAlchemy text() au lieu de db.conn.execute (compat SQLite + PG).
+    """
+    snap = next((s for s in manager._snapshots if s.id == snapshot_id), None)
+    if not snap:
+        return False, f"Snapshot {snapshot_id} introuvable"
+    if snap.rolled_back:
+        return False, f"Snapshot {snapshot_id} deja annule"
+    if time.time() - snap.created_at > manager.MAX_UNDO_AGE_SECONDS:
+        return False, (
+            f"Snapshot trop ancien ({int(time.time() - snap.created_at)}s > "
+            f"{manager.MAX_UNDO_AGE_SECONDS}s)"
+        )
+
+    try:
+        success = await _execute_rollback_async(snap, manager.user_id)
+        if success:
+            snap.rolled_back = True
+            snap.rolled_back_at = time.time()
+            logger.info(f"Rollback async successful: {snapshot_id} ({snap.action_type})")
+            return True, f"Annule : {snap.description}"
+        return False, f"Echec du rollback pour {snap.action_type}"
+    except Exception as e:
+        logger.error(f"Rollback async failed for {snapshot_id}: {e}")
+        return False, f"Erreur rollback : {e}"
+
+
+async def undo_last_async(manager: UndoManager) -> tuple[bool, str]:
+    """Version async de UndoManager.undo_last — PG-compatible."""
+    for snap in reversed(manager._snapshots):
+        if not snap.rolled_back and not snap.action_type == "message":
+            return await rollback_async(manager, snap.id)
+    return False, "Rien a annuler"
+
+
+async def undo_last_n_async(
+    manager: UndoManager, n: int = 1,
+) -> list[tuple[bool, str]]:
+    """Version async de UndoManager.undo_last_n — PG-compatible."""
+    results: list[tuple[bool, str]] = []
+    count = 0
+    for snap in reversed(manager._snapshots):
+        if count >= n:
+            break
+        if not snap.rolled_back:
+            result = await rollback_async(manager, snap.id)
+            results.append(result)
+            count += 1
+    return results

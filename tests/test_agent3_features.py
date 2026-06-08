@@ -34,35 +34,40 @@ TEST_USER_ID = "test-features-agent3"
 
 
 @pytest.fixture()
-def db():
-    """Base SQLite en memoire avec schema complet + tables Agent 3."""
-    manager = DatabaseManager(db_path=Path(":memory:"))
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    manager._conn = conn
-    manager._initialiser_schema()
+def db(tmp_path, monkeypatch):
+    """Shared-DB (sync + async) — migration PG."""
+    import asyncio as _asyncio
+    from tests.conftest import make_shared_db, dispose_shared_db
+    manager = make_shared_db(tmp_path, monkeypatch)
 
     try:
-        conn.execute(
+        manager._conn.execute(
             "ALTER TABLE profil_utilisateur ADD COLUMN objectif_probabilite_calculee REAL DEFAULT 0.0"
         )
     except Exception:
         pass
 
-    conn.execute(
+    manager._conn.execute(
         "INSERT INTO users (id, email, hashed_password, provider, created_at) "
         "VALUES (?, ?, ?, ?, datetime('now'))",
         (TEST_USER_ID, "test-features@test.com", "fake_hash", "local"),
     )
-    conn.commit()
+    manager._conn.commit()
 
-    from api.routers.agent3_openclaw import _ensure_agent3_tables
-    _ensure_agent3_tables(manager)
+    from api.routers.agent3_openclaw import _ensure_agent3_tables_async
+    _asyncio.run(_ensure_agent3_tables_async())
+
+    # Agent 3 est gate par le plan (team/enterprise). On bascule en team pour
+    # les tests d'endpoints (sinon 403 sur /api/agent3/chat*).
+    try:
+        from api.agent3_quotas import ensure_quota_tables, set_user_plan_async
+        ensure_quota_tables(manager)
+        _asyncio.run(set_user_plan_async(TEST_USER_ID, "team"))
+    except Exception:
+        pass
 
     yield manager
-    manager.disconnect()
+    dispose_shared_db(manager)
 
 
 @pytest.fixture()
@@ -180,7 +185,7 @@ class TestSlashCommandHelp:
     def test_help_returns_commands(self):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/help", {})
         )
         assert result.handled is True
@@ -192,7 +197,7 @@ class TestSlashCommandHelp:
     def test_help_alias_h(self):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/h", {})
         )
         assert result.handled is True
@@ -204,14 +209,15 @@ class TestSlashCommandClear:
 
     def test_clear_with_user(self, db, slash_ctx):
         from api.agent3_slash_commands import get_slash_parser
-        from api.routers.agent3_openclaw import _save_agent3_message
+        import asyncio as _asyncio
+        from api.routers.agent3_openclaw import _save_agent3_message_async
 
         # Inserer des messages
-        _save_agent3_message(db, TEST_USER_ID, "user", "test message 1", "text")
-        _save_agent3_message(db, TEST_USER_ID, "agent", "reponse 1", "text")
+        _asyncio.run(_save_agent3_message_async(TEST_USER_ID, "user", "test message 1", "text"))
+        _asyncio.run(_save_agent3_message_async(TEST_USER_ID, "agent", "reponse 1", "text"))
 
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/clear", slash_ctx)
         )
         assert result.handled is True
@@ -220,7 +226,7 @@ class TestSlashCommandClear:
     def test_clear_returns_action(self, db, slash_ctx):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/clear", slash_ctx)
         )
         assert any(a.get("type") == "CLEAR_MESSAGES" for a in result.actions)
@@ -232,7 +238,7 @@ class TestSlashCommandMemory:
     def test_memory_empty(self, db, slash_ctx):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/memory", slash_ctx)
         )
         assert result.handled is True
@@ -240,13 +246,14 @@ class TestSlashCommandMemory:
 
     def test_memory_list_after_save(self, db, slash_ctx):
         from api.agent3_slash_commands import get_slash_parser
-        from api.routers.agent3_openclaw import _save_memory
+        import asyncio as _asyncio
+        from api.routers.agent3_openclaw import _save_memory_async
 
-        _save_memory(db, TEST_USER_ID, "ville", "Lyon", "perso")
-        _save_memory(db, TEST_USER_ID, "job", "Developpeur", "pro")
+        _asyncio.run(_save_memory_async(TEST_USER_ID, "ville", "Lyon", "perso"))
+        _asyncio.run(_save_memory_async(TEST_USER_ID, "job", "Developpeur", "pro"))
 
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/memory", slash_ctx)
         )
         assert "2 memoire(s)" in result.response
@@ -255,23 +262,24 @@ class TestSlashCommandMemory:
 
     def test_memory_clear(self, db, slash_ctx):
         from api.agent3_slash_commands import get_slash_parser
-        from api.routers.agent3_openclaw import _save_memory, _load_memories
+        import asyncio as _asyncio
+        from api.routers.agent3_openclaw import _save_memory_async, _load_memories_async
 
-        _save_memory(db, TEST_USER_ID, "test_key", "test_val", "test")
+        _asyncio.run(_save_memory_async(TEST_USER_ID, "test_key", "test_val", "test"))
 
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/memory clear", slash_ctx)
         )
         assert "effacees" in result.response
 
-        memories = _load_memories(db, TEST_USER_ID)
+        memories = _asyncio.run(_load_memories_async(TEST_USER_ID))
         assert len(memories) == 0
 
     def test_memory_search_no_results(self, db, slash_ctx):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/memory search zzzznotfound", slash_ctx)
         )
         assert "Aucun resultat" in result.response
@@ -279,7 +287,7 @@ class TestSlashCommandMemory:
     def test_memory_no_auth(self, db):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/memory", {"db": db})
         )
         assert "Non authentifie" in (result.error or "")
@@ -291,7 +299,7 @@ class TestSlashCommandStatus:
     def test_status_basic(self, slash_ctx):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/status", slash_ctx)
         )
         assert result.handled is True
@@ -308,7 +316,7 @@ class TestSlashCommandCost:
     def test_cost_basic(self, slash_ctx):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/cost", slash_ctx)
         )
         assert result.handled is True
@@ -325,7 +333,7 @@ class TestSlashCommandSkills:
     def test_skills_lists_all(self):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/skills", {})
         )
         assert result.handled is True
@@ -341,7 +349,7 @@ class TestSlashCommandSkills:
     def test_skills_count_includes_openclaw(self):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/skills", {})
         )
         # Should show skills internes + outils OpenClaw (compteur evolue avec les ajouts)
@@ -355,7 +363,7 @@ class TestSlashCommandHooks:
     def test_hooks_lists(self):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/hooks", {})
         )
         assert result.handled is True
@@ -368,7 +376,7 @@ class TestSlashCommandUndo:
     def test_undo_no_history(self, slash_ctx):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/undo history", slash_ctx)
         )
         assert result.handled is True
@@ -381,7 +389,7 @@ class TestSlashCommandTodo:
     def test_todo_empty(self, slash_ctx):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/todo", slash_ctx)
         )
         assert result.handled is True
@@ -394,7 +402,7 @@ class TestSlashCommandError:
     def test_unknown_command_not_handled(self):
         from api.agent3_slash_commands import get_slash_parser
         parser = get_slash_parser()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             parser.execute("/nonexistent", {})
         )
         assert result.handled is False
@@ -549,6 +557,7 @@ class TestPromptCaching:
             source = f.read()
         assert "cache_control" in source
 
+    @pytest.mark.skip(reason="api/routers/scenarios.py supprime (consolide ailleurs)")
     def test_scenarios_has_cache_control(self):
         """scenarios.py utilise cache_control ephemeral."""
         with open("api/routers/scenarios.py", "r", encoding="utf-8") as f:
@@ -721,7 +730,7 @@ class TestContextCompaction:
             {"role": "user", "content": f"msg {i}"}
             for i in range(5)
         ]
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             compactor.maybe_compact(messages)
         )
         # Under threshold: returns unchanged
@@ -969,8 +978,9 @@ class TestSlashCommandAPI:
         assert "Statut Agent 3" in resp.text
 
     def test_clear_via_chat_endpoint(self, client, db):
-        from api.routers.agent3_openclaw import _save_agent3_message
-        _save_agent3_message(db, TEST_USER_ID, "user", "test msg", "text")
+        import asyncio as _asyncio
+        from api.routers.agent3_openclaw import _save_agent3_message_async
+        _asyncio.run(_save_agent3_message_async(TEST_USER_ID, "user", "test msg", "text"))
 
         resp = client.post("/api/agent3/chat", json={
             "messages": [{"role": "user", "content": "/clear"}],
@@ -980,8 +990,9 @@ class TestSlashCommandAPI:
         assert "efface" in data["message"].lower()
 
     def test_memory_via_chat_endpoint(self, client, db):
-        from api.routers.agent3_openclaw import _save_memory
-        _save_memory(db, TEST_USER_ID, "test_key_api", "test_value", "test")
+        import asyncio as _asyncio
+        from api.routers.agent3_openclaw import _save_memory_async
+        _asyncio.run(_save_memory_async(TEST_USER_ID, "test_key_api", "test_value", "test"))
 
         resp = client.post("/api/agent3/chat", json={
             "messages": [{"role": "user", "content": "/memory"}],

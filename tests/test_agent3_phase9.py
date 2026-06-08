@@ -10,6 +10,7 @@ Couvre :
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -18,13 +19,23 @@ from pathlib import Path
 import pytest
 
 from sylea.core.storage.database import DatabaseManager
+from tests.conftest import make_shared_db, dispose_shared_db
 
 
 @pytest.fixture
-def db():
-    d = DatabaseManager(db_path=Path(":memory:"))
-    d.connect()
-    return d
+def db(tmp_path, monkeypatch):
+    """DB SQLite partagee (sync + async) via fichier temp.
+    Migration shared-DB : remplace `:memory:` pour permettre a l'async
+    session_factory de pointer sur la meme DB."""
+    d = make_shared_db(tmp_path, monkeypatch)
+    # Bootstrap tables Agent 3 (feedback) utilisees par les helpers async.
+    try:
+        from api.agent3_feedback import ensure_feedback_table_async
+        asyncio.run(ensure_feedback_table_async())
+    except Exception:
+        pass
+    yield d
+    dispose_shared_db(d)
 
 
 def _seed_user(db, user_id: str = "u1", email: str = "u1@test.com") -> None:
@@ -42,14 +53,14 @@ def _seed_user(db, user_id: str = "u1", email: str = "u1@test.com") -> None:
 
 class TestGDPRExport:
     def test_empty_user_export(self, db):
-        from api.agent3_gdpr import export_my_data
-        bundle = export_my_data(db, "u_no_data")
+        from api.agent3_gdpr import export_my_data_async
+        bundle = asyncio.run(export_my_data_async("u_no_data"))
         assert "manifest" in bundle
         assert bundle["manifest"]["user_id"] == "u_no_data"
         assert bundle["manifest"]["total_rows"] == 0
 
     def test_export_includes_messages(self, db):
-        from api.agent3_gdpr import export_my_data
+        from api.agent3_gdpr import export_my_data_async
         _seed_user(db, "u_msg")
         db.conn.execute(
             "INSERT INTO agent3_messages (id, auth_user_id, role, content, type, created_at) "
@@ -58,7 +69,7 @@ class TestGDPRExport:
         )
         db.conn.commit()
 
-        bundle = export_my_data(db, "u_msg")
+        bundle = asyncio.run(export_my_data_async("u_msg"))
         assert "agent3_messages" in bundle["data"]
         assert len(bundle["data"]["agent3_messages"]) == 1
         assert bundle["data"]["agent3_messages"][0]["content"] == "hello"
@@ -66,7 +77,7 @@ class TestGDPRExport:
 
     def test_export_isolation(self, db):
         """Alice ne voit pas les donnees de Bob."""
-        from api.agent3_gdpr import export_my_data
+        from api.agent3_gdpr import export_my_data_async
         _seed_user(db, "alice")
         _seed_user(db, "bob", email="bob@test.com")
         db.conn.execute(
@@ -80,20 +91,20 @@ class TestGDPRExport:
             ("mb", "bob", "user", "secret_bob", "text", "2026-04-23"),
         )
         db.conn.commit()
-        bundle_a = export_my_data(db, "alice")
+        bundle_a = asyncio.run(export_my_data_async("alice"))
         contents = [m["content"] for m in bundle_a["data"].get("agent3_messages", [])]
         assert "secret_alice" in contents
         assert "secret_bob" not in contents
 
     def test_export_no_user_id(self, db):
-        from api.agent3_gdpr import export_my_data
-        b = export_my_data(db, "")
+        from api.agent3_gdpr import export_my_data_async
+        b = asyncio.run(export_my_data_async(""))
         assert b["manifest"] == {}
 
 
 class TestGDPRDelete:
     def test_delete_removes_messages(self, db):
-        from api.agent3_gdpr import delete_my_data
+        from api.agent3_gdpr import delete_my_data_async
         _seed_user(db, "u_del")
         db.conn.execute(
             "INSERT INTO agent3_messages (id, auth_user_id, role, content, type, created_at) "
@@ -102,7 +113,7 @@ class TestGDPRDelete:
         )
         db.conn.commit()
 
-        result = delete_my_data(db, "u_del", delete_uploads=False)
+        result = asyncio.run(delete_my_data_async("u_del", delete_uploads=False))
         assert result["total_rows"] >= 1
         assert result["deleted_by_table"].get("agent3_messages", 0) == 1
 
@@ -112,7 +123,7 @@ class TestGDPRDelete:
         assert remaining == 0
 
     def test_delete_preserves_other_users(self, db):
-        from api.agent3_gdpr import delete_my_data
+        from api.agent3_gdpr import delete_my_data_async
         _seed_user(db, "alice")
         _seed_user(db, "bob", email="bob@test.com")
         db.conn.execute(
@@ -127,16 +138,16 @@ class TestGDPRDelete:
         )
         db.conn.commit()
 
-        delete_my_data(db, "alice", delete_uploads=False)
+        asyncio.run(delete_my_data_async("alice", delete_uploads=False))
         bob_count = db.conn.execute(
             "SELECT COUNT(*) FROM agent3_messages WHERE auth_user_id = ?", ("bob",),
         ).fetchone()[0]
         assert bob_count == 1
 
     def test_delete_removes_uploaded_files(self, db, tmp_path):
-        from api.agent3_gdpr import delete_my_data
-        from api.routers.agent3_openclaw import _ensure_agent3_tables
-        _ensure_agent3_tables(db)
+        from api.agent3_gdpr import delete_my_data_async
+        from api.routers.agent3_openclaw import _ensure_agent3_tables_async
+        asyncio.run(_ensure_agent3_tables_async())
         _seed_user(db, "u_files")
         f = tmp_path / "to_delete.txt"
         f.write_text("data", encoding="utf-8")
@@ -147,13 +158,13 @@ class TestGDPRDelete:
         )
         db.conn.commit()
         assert f.exists()
-        result = delete_my_data(db, "u_files", delete_uploads=True)
+        result = asyncio.run(delete_my_data_async("u_files", delete_uploads=True))
         assert result["files_deleted"] >= 1
         assert not f.exists()
 
     def test_delete_no_user_id(self, db):
-        from api.agent3_gdpr import delete_my_data
-        r = delete_my_data(db, "")
+        from api.agent3_gdpr import delete_my_data_async
+        r = asyncio.run(delete_my_data_async(""))
         assert "error" in r
 
 
@@ -167,7 +178,7 @@ class TestRetention:
         reset_retention_tracker()
 
     def test_cleanup_messages_removes_old(self, db):
-        from api.agent3_retention import cleanup_messages
+        from api.agent3_retention import cleanup_messages_async
         _seed_user(db, "u_ret")
         old_date = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
         recent = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
@@ -182,7 +193,7 @@ class TestRetention:
             ("recent", "u_ret", "user", "recent msg", "text", recent),
         )
         db.conn.commit()
-        n = cleanup_messages(db, days=180)
+        n = asyncio.run(cleanup_messages_async(days=180))
         assert n == 1
         remaining = db.conn.execute(
             "SELECT COUNT(*) FROM agent3_messages"
@@ -190,24 +201,24 @@ class TestRetention:
         assert remaining == 1
 
     def test_run_retention_pass_executes(self, db):
-        from api.agent3_retention import run_retention_pass, reset_retention_tracker
+        from api.agent3_retention import run_retention_pass_async, reset_retention_tracker
         reset_retention_tracker()
-        result = run_retention_pass(db, force=True)
+        result = asyncio.run(run_retention_pass_async(force=True))
         assert "deleted_by_category" in result
         assert result["skipped"] is False
         assert "messages" in result["deleted_by_category"]
 
     def test_run_retention_respects_interval(self, db):
-        from api.agent3_retention import run_retention_pass, reset_retention_tracker
+        from api.agent3_retention import run_retention_pass_async, reset_retention_tracker
         reset_retention_tracker()
         # 1er run OK
-        r1 = run_retention_pass(db)
+        r1 = asyncio.run(run_retention_pass_async())
         assert r1["skipped"] is False
         # 2eme run trop rapproche → skipped
-        r2 = run_retention_pass(db)
+        r2 = asyncio.run(run_retention_pass_async())
         assert r2["skipped"] is True
         # Force bypass
-        r3 = run_retention_pass(db, force=True)
+        r3 = asyncio.run(run_retention_pass_async(force=True))
         assert r3["skipped"] is False
 
     def test_cleanup_figures_disk(self, tmp_path):
@@ -232,12 +243,12 @@ class TestRetention:
 
     def test_get_last_run_info(self, db):
         from api.agent3_retention import (
-            run_retention_pass, get_last_run_info, reset_retention_tracker,
+            run_retention_pass_async, get_last_run_info, reset_retention_tracker,
         )
         reset_retention_tracker()
         info = get_last_run_info()
         assert info["ever_ran"] is False
-        run_retention_pass(db, force=True)
+        asyncio.run(run_retention_pass_async(force=True))
         info = get_last_run_info()
         assert info["ever_ran"] is True
 
@@ -248,78 +259,78 @@ class TestRetention:
 
 class TestFeedback:
     def test_record_vote_up(self, db):
-        from api.agent3_feedback import record_feedback, get_feedback_stats
-        r = record_feedback(db, "u_fb", vote="up", comment="Tres bien !")
+        from api.agent3_feedback import record_feedback_async, get_feedback_stats_async
+        r = asyncio.run(record_feedback_async("u_fb", vote="up", comment="Tres bien !"))
         assert r["ok"] is True
         assert "feedback_id" in r
-        stats = get_feedback_stats(db, "u_fb")
+        stats = asyncio.run(get_feedback_stats_async("u_fb"))
         assert stats["thumbs_up"] == 1
         assert stats["thumbs_down"] == 0
 
     def test_record_vote_down(self, db):
-        from api.agent3_feedback import record_feedback, get_feedback_stats
-        record_feedback(db, "u_fb2", vote="down", comment="Mauvaise reponse")
-        stats = get_feedback_stats(db, "u_fb2")
+        from api.agent3_feedback import record_feedback_async, get_feedback_stats_async
+        asyncio.run(record_feedback_async("u_fb2", vote="down", comment="Mauvaise reponse"))
+        stats = asyncio.run(get_feedback_stats_async("u_fb2"))
         assert stats["thumbs_down"] == 1
 
     def test_invalid_vote_rejected(self, db):
-        from api.agent3_feedback import record_feedback
-        r = record_feedback(db, "u_fb", vote="maybe")
+        from api.agent3_feedback import record_feedback_async
+        r = asyncio.run(record_feedback_async("u_fb", vote="maybe"))
         assert r["ok"] is False
 
     def test_no_user_id(self, db):
-        from api.agent3_feedback import record_feedback
-        r = record_feedback(db, "", vote="up")
+        from api.agent3_feedback import record_feedback_async
+        r = asyncio.run(record_feedback_async("", vote="up"))
         assert r["ok"] is False
 
     def test_ratio_calculation(self, db):
-        from api.agent3_feedback import record_feedback, get_feedback_stats
+        from api.agent3_feedback import record_feedback_async, get_feedback_stats_async
         for _ in range(7):
-            record_feedback(db, "u_r", vote="up")
+            asyncio.run(record_feedback_async("u_r", vote="up"))
         for _ in range(3):
-            record_feedback(db, "u_r", vote="down")
-        stats = get_feedback_stats(db, "u_r")
+            asyncio.run(record_feedback_async("u_r", vote="down"))
+        stats = asyncio.run(get_feedback_stats_async("u_r"))
         assert stats["total"] == 10
         assert stats["ratio"] == 0.7
 
     def test_isolation(self, db):
-        from api.agent3_feedback import record_feedback, get_feedback_stats
-        record_feedback(db, "alice", vote="up")
-        record_feedback(db, "bob", vote="down")
-        record_feedback(db, "bob", vote="down")
-        a_stats = get_feedback_stats(db, "alice")
-        b_stats = get_feedback_stats(db, "bob")
+        from api.agent3_feedback import record_feedback_async, get_feedback_stats_async
+        asyncio.run(record_feedback_async("alice", vote="up"))
+        asyncio.run(record_feedback_async("bob", vote="down"))
+        asyncio.run(record_feedback_async("bob", vote="down"))
+        a_stats = asyncio.run(get_feedback_stats_async("alice"))
+        b_stats = asyncio.run(get_feedback_stats_async("bob"))
         assert a_stats["thumbs_up"] == 1 and a_stats["thumbs_down"] == 0
         assert b_stats["thumbs_down"] == 2
 
     def test_recent_feedback(self, db):
-        from api.agent3_feedback import record_feedback, get_recent_feedback
+        from api.agent3_feedback import record_feedback_async, get_recent_feedback_async
         for i in range(5):
-            record_feedback(db, "u", vote="up" if i % 2 else "down", comment=f"c{i}")
-        recent = get_recent_feedback(db, "u", limit=3)
+            asyncio.run(record_feedback_async("u", vote="up" if i % 2 else "down", comment=f"c{i}"))
+        recent = asyncio.run(get_recent_feedback_async("u", limit=3))
         assert len(recent) == 3
         assert all("vote" in f for f in recent)
 
     def test_format_context_empty_when_low(self, db):
-        from api.agent3_feedback import format_feedback_context, record_feedback
+        from api.agent3_feedback import format_feedback_context_async, record_feedback_async
         # Pas assez de feedback → bloc vide
-        ctx = format_feedback_context(db, "u_new")
+        ctx = asyncio.run(format_feedback_context_async("u_new"))
         assert ctx == ""
         for _ in range(2):
-            record_feedback(db, "u_new", vote="up")
+            asyncio.run(record_feedback_async("u_new", vote="up"))
         # 2 < 3 → toujours vide
-        ctx = format_feedback_context(db, "u_new")
+        ctx = asyncio.run(format_feedback_context_async("u_new"))
         assert ctx == ""
 
     def test_format_context_includes_negatives(self, db):
-        from api.agent3_feedback import format_feedback_context, record_feedback
-        record_feedback(db, "u_n", vote="up")
-        record_feedback(db, "u_n", vote="up")
-        record_feedback(
-            db, "u_n", vote="down",
+        from api.agent3_feedback import format_feedback_context_async, record_feedback_async
+        asyncio.run(record_feedback_async("u_n", vote="up"))
+        asyncio.run(record_feedback_async("u_n", vote="up"))
+        asyncio.run(record_feedback_async(
+            "u_n", vote="down",
             comment="Tu as oublie de mentionner le prix au m2",
-        )
-        ctx = format_feedback_context(db, "u_n")
+        ))
+        ctx = asyncio.run(format_feedback_context_async("u_n"))
         assert "FEEDBACK" in ctx
         assert "prix" in ctx.lower()
 

@@ -58,18 +58,19 @@ _DEFAULT_MAX_RESULTS = 10
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _get_user_key(db: Any, user_id: str, provider: str) -> str | None:
-    """Recupere la cle API user depuis le Credential Vault.
+async def _get_user_key_async(db: Any, user_id: str, provider: str) -> str | None:
+    """Recupere la cle API user depuis le Credential Vault (async/PG).
 
     Retourne None si absente — l'appelant fera fallback.
+    Le param `db` est garde pour compat de signature mais non utilise.
     """
     if not user_id:
         return None
     try:
-        from api.credentials import get_credential
-        return get_credential(db, user_id, provider, "api_key", context="web_search")
+        from api.credentials import get_credential_async
+        return await get_credential_async(user_id, provider, "api_key", context="web_search")
     except Exception as e:
-        logger.debug(f"get_credential({provider}) failed: {e}")
+        logger.debug(f"get_credential_async({provider}) failed: {e}")
         return None
 
 
@@ -151,7 +152,7 @@ async def search_perplexity(
 
     Docs : https://docs.perplexity.ai/api-reference/chat-completions
     """
-    key = _get_user_key(db, user_id, "perplexity")
+    key = await _get_user_key_async(db, user_id, "perplexity")
     if not key:
         return {"ok": False, "error": "missing_api_key", "provider": "perplexity"}
     if not query.strip():
@@ -227,7 +228,7 @@ async def search_brave(
 
     Docs : https://api.search.brave.com/app/documentation/web-search/get-started
     """
-    key = _get_user_key(db, user_id, "brave")
+    key = await _get_user_key_async(db, user_id, "brave")
     if not key:
         return {"ok": False, "error": "missing_api_key", "provider": "brave"}
     if not query.strip():
@@ -286,7 +287,7 @@ async def search_tavily(
 
     Docs : https://docs.tavily.com/docs/rest-api/api-reference
     """
-    key = _get_user_key(db, user_id, "tavily")
+    key = await _get_user_key_async(db, user_id, "tavily")
     if not key:
         return {"ok": False, "error": "missing_api_key", "provider": "tavily"}
     if not query.strip():
@@ -344,7 +345,7 @@ async def search_exa(
 
     Docs : https://docs.exa.ai/reference/search
     """
-    key = _get_user_key(db, user_id, "exa")
+    key = await _get_user_key_async(db, user_id, "exa")
     if not key:
         return {"ok": False, "error": "missing_api_key", "provider": "exa"}
     if not query.strip():
@@ -403,7 +404,7 @@ async def firecrawl_scrape(
 
     Docs : https://docs.firecrawl.dev/api-reference/endpoint/scrape
     """
-    key = _get_user_key(db, user_id, "firecrawl")
+    key = await _get_user_key_async(db, user_id, "firecrawl")
     if not key:
         return {"ok": False, "error": "missing_api_key", "provider": "firecrawl"}
     if not url.strip():
@@ -442,7 +443,7 @@ async def firecrawl_search(
     max_results: int = 10,
 ) -> dict[str, Any]:
     """Firecrawl Search + scrape (retourne results + markdown)."""
-    key = _get_user_key(db, user_id, "firecrawl")
+    key = await _get_user_key_async(db, user_id, "firecrawl")
     if not key:
         return {"ok": False, "error": "missing_api_key", "provider": "firecrawl"}
     if not query.strip():
@@ -494,7 +495,7 @@ async def search_xai(
 
     Docs : https://docs.x.ai/docs/api-reference
     """
-    key = _get_user_key(db, user_id, "xai")
+    key = await _get_user_key_async(db, user_id, "xai")
     if not key:
         return {"ok": False, "error": "missing_api_key", "provider": "xai"}
     if not query.strip():
@@ -549,7 +550,7 @@ PROVIDER_MAP: dict[str, dict[str, Any]] = {
 }
 
 
-def has_user_key_for(db: Any, user_id: str, tool_name: str) -> bool:
+async def has_user_key_for(db: Any, user_id: str, tool_name: str) -> bool:
     """Quick check : est-ce que le user a une cle pour CE tool dans son Vault ?
 
     Permet au dispatcher de decider si on appelle direct ou fallback OpenClaw.
@@ -568,7 +569,7 @@ def has_user_key_for(db: Any, user_id: str, tool_name: str) -> bool:
     slug = slug_map.get(tool_name)
     if not slug:
         return False
-    return _get_user_key(db, user_id, slug) is not None
+    return (await _get_user_key_async(db, user_id, slug)) is not None
 
 
 async def invoke_provider(

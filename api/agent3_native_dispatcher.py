@@ -31,7 +31,7 @@ from sylea.core.storage.database import DatabaseManager
 from api.agent3_security import (
     validate_external_url,
     check_rate_limit,
-    audit_log_action,
+    audit_log_action_async,
     is_destructive,
     ensure_within_base,
     friendly_http_error,
@@ -125,19 +125,18 @@ class Agent3ActionDispatcher:
                 cls._OPENCLAW_DIRECT_TOOL_NAMES = set()
         return cls._OPENCLAW_DIRECT_TOOL_NAMES
 
-    def _user_daily_cap_usd(self) -> float:
-        """Retourne le cap USD/jour pour ce user (prefs ou defaut global)."""
+    async def _user_daily_cap_usd(self) -> float:
+        """Retourne le cap USD/jour pour ce user (prefs ou defaut global).
+
+        Migration PG : converti en async pour appeler _get_user_preferences_async.
+        """
         from api.openclaw_bridge import DEFAULT_DAILY_COST_CAP_USD
         if not self.user_id:
             return DEFAULT_DAILY_COST_CAP_USD
         try:
-            from api.agent3_primitives import _get_user_preferences  # noqa: F401
-        except Exception:
-            pass
-        try:
             # Resolution dynamique (evite import circulaire).
-            from api.routers.agent3_openclaw import _get_user_preferences
-            prefs = _get_user_preferences(self.db, self.user_id)
+            from api.routers.agent3_openclaw import _get_user_preferences_async
+            prefs = await _get_user_preferences_async(self.user_id)
             cap = prefs.get("external_cost_cap_usd_per_day")
             if isinstance(cap, (int, float)) and cap >= 0:
                 return float(cap)
@@ -161,8 +160,7 @@ class Agent3ActionDispatcher:
         result = await self._execute_inner(action_type, action_input)
         # Audit log best-effort pour les actions destructives.
         if is_destructive(action_type):
-            audit_log_action(
-                self.db,
+            await audit_log_action_async(
                 self.user_id or None,
                 action_type,
                 action_input if isinstance(action_input, dict) else {},
@@ -263,7 +261,7 @@ class Agent3ActionDispatcher:
 
             # Log dans agent3_clawhub_events (best-effort, n'interrompt pas le flux).
             try:
-                from api.agent3_primitives import _log_clawhub_event
+                from api.routers.agent3_openclaw import _log_clawhub_event_async
 
                 event_map = {
                     "CLAWHUB_SEARCH": "auto_search",
@@ -295,8 +293,7 @@ class Agent3ActionDispatcher:
                     error_message = str(result.get("content", ""))[:500]
 
                 if self.user_id:
-                    _log_clawhub_event(
-                        self.db,
+                    await _log_clawhub_event_async(
                         self.user_id,
                         event_type,
                         slug_value or "(none)",
@@ -335,9 +332,9 @@ class Agent3ActionDispatcher:
                 inp_screen["action"] = "screenshot"
                 return await self._browser(inp_screen)
             if action_type == "MEMORY":
-                return self._memory_save(action_input)
+                return await self._memory_save(action_input)
             if action_type == "MEMORY_SEARCH":
-                return self._memory_search(action_input)
+                return await self._memory_search(action_input)
             if action_type == "SEMANTIC_SEARCH":
                 return await self._semantic_search(action_input)
             if action_type == "PYTHON_EXEC":
@@ -359,7 +356,7 @@ class Agent3ActionDispatcher:
             if action_type == "GMAIL_READ":
                 return await self._gmail_read(action_input)
             if action_type == "FILE_CREATE":
-                return self._file_create(action_input)
+                return await self._file_create(action_input)
             if action_type == "EMAIL":
                 return await self._email(action_input)
             if action_type == "GMAIL_SEND":
@@ -369,9 +366,9 @@ class Agent3ActionDispatcher:
             if action_type == "DRIVE_SAVE":
                 return await self._drive_save(action_input)
             if action_type == "CRON":
-                return self._cron(action_input)
+                return await self._cron(action_input)
             if action_type == "REMINDER":
-                return self._reminder(action_input)
+                return await self._reminder(action_input)
             if action_type == "COMPUTER_USE":
                 return await self._computer_use(action_input)
             if action_type == "SPAWN_AGENT":
@@ -678,7 +675,7 @@ class Agent3ActionDispatcher:
                 "raw": {"url": url, "error": str(e)[:300]},
             }
 
-    def _memory_save(self, inp: dict) -> dict:
+    async def _memory_save(self, inp: dict) -> dict:
         if not self.user_id:
             return {
                 "content": "Memoire indisponible : utilisateur non authentifie.",
@@ -693,9 +690,9 @@ class Agent3ActionDispatcher:
                 "is_error": True,
                 "raw": {},
             }
-        # Reuse du helper existant dans le router.
-        from api.agent3_primitives import _save_memory
-        _save_memory(self.db, self.user_id, key, value, "native")
+        # Reuse du helper existant dans le router (version async).
+        from api.routers.agent3_openclaw import _save_memory_async
+        await _save_memory_async(self.user_id, key, value, "native")
         return {
             "content": f"Memorise : {key} = {value[:80]}{'...' if len(value) > 80 else ''}",
             "is_error": False,
@@ -820,13 +817,20 @@ class Agent3ActionDispatcher:
                 "is_error": True, "raw": {},
             }
 
-        # Resoudre le path via agent3_files + verifier appartenance user
+        # Resoudre le path via agent3_files + verifier appartenance user (async).
         try:
-            row = self.db.conn.execute(
-                "SELECT filepath, filetype, filename FROM agent3_files "
-                "WHERE id = ? AND auth_user_id = ?",
-                (file_id, self.user_id),
-            ).fetchone()
+            from sqlalchemy import text as _sa_text
+            from api.database import get_session_factory as _gsf
+            factory = _gsf()
+            async with factory() as session:
+                result = await session.execute(
+                    _sa_text(
+                        "SELECT filepath, filetype, filename FROM agent3_files "
+                        "WHERE id = :fid AND auth_user_id = :uid"
+                    ),
+                    {"fid": file_id, "uid": self.user_id},
+                )
+                row = result.first()
         except Exception as e:
             return {
                 "content": f"Erreur DB : {type(e).__name__}",
@@ -910,7 +914,7 @@ class Agent3ActionDispatcher:
             },
         }
 
-    def _memory_search(self, inp: dict) -> dict:
+    async def _memory_search(self, inp: dict) -> dict:
         if not self.user_id:
             return {
                 "content": "Memoire indisponible : utilisateur non authentifie.",
@@ -930,14 +934,8 @@ class Agent3ActionDispatcher:
             return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
         # Phase 14E : matching multi-token (OR sur chaque mot >= 3 chars).
-        # Les LLM expriment souvent une intention en plusieurs mots ("preferences
-        # alimentaires") alors que les memoires stockees ont des cles courtes
-        # ("plat_prefere"). On split la query, on filtre les stopwords courts,
-        # et on cherche ANY token. Une mémoire matche si elle contient au moins
-        # un des tokens dans key OU value.
         import re as _re
         tokens = [t for t in _re.split(r"[\s,;:./]+", query.lower()) if len(t) >= 3]
-        # Stopwords FR/EN minimaux
         _STOP = {"des", "les", "une", "mes", "tes", "ses", "tous", "tout",
                  "the", "and", "for", "with", "que", "qui", "quoi", "quel",
                  "quels", "quelles", "this", "that", "have", "from"}
@@ -945,20 +943,32 @@ class Agent3ActionDispatcher:
         if not tokens:
             tokens = [query.lower()]  # fallback : phrase entiere
 
-        # Compose les conditions OR : (key LIKE %t1% OR value LIKE %t1% OR
-        # key LIKE %t2% OR value LIKE %t2% OR ...)
+        # SQLAlchemy text() avec parametres nommes (compat PG + SQLite).
         like_clauses = []
-        params: list = [self.user_id]
-        for tok in tokens[:8]:  # cap a 8 tokens
+        params: dict = {"uid": self.user_id}
+        for i, tok in enumerate(tokens[:8]):
             esc = _escape_like(tok)
-            like_clauses.append("(key LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\')")
-            params.extend([f"%{esc}%", f"%{esc}%"])
+            k_param = f"k{i}"
+            v_param = f"v{i}"
+            like_clauses.append(
+                f"(key LIKE :{k_param} ESCAPE '\\' OR value LIKE :{v_param} ESCAPE '\\')"
+            )
+            params[k_param] = f"%{esc}%"
+            params[v_param] = f"%{esc}%"
         sql = (
             "SELECT key, value, category, updated_at FROM agent3_memory "
-            f"WHERE auth_user_id = ? AND ({' OR '.join(like_clauses)}) "
+            f"WHERE auth_user_id = :uid AND ({' OR '.join(like_clauses)}) "
             "ORDER BY updated_at DESC LIMIT 20"
         )
-        rows = self.db.conn.execute(sql, tuple(params)).fetchall()
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        factory = _gsf()
+        try:
+            async with factory() as session:
+                result = await session.execute(_sa_text(sql), params)
+                rows = result.all()
+        except Exception:
+            rows = []
         if not rows:
             return {
                 "content": f"Aucun souvenir trouve pour '{query}'.",
@@ -1353,7 +1363,7 @@ class Agent3ActionDispatcher:
 
     # ── Destructives (passent par le gate de confirmation de AgenticLoop) ──
 
-    def _file_create(self, inp: dict) -> dict:
+    async def _file_create(self, inp: dict) -> dict:
         """Cree un fichier dans le workspace utilisateur."""
         from pathlib import Path
         filename = (inp.get("filename") or "").strip()
@@ -1367,7 +1377,7 @@ class Agent3ActionDispatcher:
                 from api.agent3_primitives import (
                     get_workspace_folder_name, WORKSPACE_BASE,
                 )
-                obj_name = get_workspace_folder_name(self.db, self.user_id)
+                obj_name = await get_workspace_folder_name_async(self.user_id)
                 project_dir = WORKSPACE_BASE / obj_name
                 project_dir.mkdir(parents=True, exist_ok=True)
                 safe_name = Path(filename).name or "fichier.txt"
@@ -1647,60 +1657,14 @@ class Agent3ActionDispatcher:
         d.connect()
         return d
 
-    def _cron(self, inp: dict) -> dict:
-        """Programme une tache recurrente dans la table agent3_cron."""
-        import uuid
-        from datetime import datetime, timezone
-        label = (inp.get("label") or "Tache Sylea").strip()
-        instruction = (inp.get("instruction") or "").strip()
-        cron_expr = (inp.get("cron_expr") or inp.get("schedule") or "0 9 * * *").strip()
-        if not instruction:
-            return {
-                "content": "Champ 'instruction' requis : quoi executer a chaque tick.",
-                "is_error": True, "raw": {},
-            }
-        if not self.user_id:
-            return {
-                "content": "CRON indisponible : utilisateur non authentifie.",
-                "is_error": True, "raw": {},
-            }
-        # Fresh DB connection (cf. _get_fresh_db) — survit au resume flow.
-        db = self._get_fresh_db()
-        try:
-            # S'assure que la table existe (schema identique a legacy).
-            db.conn.execute(
-                "CREATE TABLE IF NOT EXISTS agent3_cron ("
-                "id TEXT PRIMARY KEY, auth_user_id TEXT, label TEXT, "
-                "instruction TEXT, cron_expr TEXT, enabled INTEGER DEFAULT 1, "
-                "created_at TEXT)"
-            )
-            cron_id = str(uuid.uuid4())
-            now = datetime.now(timezone.utc).isoformat()
-            db.conn.execute(
-                "INSERT INTO agent3_cron (id, auth_user_id, label, instruction, cron_expr, enabled, created_at) "
-                "VALUES (?, ?, ?, ?, ?, 1, ?)",
-                (cron_id, self.user_id, label, instruction, cron_expr, now),
-            )
-            db.conn.commit()
-            return {
-                "content": f"Tache '{label}' programmee ({cron_expr}). Elle s'executera selon le planning.",
-                "is_error": False,
-                "raw": {
-                    "cron_id": cron_id, "label": label,
-                    "cron_expr": cron_expr, "instruction": instruction[:200],
-                },
-            }
-        except Exception as e:
-            logger.exception(f"CRON insert failed: {e}")
-            return {
-                "content": f"Erreur programmation cron : {type(e).__name__} {e}",
-                "is_error": True, "raw": {"error": str(e)},
-            }
-        finally:
-            try: db.disconnect()
-            except Exception: pass
+    async def _cron(self, inp: dict) -> dict:
+        """Programme une tache recurrente dans la table agent3_cron (version async).
 
-    def _reminder(self, inp: dict) -> dict:
+        Delegue a `_cron_async` plus bas (qui partage le pool async PG/SQLite).
+        """
+        return await self._cron_async(inp)
+
+    async def _reminder(self, inp: dict) -> dict:
         """Programme un rappel ponctuel (one-shot) dans la table agent_reminders.
 
         Inputs (au moins UN parmi les 2 modes) :
@@ -1745,26 +1709,39 @@ class Agent3ActionDispatcher:
                 "is_error": True, "raw": {},
             }
 
-        # Fresh DB connection (cf. _get_fresh_db) — survit au resume flow.
-        db = self._get_fresh_db()
+        # Async DB via SQLAlchemy text() — compat SQLite + PostgreSQL.
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        factory = _gsf()
         try:
-            # Schema legacy de agent_reminders (cf. sylea/core/storage/database.py)
-            db.conn.execute(
-                "CREATE TABLE IF NOT EXISTS agent_reminders ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, "
-                "agent_id TEXT DEFAULT 'agent3', reminder_time TEXT NOT NULL, "
-                "reminder_date TEXT NOT NULL, message TEXT NOT NULL, "
-                "completed INTEGER DEFAULT 0, created_at TEXT NOT NULL)"
-            )
             now_iso = datetime.now(timezone.utc).isoformat()
-            cur = db.conn.execute(
-                "INSERT INTO agent_reminders "
-                "(user_id, agent_id, reminder_time, reminder_date, message, completed, created_at) "
-                "VALUES (?, 'agent3', ?, ?, ?, 0, ?)",
-                (self.user_id, rtime, rdate, message, now_iso),
-            )
-            db.conn.commit()
-            reminder_id = cur.lastrowid
+            async with factory() as session:
+                try:
+                    # DDL idempotent (sera no-op si table existe deja).
+                    await session.execute(_sa_text(
+                        "CREATE TABLE IF NOT EXISTS agent_reminders ("
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, "
+                        "agent_id TEXT DEFAULT 'agent3', reminder_time TEXT NOT NULL, "
+                        "reminder_date TEXT NOT NULL, message TEXT NOT NULL, "
+                        "completed INTEGER DEFAULT 0, created_at TEXT NOT NULL)"
+                    ))
+                    result = await session.execute(
+                        _sa_text(
+                            "INSERT INTO agent_reminders "
+                            "(user_id, agent_id, reminder_time, reminder_date, "
+                            " message, completed, created_at) "
+                            "VALUES (:uid, 'agent3', :rtime, :rdate, :msg, 0, :now)"
+                        ),
+                        {
+                            "uid": self.user_id, "rtime": rtime, "rdate": rdate,
+                            "msg": message, "now": now_iso,
+                        },
+                    )
+                    await session.commit()
+                    reminder_id = getattr(result, "lastrowid", None) or 0
+                except Exception:
+                    await session.rollback()
+                    raise
             return {
                 "content": f"Rappel programme pour {rdate} a {rtime} : \"{message[:80]}\"",
                 "is_error": False,
@@ -1781,9 +1758,6 @@ class Agent3ActionDispatcher:
                 "content": f"Erreur programmation rappel : {type(e).__name__} {e}",
                 "is_error": True, "raw": {"error": str(e)},
             }
-        finally:
-            try: db.disconnect()
-            except Exception: pass
 
     async def _computer_use(self, inp: dict) -> dict:
         """Delegue une tache au moteur Anthropic Computer Use (navigation autonome).
@@ -1941,7 +1915,7 @@ class Agent3ActionDispatcher:
                 system_prompt=session_system,
                 tools=session_tools,
                 executor=session_executor,
-                model="claude-sonnet-4-5-20250929",  # Sonnet pour exploration plus complexe que SPAWN_AGENT
+                model="claude-sonnet-4-6",  # Sonnet pour exploration plus complexe que SPAWN_AGENT
                 max_turns=max_turns,
                 max_tokens=3000,
                 input_usd_per_mtok=3.0,
@@ -2425,7 +2399,7 @@ class Agent3ActionDispatcher:
             if (
                 anthropic_name in PROVIDER_MAP
                 and self.user_id
-                and has_user_key_for(self.db, self.user_id, anthropic_name)
+                and await has_user_key_for(self.db, self.user_id, anthropic_name)
             ):
                 result = await invoke_provider(
                     self.db, self.user_id, anthropic_name, args,
@@ -2470,7 +2444,7 @@ class Agent3ActionDispatcher:
         # connu qu'apres l'appel — on utilise l'estimation haute pour decider).
         projected_cost = estimate_tool_cost_usd(anthropic_name)
         if projected_cost > 0 and self.user_id:
-            cap = self._user_daily_cap_usd()
+            cap = await self._user_daily_cap_usd()
             allowed, current, pct = check_daily_cost_cap(
                 self.user_id, projected_cost, cap,
             )
@@ -2579,6 +2553,342 @@ class Agent3ActionDispatcher:
             "is_error": True,
             "raw": {"action_type": action_type, "supported": sorted(self.SUPPORTED)},
         }
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+    # ═══════════════════════════════════════════════════════════════════════
+
+    async def _vision_analyze_async(self, inp: dict) -> dict:
+        """Version PG-compatible de _vision_analyze (SELECT via SQLAlchemy)."""
+        if not self.user_id:
+            return {
+                "content": "Analyse vision indisponible : utilisateur non authentifie.",
+                "is_error": True, "raw": {},
+            }
+        file_id = (inp.get("file_id") or "").strip()
+        prompt = (inp.get("prompt") or "").strip()
+        if not file_id:
+            return {"content": "Parametre 'file_id' requis.", "is_error": True, "raw": {}}
+        if not prompt:
+            return {"content": "Parametre 'prompt' requis.", "is_error": True, "raw": {}}
+        if len(prompt) > 2000:
+            return {
+                "content": f"Prompt trop long ({len(prompt)} chars, max 2000).",
+                "is_error": True, "raw": {},
+            }
+
+        # Resoudre le path via agent3_files + verifier appartenance user
+        from sqlalchemy import text
+        from api.database import get_session_factory
+        factory = get_session_factory()
+        try:
+            async with factory() as session:
+                result = await session.execute(
+                    text(
+                        "SELECT filepath, filetype, filename FROM agent3_files "
+                        "WHERE id = :id AND auth_user_id = :uid"
+                    ),
+                    {"id": file_id, "uid": self.user_id},
+                )
+                row = result.first()
+        except Exception as e:
+            return {
+                "content": f"Erreur DB : {type(e).__name__}",
+                "is_error": True, "raw": {"error": str(e)},
+            }
+        if not row:
+            return {
+                "content": f"Fichier {file_id} introuvable ou n'appartient pas a l'utilisateur.",
+                "is_error": True, "raw": {},
+            }
+        filepath, filetype, filename = row[0], row[1], row[2]
+        if not (filetype or "").startswith("image/"):
+            return {
+                "content": f"Le fichier {filename} n'est pas une image ({filetype}).",
+                "is_error": True, "raw": {"filetype": filetype},
+            }
+
+        try:
+            from api.routers.agent3_openclaw import _analyze_image_with_vision
+            description = await _analyze_image_with_vision(filepath, prompt)
+        except Exception as e:
+            logger.exception(f"vision_analyze_async crashed: {e}")
+            return {
+                "content": f"Erreur analyse vision : {type(e).__name__} {e}",
+                "is_error": True, "raw": {"error": str(e)},
+            }
+
+        if description and description.startswith("["):
+            return {
+                "content": description,
+                "is_error": True,
+                "raw": {"file_id": file_id, "filename": filename},
+            }
+
+        return {
+            "content": f"## Analyse de {filename}\n\n{description}",
+            "is_error": False,
+            "raw": {
+                "file_id": file_id,
+                "filename": filename,
+                "prompt": prompt,
+                "description_length": len(description or ""),
+            },
+        }
+
+    async def _memory_search_async(self, inp: dict) -> dict:
+        """Version PG-compatible de _memory_search (multi-token LIKE OR).
+
+        Reprend la logique de tokenisation FR/EN + stopwords du legacy mais
+        execute la requete via SQLAlchemy text() (parametres nommes).
+        """
+        if not self.user_id:
+            return {
+                "content": "Memoire indisponible : utilisateur non authentifie.",
+                "is_error": True,
+                "raw": {},
+            }
+        query = (inp.get("query") or "").strip()
+        if not query:
+            return {"content": "Parametre 'query' manquant.", "is_error": True, "raw": {}}
+        if len(query) > _MAX_QUERY_LEN:
+            return {
+                "content": f"Query trop longue ({len(query)} chars, max {_MAX_QUERY_LEN}).",
+                "is_error": True, "raw": {},
+            }
+
+        def _escape_like(s: str) -> str:
+            return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+        import re as _re
+        tokens = [t for t in _re.split(r"[\s,;:./]+", query.lower()) if len(t) >= 3]
+        _STOP = {"des", "les", "une", "mes", "tes", "ses", "tous", "tout",
+                 "the", "and", "for", "with", "que", "qui", "quoi", "quel",
+                 "quels", "quelles", "this", "that", "have", "from"}
+        tokens = [t for t in tokens if t not in _STOP]
+        if not tokens:
+            tokens = [query.lower()]
+
+        # Construit la clause OR avec parametres nommes (:k0, :v0, :k1, :v1, ...)
+        like_clauses: list[str] = []
+        params: dict[str, Any] = {"uid": self.user_id}
+        for i, tok in enumerate(tokens[:8]):
+            esc = _escape_like(tok)
+            like_clauses.append(
+                f"(key LIKE :k{i} ESCAPE '\\' OR value LIKE :v{i} ESCAPE '\\')"
+            )
+            params[f"k{i}"] = f"%{esc}%"
+            params[f"v{i}"] = f"%{esc}%"
+        sql = (
+            "SELECT key, value, category, updated_at FROM agent3_memory "
+            f"WHERE auth_user_id = :uid AND ({' OR '.join(like_clauses)}) "
+            "ORDER BY updated_at DESC LIMIT 20"
+        )
+
+        from sqlalchemy import text
+        from api.database import get_session_factory
+        factory = get_session_factory()
+        try:
+            async with factory() as session:
+                result = await session.execute(text(sql), params)
+                rows = result.mappings().all()
+        except Exception as e:
+            logger.debug(f"_memory_search_async failed: {e}")
+            return {
+                "content": f"Erreur recherche memoire : {type(e).__name__}",
+                "is_error": True, "raw": {"error": str(e)},
+            }
+
+        if not rows:
+            return {
+                "content": f"Aucun souvenir trouve pour '{query}'.",
+                "is_error": False,
+                "raw": {"query": query, "count": 0},
+            }
+        lines = [f"- {r['key']}: {(r['value'] or '')[:200]}" for r in rows]
+        return {
+            "content": f"{len(rows)} souvenirs trouves :\n" + "\n".join(lines),
+            "is_error": False,
+            "raw": {"query": query, "count": len(rows)},
+        }
+
+    async def _cron_async(self, inp: dict) -> dict:
+        """Version PG-compatible de _cron (CREATE TABLE + INSERT via SQLAlchemy).
+
+        Ne s'appuie plus sur DatabaseManager : utilise get_session_factory().
+        """
+        import uuid
+        from datetime import datetime, timezone
+        from sqlalchemy import text
+        from api.database import get_session_factory
+
+        label = (inp.get("label") or "Tache Sylea").strip()
+        instruction = (inp.get("instruction") or "").strip()
+        cron_expr = (inp.get("cron_expr") or inp.get("schedule") or "0 9 * * *").strip()
+        if not instruction:
+            return {
+                "content": "Champ 'instruction' requis : quoi executer a chaque tick.",
+                "is_error": True, "raw": {},
+            }
+        if not self.user_id:
+            return {
+                "content": "CRON indisponible : utilisateur non authentifie.",
+                "is_error": True, "raw": {},
+            }
+
+        cron_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        factory = get_session_factory()
+        try:
+            async with factory() as session:
+                try:
+                    await session.execute(
+                        text(
+                            "CREATE TABLE IF NOT EXISTS agent3_cron ("
+                            "id TEXT PRIMARY KEY, auth_user_id TEXT, label TEXT, "
+                            "instruction TEXT, cron_expr TEXT, enabled INTEGER DEFAULT 1, "
+                            "created_at TEXT)"
+                        )
+                    )
+                    await session.execute(
+                        text(
+                            "INSERT INTO agent3_cron "
+                            "(id, auth_user_id, label, instruction, cron_expr, "
+                            " enabled, created_at) "
+                            "VALUES (:id, :uid, :label, :instr, :expr, 1, :now)"
+                        ),
+                        {
+                            "id": cron_id,
+                            "uid": self.user_id,
+                            "label": label,
+                            "instr": instruction,
+                            "expr": cron_expr,
+                            "now": now,
+                        },
+                    )
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    raise
+            return {
+                "content": (
+                    f"Tache '{label}' programmee ({cron_expr}). "
+                    "Elle s'executera selon le planning."
+                ),
+                "is_error": False,
+                "raw": {
+                    "cron_id": cron_id, "label": label,
+                    "cron_expr": cron_expr, "instruction": instruction[:200],
+                },
+            }
+        except Exception as e:
+            logger.exception(f"CRON async insert failed: {e}")
+            return {
+                "content": f"Erreur programmation cron : {type(e).__name__} {e}",
+                "is_error": True, "raw": {"error": str(e)},
+            }
+
+    async def _reminder_async(self, inp: dict) -> dict:
+        """Version PG-compatible de _reminder (CREATE TABLE + INSERT via SQLAlchemy)."""
+        from datetime import datetime, timedelta, timezone
+        from sqlalchemy import text
+        from api.database import get_session_factory
+
+        message = (inp.get("message") or inp.get("text") or "").strip()
+        if not message:
+            return {
+                "content": "Champ 'message' requis : que dois-je te rappeler ?",
+                "is_error": True, "raw": {},
+            }
+        if not self.user_id:
+            return {
+                "content": "REMINDER indisponible : utilisateur non authentifie.",
+                "is_error": True, "raw": {},
+            }
+
+        delay_minutes = inp.get("delay_minutes")
+        rdate = (inp.get("reminder_date") or "").strip()
+        rtime = (inp.get("reminder_time") or "").strip()
+
+        if delay_minutes is not None:
+            try:
+                delay = int(delay_minutes)
+            except (ValueError, TypeError):
+                return {
+                    "content": "delay_minutes doit etre un entier (minutes)",
+                    "is_error": True, "raw": {},
+                }
+            target = datetime.now(timezone.utc) + timedelta(minutes=delay)
+            target_local = target.astimezone()
+            rdate = target_local.strftime("%Y-%m-%d")
+            rtime = target_local.strftime("%H:%M")
+        elif not (rdate and rtime):
+            return {
+                "content": (
+                    "Fournis soit `delay_minutes` (ex 120 pour 2h) "
+                    "soit `reminder_date`+`reminder_time`."
+                ),
+                "is_error": True, "raw": {},
+            }
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        factory = get_session_factory()
+        try:
+            async with factory() as session:
+                try:
+                    await session.execute(
+                        text(
+                            "CREATE TABLE IF NOT EXISTS agent_reminders ("
+                            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                            "user_id TEXT NOT NULL, "
+                            "agent_id TEXT DEFAULT 'agent3', "
+                            "reminder_time TEXT NOT NULL, "
+                            "reminder_date TEXT NOT NULL, "
+                            "message TEXT NOT NULL, "
+                            "completed INTEGER DEFAULT 0, "
+                            "created_at TEXT NOT NULL)"
+                        )
+                    )
+                    result = await session.execute(
+                        text(
+                            "INSERT INTO agent_reminders "
+                            "(user_id, agent_id, reminder_time, reminder_date, "
+                            " message, completed, created_at) "
+                            "VALUES (:uid, 'agent3', :rtime, :rdate, :msg, 0, :now)"
+                        ),
+                        {
+                            "uid": self.user_id,
+                            "rtime": rtime,
+                            "rdate": rdate,
+                            "msg": message,
+                            "now": now_iso,
+                        },
+                    )
+                    await session.commit()
+                    # lastrowid : seulement disponible en SQLite ; en PG on n'a
+                    # pas l'id (la table utilise AUTOINCREMENT/SERIAL).
+                    reminder_id = getattr(result, "lastrowid", None)
+                except Exception:
+                    await session.rollback()
+                    raise
+            return {
+                "content": (
+                    f"Rappel programme pour {rdate} a {rtime} : \"{message[:80]}\""
+                ),
+                "is_error": False,
+                "raw": {
+                    "reminder_id": reminder_id,
+                    "reminder_date": rdate,
+                    "reminder_time": rtime,
+                    "message": message[:200],
+                },
+            }
+        except Exception as e:
+            logger.exception(f"REMINDER async insert failed: {e}")
+            return {
+                "content": f"Erreur programmation rappel : {type(e).__name__} {e}",
+                "is_error": True, "raw": {"error": str(e)},
+            }
 
 
 __all__ = ["Agent3ActionDispatcher"]

@@ -53,68 +53,9 @@ def _cutoff_timestamp(days: int) -> float:
     return time.time() - days * 86400
 
 
-def _user_retention_days(db: Any, user_id: str, key: str, fallback: int) -> int:
-    """Lit la pref user ou fallback."""
-    try:
-        row = db.conn.execute(
-            "SELECT prefs_json FROM agent3_preferences WHERE auth_user_id = ?",
-            (user_id,),
-        ).fetchone()
-        if row and row[0]:
-            import json
-            prefs = json.loads(row[0]) or {}
-            val = prefs.get(f"retention_{key}_days")
-            if isinstance(val, (int, float)) and val > 0:
-                return int(val)
-    except Exception:
-        pass
-    return fallback
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Operations de cleanup
 # ─────────────────────────────────────────────────────────────────────────────
-
-def cleanup_messages(db: Any, days: int) -> int:
-    """Supprime les messages > days. Retourne le count."""
-    try:
-        cursor = db.conn.execute(
-            "DELETE FROM agent3_messages WHERE created_at < ?",
-            (_cutoff_iso(days),),
-        )
-        db.conn.commit()
-        return cursor.rowcount or 0
-    except Exception as e:
-        logger.debug(f"cleanup_messages failed: {e}")
-        return 0
-
-
-def cleanup_events(db: Any, days: int) -> int:
-    """Supprime les clawhub events > days."""
-    try:
-        cursor = db.conn.execute(
-            "DELETE FROM agent3_clawhub_events WHERE created_at < ?",
-            (_cutoff_iso(days),),
-        )
-        db.conn.commit()
-        return cursor.rowcount or 0
-    except Exception as e:
-        logger.debug(f"cleanup_events failed: {e}")
-        return 0
-
-
-def cleanup_audit_log(db: Any, days: int) -> int:
-    try:
-        cursor = db.conn.execute(
-            "DELETE FROM agent3_audit_log WHERE created_at < ?",
-            (_cutoff_iso(days),),
-        )
-        db.conn.commit()
-        return cursor.rowcount or 0
-    except Exception as e:
-        logger.debug(f"cleanup_audit_log failed: {e}")
-        return 0
-
 
 def cleanup_figures(days: int, figures_dir: Path | None = None) -> int:
     """Supprime les figures matplotlib > days (sur disque)."""
@@ -144,88 +85,9 @@ def cleanup_figures(days: int, figures_dir: Path | None = None) -> int:
     return deleted
 
 
-def cleanup_uploads(db: Any, days: int) -> int:
-    """Supprime les uploads > days (DB + disque)."""
-    cutoff = _cutoff_iso(days)
-    try:
-        rows = db.conn.execute(
-            "SELECT id, filepath FROM agent3_files WHERE created_at < ?",
-            (cutoff,),
-        ).fetchall()
-    except Exception as e:
-        logger.debug(f"cleanup_uploads read failed: {e}")
-        return 0
-
-    ids_to_delete = []
-    files_removed = 0
-    for row in rows:
-        try:
-            fp = row[1]
-            if fp:
-                p = Path(fp)
-                if p.exists() and p.is_file():
-                    p.unlink()
-                    files_removed += 1
-            ids_to_delete.append(row[0])
-        except Exception:
-            continue
-
-    if ids_to_delete:
-        placeholders = ",".join("?" * len(ids_to_delete))
-        try:
-            db.conn.execute(
-                f"DELETE FROM agent3_files WHERE id IN ({placeholders})",
-                tuple(ids_to_delete),
-            )
-            db.conn.commit()
-        except Exception as e:
-            logger.debug(f"cleanup_uploads delete failed: {e}")
-
-    return files_removed
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Pass unique (appele par le scheduler)
+# Pass unique (appele par le scheduler) — uniquement via run_retention_pass_async
 # ─────────────────────────────────────────────────────────────────────────────
-
-def run_retention_pass(db: Any, *, force: bool = False) -> dict[str, Any]:
-    """Execute tous les cleanups d'un coup.
-
-    Respecte _RETENTION_MIN_INTERVAL_S (6h) sauf si force=True.
-    Retourne un resume {table: count_deleted, duration_s}.
-    """
-    global _last_run_at
-    now = time.time()
-    with _last_run_at_lock:
-        if not force and (now - _last_run_at) < _RETENTION_MIN_INTERVAL_S:
-            remaining = _RETENTION_MIN_INTERVAL_S - (now - _last_run_at)
-            return {"skipped": True, "next_run_in_s": int(remaining)}
-        _last_run_at = now
-
-    start = time.time()
-    results: dict[str, int] = {}
-
-    # Defaults — on applique les defauts globaux (par user serait trop lent ici)
-    results["messages"] = cleanup_messages(db, DEFAULT_RETENTION_DAYS["messages"])
-    results["events"] = cleanup_events(db, DEFAULT_RETENTION_DAYS["events"])
-    results["audit_log"] = cleanup_audit_log(db, DEFAULT_RETENTION_DAYS["audit_log"])
-    results["figures"] = cleanup_figures(DEFAULT_RETENTION_DAYS["figures"])
-    results["uploads"] = cleanup_uploads(db, DEFAULT_RETENTION_DAYS["uploads"])
-
-    duration = time.time() - start
-    total = sum(results.values())
-    logger.info(
-        f"retention_pass: deleted {total} items in {duration:.2f}s — "
-        + ", ".join(f"{k}={v}" for k, v in results.items())
-    )
-    return {
-        "deleted_by_category": results,
-        "total_deleted": total,
-        "duration_s": round(duration, 3),
-        "ran_at": datetime.now(timezone.utc).isoformat(),
-        "skipped": False,
-    }
-
 
 def get_last_run_info() -> dict[str, Any]:
     with _last_run_at_lock:
@@ -250,12 +112,202 @@ def reset_retention_tracker() -> None:
 
 __all__ = [
     "DEFAULT_RETENTION_DAYS",
-    "cleanup_messages",
-    "cleanup_events",
-    "cleanup_audit_log",
     "cleanup_figures",
-    "cleanup_uploads",
-    "run_retention_pass",
     "get_last_run_info",
     "reset_retention_tracker",
+    # Async versions (migration PG, 2026-05-13)
+    "cleanup_messages_async",
+    "cleanup_events_async",
+    "cleanup_audit_log_async",
+    "cleanup_uploads_async",
+    "run_retention_pass_async",
+    "_user_retention_days_async",
 ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _user_retention_days_async(user_id: str, key: str, fallback: int) -> int:
+    """Version async de _user_retention_days — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    import json as _json
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT prefs_json FROM agent3_preferences "
+                    "WHERE auth_user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            row = result.first()
+            if row and row[0]:
+                prefs = _json.loads(row[0]) or {}
+                val = prefs.get(f"retention_{key}_days")
+                if isinstance(val, (int, float)) and val > 0:
+                    return int(val)
+        except Exception:
+            pass
+    return fallback
+
+
+async def cleanup_messages_async(days: int) -> int:
+    """Version async de cleanup_messages — PG-compatible.
+
+    Plus de parametre `db` : utilise get_session_factory() directement.
+    Retourne le nombre de lignes supprimees.
+    """
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text("DELETE FROM agent3_messages WHERE created_at < :cutoff"),
+                {"cutoff": _cutoff_iso(days)},
+            )
+            await session.commit()
+            return int(getattr(result, "rowcount", 0) or 0)
+        except Exception as e:
+            await session.rollback()
+            logger.debug(f"cleanup_messages_async failed: {e}")
+            return 0
+
+
+async def cleanup_events_async(days: int) -> int:
+    """Version async de cleanup_events — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text("DELETE FROM agent3_clawhub_events WHERE created_at < :cutoff"),
+                {"cutoff": _cutoff_iso(days)},
+            )
+            await session.commit()
+            return int(getattr(result, "rowcount", 0) or 0)
+        except Exception as e:
+            await session.rollback()
+            logger.debug(f"cleanup_events_async failed: {e}")
+            return 0
+
+
+async def cleanup_audit_log_async(days: int) -> int:
+    """Version async de cleanup_audit_log — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text("DELETE FROM agent3_audit_log WHERE created_at < :cutoff"),
+                {"cutoff": _cutoff_iso(days)},
+            )
+            await session.commit()
+            return int(getattr(result, "rowcount", 0) or 0)
+        except Exception as e:
+            await session.rollback()
+            logger.debug(f"cleanup_audit_log_async failed: {e}")
+            return 0
+
+
+async def cleanup_uploads_async(days: int) -> int:
+    """Version async de cleanup_uploads — PG-compatible.
+
+    Lit la table agent3_files, supprime physiquement les fichiers,
+    puis purge les lignes correspondantes en DB.
+    """
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    cutoff = _cutoff_iso(days)
+    factory = get_session_factory()
+
+    rows: list[Any] = []
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT id, filepath FROM agent3_files "
+                    "WHERE created_at < :cutoff"
+                ),
+                {"cutoff": cutoff},
+            )
+            rows = result.mappings().all()
+        except Exception as e:
+            logger.debug(f"cleanup_uploads_async read failed: {e}")
+            return 0
+
+    ids_to_delete: list[str] = []
+    files_removed = 0
+    for row in rows:
+        try:
+            fp = row["filepath"]
+            if fp:
+                p = Path(fp)
+                if p.exists() and p.is_file():
+                    p.unlink()
+                    files_removed += 1
+            ids_to_delete.append(row["id"])
+        except Exception:
+            continue
+
+    if ids_to_delete:
+        # Construit une clause IN avec parametres nommes (:id0, :id1, ...)
+        placeholders = ",".join(f":id{i}" for i in range(len(ids_to_delete)))
+        params = {f"id{i}": v for i, v in enumerate(ids_to_delete)}
+        async with factory() as session:
+            try:
+                await session.execute(
+                    text(f"DELETE FROM agent3_files WHERE id IN ({placeholders})"),
+                    params,
+                )
+                await session.commit()
+            except Exception as e:
+                await session.rollback()
+                logger.debug(f"cleanup_uploads_async delete failed: {e}")
+
+    return files_removed
+
+
+async def run_retention_pass_async(*, force: bool = False) -> dict[str, Any]:
+    """Version async de run_retention_pass — PG-compatible.
+
+    Respecte _RETENTION_MIN_INTERVAL_S (6h) sauf si force=True.
+    Plus de parametre `db` : delegue aux versions async.
+    """
+    global _last_run_at
+    now = time.time()
+    with _last_run_at_lock:
+        if not force and (now - _last_run_at) < _RETENTION_MIN_INTERVAL_S:
+            remaining = _RETENTION_MIN_INTERVAL_S - (now - _last_run_at)
+            return {"skipped": True, "next_run_in_s": int(remaining)}
+        _last_run_at = now
+
+    start = time.time()
+    results: dict[str, int] = {}
+
+    results["messages"] = await cleanup_messages_async(DEFAULT_RETENTION_DAYS["messages"])
+    results["events"] = await cleanup_events_async(DEFAULT_RETENTION_DAYS["events"])
+    results["audit_log"] = await cleanup_audit_log_async(DEFAULT_RETENTION_DAYS["audit_log"])
+    # cleanup_figures n'utilise pas la DB — sync direct
+    results["figures"] = cleanup_figures(DEFAULT_RETENTION_DAYS["figures"])
+    results["uploads"] = await cleanup_uploads_async(DEFAULT_RETENTION_DAYS["uploads"])
+
+    duration = time.time() - start
+    total = sum(results.values())
+    logger.info(
+        f"retention_pass_async: deleted {total} items in {duration:.2f}s — "
+        + ", ".join(f"{k}={v}" for k, v in results.items())
+    )
+    return {
+        "deleted_by_category": results,
+        "total_deleted": total,
+        "duration_s": round(duration, 3),
+        "ran_at": datetime.now(timezone.utc).isoformat(),
+        "skipped": False,
+    }

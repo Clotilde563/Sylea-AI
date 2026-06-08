@@ -94,8 +94,17 @@ export function SyleaSplash({ onDone }: { onDone: () => void }) {
               <stop offset="100%" stopColor="#00c8ff"/>
             </linearGradient>
 
-            {/* ── Filtre halo flou ── */}
-            <filter id="sp-blur-halo">
+            {/* ── Filtre halo flou ──
+                IMPORTANT : on étend la région du filtre bien au-delà du
+                bounding box par défaut (-10%/+120%) sinon le flou est
+                clipped et un rectangle visible apparaît autour du logo.
+                x/y -100% + width/height 300% = filtre rendu sur une zone
+                3× plus grande que le path, le halo se dissipe naturellement. */}
+            <filter
+              id="sp-blur-halo"
+              x="-100%" y="-100%" width="300%" height="300%"
+              filterUnits="objectBoundingBox"
+            >
               <feGaussianBlur stdDeviation="24"/>
             </filter>
           </defs>

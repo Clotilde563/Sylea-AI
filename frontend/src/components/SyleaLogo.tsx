@@ -36,8 +36,9 @@ export function SyleaLogo({ size = 40, animated = true }: SyleaLogoProps) {
           <stop offset="100%" stopColor="#00c8ff"/>
         </linearGradient>
 
-        {/* Halo flou */}
-        <filter id={haloId}>
+        {/* Halo flou — région étendue pour éviter le clipping rectangulaire */}
+        <filter id={haloId} x="-100%" y="-100%" width="300%" height="300%"
+                filterUnits="objectBoundingBox">
           <feGaussianBlur stdDeviation="5"/>
         </filter>
       </defs>

@@ -9,25 +9,21 @@ import { useT } from '../i18n/LanguageContext'
 import { useDeviceContext } from '../contexts/DeviceContext'
 import { AgentSyleaLogo } from '../components/AgentSyleaLogo'
 import { AGENT_COLORS } from '../constants/agentColors'
-import type { AnalyseDilemme, Decision } from '../types'
+import type { AnalyseDilemme, Decision, TrackingItem } from '../types'
+import { shouldShowRecommendation } from '../utils/tracking'
 
 type Phase = 'form' | 'loading' | 'result' | 'done'
 
 // ── Active agent detection ───────────────────────────────────────────────────
-function getActiveAgent(): { id: 1 | 2 | 3; name: string; colors: { primary: string; gradient: string; bg: string; border: string; btnBg: string; btnColor: string } } | null {
+function getActiveAgent(): { id: 1 | 2; name: string; colors: { primary: string; gradient: string; bg: string; border: string; btnBg: string; btnColor: string } } | null {
   const a1 = localStorage.getItem('sylea_agent1_active') === 'true'
   const a2 = localStorage.getItem('sylea_agent2_active') === 'true'
-  const a3 = localStorage.getItem('sylea_agent3_active') === 'true'
-  if (a3) return {
-    id: 3, name: 'Agent Sylea 3',
-    colors: { primary: AGENT_COLORS.agent3.primary, gradient: 'linear-gradient(135deg, #1e3a5f, #2563eb, #d4a017, #fbbf24)', bg: 'rgba(37,99,235,0.08)', border: 'rgba(37,99,235,0.3)', btnBg: 'linear-gradient(135deg, #2563eb, #d4a017)', btnColor: 'white' },
-  }
   if (a2) return {
-    id: 2, name: 'Agent Sylea 2',
+    id: 2, name: 'Agent Syléa 2',
     colors: { primary: AGENT_COLORS.agent2.primary, gradient: 'linear-gradient(135deg, #b91c1c, #ef4444, #f87171)', bg: 'rgba(239,68,68,0.08)', border: 'rgba(239,68,68,0.3)', btnBg: 'linear-gradient(135deg, #b91c1c, #ef4444)', btnColor: 'white' },
   }
   if (a1) return {
-    id: 1, name: 'Agent Sylea 1',
+    id: 1, name: 'Agent Syléa 1',
     colors: { primary: AGENT_COLORS.agent1.primary, gradient: 'linear-gradient(135deg, #d4a017, #f59e0b, #fbbf24)', bg: 'rgba(212,160,23,0.08)', border: 'rgba(212,160,23,0.3)', btnBg: 'linear-gradient(135deg, #d4a017, #f59e0b)', btnColor: '#0d0d14' },
   }
   return null
@@ -54,10 +50,11 @@ export function DilemmePage() {
 
   const [phase, setPhase] = useState<Phase>(analyse ? 'result' : 'form')
   const [options, setOptions] = useState<string[]>(['', ''])
-  const [choixSelectionne, setChoixSelectionne] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
-  const [sousObjectifImpacte, setSousObjectifImpacte] = useState<string | null>(null)
+  // Phase 'done' : tracking cree, on affiche l'ID + nb_periodes pour rassurer
+  // l'user que les notifs vont arriver.
+  const [trackingCree, setTrackingCree] = useState<TrackingItem | null>(null)
   const [impactTemporel, setImpactTemporel] = useState<string>('1_mois')
   const [customYears, setCustomYears] = useState(0)
   const [customMonths, setCustomMonths] = useState(0)
@@ -70,6 +67,11 @@ export function DilemmePage() {
   const [contextProvided, setContextProvided] = useState(false)
   const [contextLoading, setContextLoading] = useState(false)
   const [contextFeedback, setContextFeedback] = useState<string | null>(null)
+  // Compteur de tentatives pour le contexte. Au-dela de MAX_CONTEXT_ATTEMPTS (3),
+  // on force-pass meme si Claude juge insuffisant -> evite la boucle infinie
+  // ou l'user reste prisonnier du panel. Le backend a aussi son propre cap.
+  const [contextAttempts, setContextAttempts] = useState(0)
+  const MAX_CONTEXT_ATTEMPTS = 3
   const [isListeningCtx, setIsListeningCtx] = useState(false)
   const recognitionCtxRef = useRef<any>(null)
 
@@ -156,6 +158,8 @@ export function DilemmePage() {
     if (!text.trim()) return
     setContextLoading(true)
     setContextFeedback(null)
+    const newAttempt = contextAttempts + 1
+    setContextAttempts(newAttempt)
     try {
       const questionAuto = `${options.map(o => o.trim()).join(' vs ')}`
       const result = await api.agentSaveContext(
@@ -164,9 +168,13 @@ export function DilemmePage() {
         'dilemme',
         questionAuto,
         options.map(o => o.trim()),
+        newAttempt,
       )
       setContextInput('')
-      if (result.sufficient) {
+      // Force-pass apres MAX_CONTEXT_ATTEMPTS pour ne JAMAIS piéger l'user.
+      // Le backend a sa propre garde a >=3 attempts, mais on duplique cote
+      // front pour gerer aussi le cas API down.
+      if (result.sufficient || newAttempt >= MAX_CONTEXT_ATTEMPTS) {
         setContextProvided(true)
         setContextNeeded(false)
       } else {
@@ -177,6 +185,7 @@ export function DilemmePage() {
         }
       }
     } catch {
+      // En cas d'erreur reseau, on est indulgent : on avance
       setContextProvided(true)
       setContextNeeded(false)
     } finally {
@@ -239,25 +248,37 @@ export function DilemmePage() {
     }
   }
 
-  const handleChoisir = async () => {
-    if (!analyse || !choixSelectionne) return
+  // NOUVEAU FLOW (commit 2/3 tracking) : au lieu de choisir une option et
+  // d'appliquer l'impact immediatement, on demarre un TRACKING. L'utilisateur
+  // ne choisit PAS de A/B/C maintenant — c'est via les notifs periodiques
+  // (J+30, J+60, ...) qu'on lui demande ce qu'il a REELLEMENT fait. A la fin
+  // du tracking, un recap pondere applique l'impact reel.
+  const handleConfirmer = async () => {
+    if (!analyse) return
     setSubmitting(true)
     setError(null)
     try {
-      const choixResult = await api.choisirOption({
+      const impactJours = getImpactDays() || 30
+      // Timezone du device (Europe/Paris, America/New_York, ...)
+      const deviceTz = (() => {
+        try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' } catch { return 'UTC' }
+      })()
+      const r = await api.trackingCreate({
         question: analyse.question,
-        options: analyse.options,
-        choix: choixSelectionne,
-        impact_temporel_jours: getImpactDays(),
-        contexte_appareil: deviceCtx ?? undefined,
+        options: analyse.options.map(o => ({
+          lettre: o.lettre,
+          description: o.description,
+          impact_jours: o.impact_jours,
+          pros: o.pros,
+          cons: o.cons,
+          resume: o.resume,
+        })),
+        impact_temporel_jours: impactJours,
+        verdict: analyse.verdict,
+        etude_scientifique: analyse.etude_scientifique || '',
+        device_tz: deviceTz,
       })
-      if (choixResult?.sous_objectif_impacte) {
-        setSousObjectifImpacte(choixResult.sous_objectif_impacte)
-      }
-      // Recharger le profil pour la probabilité mise à jour
-      const updated = await api.getProfil()
-      setProfil(updated)
-      await refreshSousObjectifs()
+      setTrackingCree(r.tracking)
       setAnalyse(null)
       setPhase('done')
     } catch (e: unknown) {
@@ -269,10 +290,9 @@ export function DilemmePage() {
 
   const handleReset = () => {
     setOptions(['', ''])
-    setChoixSelectionne(null)
     setAnalyse(null)
     setError(null)
-    setSousObjectifImpacte(null)
+    setTrackingCree(null)
     setImpactTemporel('1_mois')
     setCustomYears(0)
     setCustomMonths(0)
@@ -282,18 +302,31 @@ export function DilemmePage() {
     setContextInput('')
     setContextProvided(false)
     setContextFeedback(null)
+    setContextAttempts(0)
     setPhase('form')
+  }
+
+  // Helper : invalide le contexte fourni quand l'user modifie ses options.
+  // Sinon on garderait un contexte stale (ex: contexte donne pour "Marc vs Paul"
+  // mais l'user a maintenant tape "Sarah vs Lucas" -> faut re-checker).
+  const invalidateContext = () => {
+    if (contextProvided) {
+      setContextProvided(false)
+      setContextAttempts(0)
+    }
   }
 
   const addOption = () => {
     if (options.length < MAX_OPTIONS) {
       setOptions([...options, ''])
+      invalidateContext()
     }
   }
 
   const removeOption = (index: number) => {
     if (options.length > MIN_OPTIONS) {
       setOptions(options.filter((_, i) => i !== index))
+      invalidateContext()
     }
   }
 
@@ -301,6 +334,7 @@ export function DilemmePage() {
     const next = [...options]
     next[index] = value
     setOptions(next)
+    invalidateContext()
   }
 
   if (!profil) {
@@ -320,12 +354,24 @@ export function DilemmePage() {
     <div className="page animate-fade-in">
       <div className="container page-content">
 
-        {/* En-tête */}
-        <div style={{ marginBottom: '2rem' }}>
-          <h2 style={{ color: 'var(--accent-silver)', marginBottom: '0.375rem' }}>
+        {/* En-tête — Linear style */}
+        <div style={{ marginBottom: 'var(--space-8)' }}>
+          <h1 style={{
+            fontSize: 'var(--fs-3xl)',
+            fontWeight: 700,
+            letterSpacing: 'var(--tracking-tight)',
+            color: 'var(--text-primary)',
+            marginBottom: 'var(--space-2)',
+            lineHeight: 1.15,
+          }}>
             {t('dilemme.analyser_choix')}
-          </h2>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+          </h1>
+          <p style={{
+            color: 'var(--text-muted)',
+            fontSize: 'var(--fs-md)',
+            lineHeight: 1.55,
+            maxWidth: 600,
+          }}>
             {t('dilemme.analyser_desc')}
           </p>
         </div>
@@ -568,7 +614,7 @@ export function DilemmePage() {
                       value={contextInput}
                       onChange={(e) => setContextInput(e.target.value)}
                       onKeyDown={(e) => { if (e.key === 'Enter') handleSendContext(contextInput) }}
-                      placeholder="Ta reponse..."
+                      placeholder={t('common.ta_reponse_placeholder')}
                       style={{ flex: 1 }}
                       disabled={contextLoading}
                     />
@@ -698,18 +744,30 @@ export function DilemmePage() {
         )}
 
         {/* Phase : Résultat */}
-        {phase === 'result' && analyse && (
+        {phase === 'result' && analyse && (() => {
+          // NOUVEAU FLOW : OptionCards DISPLAY-ONLY (pas de choix immediat).
+          // L'utilisateur ne sait pas a l'avance ce qu'il fera reellement →
+          // on lui demandera periode par periode via les notifs (J+30 etc).
+          //
+          // RECOMMANDATION : on affiche TOUJOURS le badge "Recommande" sur
+          // l'option choisie par Claude. C'est l'option avec le MEILLEUR
+          // impact (positif OU le moins negatif). Recommander "la moins pire"
+          // donne un signal d'arbitrage utile a l'utilisateur quand toutes
+          // les options sont mauvaises. Le verdict apporte la nuance ("aucune
+          // n'est vraiment alignee, mais si tu dois en choisir une, prends A").
+          const showRecoBadge = shouldShowRecommendation(analyse.options)
+          return (
           <div className="animate-fade-in">
-            {/* Options */}
+            {/* Options - display only */}
             <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
               {analyse.options.map((opt) => (
                 <OptionCard
                   key={opt.lettre}
                   lettre={opt.lettre}
                   option={opt}
-                  recommandee={analyse.option_recommandee === opt.lettre}
-                  selected={choixSelectionne === opt.lettre}
-                  onSelect={() => setChoixSelectionne(choixSelectionne === opt.lettre ? null : opt.lettre)}
+                  recommandee={showRecoBadge && analyse.option_recommandee === opt.lettre}
+                  selected={false}
+                  onSelect={undefined /* display-only */}
                 />
               ))}
             </div>
@@ -754,50 +812,77 @@ export function DilemmePage() {
               <p style={{ color: 'var(--danger)', fontSize: '0.875rem', marginBottom: '1rem' }}>{'\u26A0'} {error}</p>
             )}
 
-            {/* Actions */}
+            {/* Actions : Confirmer (demarre tracking) | Nouveau dilemme */}
             <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
               <button className="btn btn-outline" onClick={handleReset}>
                 {'\u2190'} {t('dilemme.nouveau_dilemme')}
               </button>
               <button
                 className="btn btn-gold"
-                onClick={handleChoisir}
-                disabled={!choixSelectionne || submitting}
+                onClick={handleConfirmer}
+                disabled={submitting}
               >
-                {submitting
-                  ? t('dilemme.enregistrement')
-                  : choixSelectionne
-                  ? `\u2713 ${t('dilemme.valider_option')} ${choixSelectionne}`
-                  : t('dilemme.selectionnez_option')}
+                {submitting ? t('dilemme.enregistrement') : '\u2713 Confirmer et d\u00E9marrer le suivi'}
               </button>
             </div>
           </div>
-        )}
+          )
+        })()}
 
-        {/* Phase : Confirmation */}
-        {phase === 'done' && (
+        {/* Phase : Confirmation (tracking demarre) */}
+        {phase === 'done' && trackingCree && (() => {
+          // Calcule la date de la 1ere notif au format lisible
+          const nextNotif = trackingCree.next_notif_at
+            ? new Date(trackingCree.next_notif_at).toLocaleString('fr-FR', {
+                day: '2-digit', month: 'long', year: 'numeric',
+                hour: '2-digit', minute: '2-digit',
+              })
+            : '\u2014'
+          const nbPeriodes = trackingCree.nb_periodes
+          const dureeJours = trackingCree.impact_temporel_jours
+          const cadence = dureeJours <= 30 ? '1 notification \u00E0 la fin' : `${nbPeriodes} notifications mensuelles`
+          return (
           <div
             className="card animate-fade-in-scale"
             style={{
-              maxWidth: '480px',
+              maxWidth: '540px',
               margin: '0 auto',
-              textAlign: 'center',
-              padding: '2.5rem',
+              padding: '2.25rem 2rem',
               border: '1px solid var(--success)',
               boxShadow: '0 0 32px rgba(34,197,94,0.15)',
+              textAlign: 'center',
             }}
           >
-            <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>{'\u2713'}</div>
-            <h3 style={{ color: 'var(--success)', marginBottom: '0.75rem' }}>{t('dilemme.decision_enregistree')}</h3>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1rem', lineHeight: '1.5' }}>
-              {t('dilemme.choix_sauvegarde')}
+            <div style={{ fontSize: '3rem', marginBottom: '0.75rem' }}>{'\u25C7'}</div>
+            <h3 style={{ color: 'var(--success)', marginBottom: '0.5rem' }}>
+              {'Suivi d\u00E9marr\u00E9'}
+            </h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem', marginBottom: '1.5rem', lineHeight: 1.55 }}>
+              {`Aucun impact appliqu\u00E9 pour l'instant. Sylea vous notifiera `}
+              <strong style={{ color: '#fbbf24' }}> {cadence}</strong>
+              {' pour vous demander ce que vous avez r\u00E9ellement fait.'}
             </p>
-            {sousObjectifImpacte && (
-              <div style={{ background: 'rgba(96,165,250,0.08)', border: '1px solid rgba(96,165,250,0.25)', borderRadius: 'var(--radius-md)', padding: '0.6rem 1rem', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <span style={{ color: '#60a5fa', fontSize: '0.8rem' }}>{'\u21B3'}</span>
-                <span style={{ color: '#93c5fd', fontSize: '0.82rem' }}>{t('dilemme.sous_objectif_impacte')} : <strong>{sousObjectifImpacte}</strong></span>
+            <div style={{
+              background: 'rgba(96,165,250,0.08)',
+              border: '1px solid rgba(96,165,250,0.25)',
+              borderRadius: 'var(--radius-md)',
+              padding: '0.85rem 1rem',
+              marginBottom: '1.5rem',
+              textAlign: 'left',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: '#93c5fd', marginBottom: '0.35rem' }}>
+                <span>{'Dur\u00E9e du suivi\u00A0:'}</span>
+                <strong>{dureeJours} {dureeJours <= 1 ? 'jour' : 'jours'}</strong>
               </div>
-            )}
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: '#93c5fd', marginBottom: '0.35rem' }}>
+                <span>{'Nombre de p\u00E9riodes\u00A0:'}</span>
+                <strong>{nbPeriodes}</strong>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: '#93c5fd' }}>
+                <span>{'Premi\u00E8re notification\u00A0:'}</span>
+                <strong>{nextNotif}</strong>
+              </div>
+            </div>
             <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center' }}>
               <button className="btn btn-outline btn-sm" onClick={handleReset}>
                 {t('dilemme.nouveau_dilemme')}
@@ -807,7 +892,8 @@ export function DilemmePage() {
               </button>
             </div>
           </div>
-        )}
+          )
+        })()}
 
       </div>
     </div>

@@ -15,11 +15,11 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from api.context_helper import format_device_context, build_full_user_context
+from api.context_helper import format_device_context, build_full_user_context_async
 from api.dependencies import get_db, get_optional_user
 from sylea.core.storage.database import DatabaseManager
 from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
@@ -27,20 +27,25 @@ from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
 # v2 enrichments : shared memory + awareness + Google context
 try:
     from api.agent_shared_memory import (
-        load_memories, format_memories, auto_extract_from_turns,
+        load_memories_async,
+        save_memory_async,
+        delete_memory_async,
+        format_memories, auto_extract_from_turns,
     )
 except Exception:
-    load_memories = lambda *a, **k: []
+    async def load_memories_async(*a, **k): return []
+    async def save_memory_async(*a, **k): return None
+    async def delete_memory_async(*a, **k): return False
     format_memories = lambda m, **k: ""
     async def auto_extract_from_turns(*a, **k): return []
 try:
-    from api.agent3_awareness import build_awareness_block
+    from api.agent3_awareness import build_awareness_block_async
 except Exception:
-    def build_awareness_block(db, user_id): return ""
+    async def build_awareness_block_async(user_id): return ""
 try:
-    from api.google_context import build_google_context_block
+    from api.google_context import build_google_context_block_async
 except Exception:
-    async def build_google_context_block(db, user_id): return ""
+    async def build_google_context_block_async(user_id): return ""
 
 router = APIRouter(prefix="/api/agent2", tags=["agent2"])
 
@@ -62,6 +67,7 @@ class Agent2ChatOut(BaseModel):
     choices: list[str] | None = None
     actions: list[dict] | None = None
     audioData: str | None = None
+    proposal: dict | None = None  # Proposition d'enregistrement (event/decision majeure)
 
 
 class Agent2MessageOut(BaseModel):
@@ -96,52 +102,105 @@ class ReminderOut(BaseModel):
 
 # ── DB helpers for agent2_messages ──────────────────────────────────────────
 
-def _save_agent2_message(
-    db: DatabaseManager, auth_user_id: str, role: str, content: str,
+# Migration PG (2026-05-13) : versions async via SQLAlchemy text() —
+# compatible SQLite + PostgreSQL. Same pattern as agent_companion.py helpers.
+
+async def _save_agent2_message_async(
+    auth_user_id: str, role: str, content: str,
     msg_type: str = "text", audio_data: str = "",
 ) -> None:
+    from sqlalchemy import text
+    from api.database import get_session_factory
     msg_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "INSERT INTO agent2_messages (id, auth_user_id, role, content, type, created_at, audio_data) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (msg_id, auth_user_id, role, content, msg_type, now, audio_data or ""),
-    )
-    db.conn.commit()
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(
+                text(
+                    "INSERT INTO agent2_messages "
+                    "(id, auth_user_id, role, content, type, created_at, audio_data) "
+                    "VALUES (:id, :uid, :role, :content, :type, :created_at, :audio)"
+                ),
+                {
+                    "id": msg_id, "uid": auth_user_id, "role": role,
+                    "content": content, "type": msg_type,
+                    "created_at": now, "audio": audio_data or "",
+                },
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
-def _load_agent2_messages(
-    db: DatabaseManager, auth_user_id: str, limit: int = 50,
+async def _load_agent2_messages_async(
+    auth_user_id: str, limit: int = 50,
 ) -> list[dict]:
-    cursor = db.conn.execute(
-        "SELECT id, role, content, type, created_at, audio_data FROM agent2_messages "
-        "WHERE auth_user_id = ? ORDER BY created_at DESC LIMIT ?",
-        (auth_user_id, limit),
-    )
-    rows = cursor.fetchall()
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT id, role, content, type, created_at, audio_data "
+                    "FROM agent2_messages WHERE auth_user_id = :uid "
+                    "ORDER BY created_at DESC LIMIT :limit"
+                ),
+                {"uid": auth_user_id, "limit": limit},
+            )
+            rows = list(result.mappings().all())
+        except Exception:
+            # Fallback si audio_data n'existe pas
+            result = await session.execute(
+                text(
+                    "SELECT id, role, content, type, created_at "
+                    "FROM agent2_messages WHERE auth_user_id = :uid "
+                    "ORDER BY created_at DESC LIMIT :limit"
+                ),
+                {"uid": auth_user_id, "limit": limit},
+            )
+            rows = [
+                {**dict(r), "audio_data": ""}
+                for r in result.mappings().all()
+            ]
     return [
         {
-            "id": r[0], "role": r[1], "content": r[2],
-            "type": r[3], "created_at": r[4], "audio_data": r[5] or "",
+            "id": r["id"], "role": r["role"], "content": r["content"],
+            "type": r["type"], "created_at": r["created_at"],
+            "audio_data": r.get("audio_data") or "",
         }
         for r in reversed(rows)
     ]
 
 
-def _count_agent2_messages(db: DatabaseManager, auth_user_id: str) -> int:
-    cursor = db.conn.execute(
-        "SELECT COUNT(*) FROM agent2_messages WHERE auth_user_id = ?",
-        (auth_user_id,),
-    )
-    return cursor.fetchone()[0]
+async def _count_agent2_messages_async(auth_user_id: str) -> int:
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text("SELECT COUNT(*) FROM agent2_messages WHERE auth_user_id = :uid"),
+            {"uid": auth_user_id},
+        )
+        return int(result.scalar() or 0)
 
 
-def _clear_agent2_messages(db: DatabaseManager, auth_user_id: str) -> None:
-    db.conn.execute(
-        "DELETE FROM agent2_messages WHERE auth_user_id = ?",
-        (auth_user_id,),
-    )
-    db.conn.commit()
+async def _clear_agent2_messages_async(auth_user_id: str) -> None:
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(
+                text("DELETE FROM agent2_messages WHERE auth_user_id = :uid"),
+                {"uid": auth_user_id},
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 # ── Profile extraction helper (copied from agent_companion.py) ─────────────
@@ -218,53 +277,71 @@ REGLES:
         if not profil:
             return
 
-        # Update only non-null extracted fields that are currently empty
-        updated = False
+        # Migration PG (2026-05-13) : UPDATE via SQLAlchemy text() async.
+        # SECURITE : noms de colonnes en whitelist statique.
+        from sqlalchemy import text
+        from api.database import get_session_factory
+        factory = get_session_factory()
+        LIST_FIELDS = ("competences", "diplomes", "langues")
 
-        if extracted.get("genre") and not getattr(profil, "genre", None):
-            db.conn.execute(
-                "UPDATE profil_utilisateur SET genre = ? WHERE auth_user_id = ?",
-                (extracted["genre"], auth_user_id),
-            )
-            updated = True
-
-        if extracted.get("ville") and (not profil.ville or profil.ville == "Non renseigne"):
-            db.conn.execute(
-                "UPDATE profil_utilisateur SET ville = ? WHERE auth_user_id = ?",
-                (extracted["ville"], auth_user_id),
-            )
-            updated = True
-
-        if extracted.get("situation_familiale") and (
-            not profil.situation_familiale or profil.situation_familiale == "Non renseigne"
-        ):
-            db.conn.execute(
-                "UPDATE profil_utilisateur SET situation_familiale = ? WHERE auth_user_id = ?",
-                (extracted["situation_familiale"], auth_user_id),
-            )
-            updated = True
-
-        if extracted.get("profession") and (not profil.profession or profil.profession == "Non renseigne"):
-            db.conn.execute(
-                "UPDATE profil_utilisateur SET profession = ? WHERE auth_user_id = ?",
-                (extracted["profession"], auth_user_id),
-            )
-            updated = True
-
-        # List fields — only update if currently empty
-        for field in ("competences", "diplomes", "langues"):
-            val = extracted.get(field)
-            if val and isinstance(val, list) and len(val) > 0:
-                current = getattr(profil, field, None)
-                if not current or (isinstance(current, list) and len(current) == 0) or current == "":
-                    db.conn.execute(
-                        f"UPDATE profil_utilisateur SET {field} = ? WHERE auth_user_id = ?",
-                        (",".join(val), auth_user_id),
+        async with factory() as session:
+            try:
+                if extracted.get("genre") and not getattr(profil, "genre", None):
+                    await session.execute(
+                        text(
+                            "UPDATE profil_utilisateur SET genre = :val "
+                            "WHERE auth_user_id = :uid"
+                        ),
+                        {"val": extracted["genre"], "uid": auth_user_id},
                     )
-                    updated = True
-
-        if updated:
-            db.conn.commit()
+                if extracted.get("ville") and (
+                    not profil.ville or profil.ville == "Non renseigne"
+                ):
+                    await session.execute(
+                        text(
+                            "UPDATE profil_utilisateur SET ville = :val "
+                            "WHERE auth_user_id = :uid"
+                        ),
+                        {"val": extracted["ville"], "uid": auth_user_id},
+                    )
+                if extracted.get("situation_familiale") and (
+                    not profil.situation_familiale
+                    or profil.situation_familiale == "Non renseigne"
+                ):
+                    await session.execute(
+                        text(
+                            "UPDATE profil_utilisateur SET situation_familiale = :val "
+                            "WHERE auth_user_id = :uid"
+                        ),
+                        {"val": extracted["situation_familiale"], "uid": auth_user_id},
+                    )
+                if extracted.get("profession") and (
+                    not profil.profession or profil.profession == "Non renseigne"
+                ):
+                    await session.execute(
+                        text(
+                            "UPDATE profil_utilisateur SET profession = :val "
+                            "WHERE auth_user_id = :uid"
+                        ),
+                        {"val": extracted["profession"], "uid": auth_user_id},
+                    )
+                for field in LIST_FIELDS:
+                    val = extracted.get(field)
+                    if val and isinstance(val, list) and len(val) > 0:
+                        current = getattr(profil, field, None)
+                        if (not current
+                                or (isinstance(current, list) and len(current) == 0)
+                                or current == ""):
+                            await session.execute(
+                                text(
+                                    f"UPDATE profil_utilisateur SET {field} = :val "
+                                    f"WHERE auth_user_id = :uid"
+                                ),
+                                {"val": ",".join(val), "uid": auth_user_id},
+                            )
+                await session.commit()
+            except Exception:
+                await session.rollback()
 
     except Exception:
         pass  # Silently fail — extraction is best-effort
@@ -322,7 +399,7 @@ PROFIL DE L'UTILISATEUR :
     google_section = (google_block + "\n") if google_block else ""
 
     return f"""{awareness_section}{memory_section}{google_section}Tu es l'Agent Sylea 2, un assistant personnel qui AGIT. Tu ne parles pas, tu FAIS.
-Tutoiement, naturel, 1 phrase max avant les actions.
+Tutoiement, naturel, tres concis avant les actions (pas de blabla, droit au but).
 
 === REGLES ABSOLUES — TU NE DOIS JAMAIS LES ENFREINDRE ===
 
@@ -432,8 +509,8 @@ Meme si l'utilisateur insiste, tu refuses. Tu es son allie.
 CE QUI N'EST PAS un refus : mails normaux, documents, rappels, tout ce qui ne sabote pas l'objectif.
 
 STYLE :
-- 1-2 phrases MAXIMUM avant les actions. Pas de blabla.
-- Tutoiement, naturel, concis
+- Tres concis avant les actions — droit au but, pas de blabla.
+- Tutoiement, naturel
 - Jamais de "tu veux que je...", "je te propose de...", "quelle version tu preferes ?"
 - Jamais de listes numerotees de choix. Tu CHOISIS et tu FAIS.
 - APPEL VOCAL : Bouton "Appeler" a cote de "Discuter" dans l'interface. Si l'utilisateur demande un appel, dis-lui de cliquer dessus.
@@ -446,6 +523,53 @@ STYLE :
 {so_str}
 {reminders_str}
 {device_context}
+
+DETECTION D'EVENEMENTS IMPORTANTS — REGLE CRITIQUE :
+Quand l'utilisateur te confie un evenement ou une decision MAJEUR(E) qui devrait
+impacter sa progression vers l'objectif, tu DOIS proposer de l'enregistrer
+officiellement. NE l'enregistre JAMAIS toi-meme — propose-le, l'utilisateur
+valide via boutons.
+
+Sont MAJEURS (a proposer) :
+- Argent significatif recu/perdu (heritage, bonus, achat, perte) > 1000 EUR
+- Changement professionnel (embauche, demission, promotion, lancement projet)
+- Decision financiere majeure (investissement, levee, achat immobilier)
+- Etape franchie sur l'objectif (lancement produit, premiere vente, milestone)
+- Echec ou crise majeure (rupture business, probleme sante grave)
+- Engagement significatif (partenariat, contrat, signature)
+
+Sont BANALITES (ne propose RIEN) :
+- Repas, sommeil, sport ponctuel, meteo
+- Sortie, hobby, rencontre amicale
+- Petit achat (<100 EUR)
+- Humeur quotidienne, fatigue passagere
+- Discussion casuelle sans engagement concret
+- Demandes d'action a Agent 2 (envoi mail, rappel, document) — ce sont des
+  actions assistant, pas des events stats.
+
+QUAND tu detectes un evenement MAJEUR, AJOUTE a la fin de ta reponse texte
+un bloc INVISIBLE (le frontend l'extrait et affiche des boutons cliquables) :
+
+[[PROPOSITION]]
+{{
+  "type": "evenement",
+  "description": "Description courte et factuelle",
+  "impact_jours": 250,
+  "resume": "Resume en 1 phrase de pourquoi c'est positif/negatif",
+  "rationale": "Pourquoi tu penses que c'est important",
+  "target_so_hint": "Nom du sous-objectif probablement impacte"
+}}
+[[/PROPOSITION]]
+
+IMPORTANT pour le bloc :
+- impact_jours = nombre de jours GAGNES (positif) ou PERDUS (negatif) sur
+  l'objectif total. Estime de maniere realiste.
+- type = "evenement" par defaut, ou "decision_majeure" pour un choix structurant.
+- target_so_hint : nom du SO si tu le reconnais, sinon laisse vide.
+- N'ecris JAMAIS le bloc dans le texte conversationnel. Il vient APRES ta
+  phrase de reponse, jamais au milieu, jamais expose a l'utilisateur.
+- Si l'utilisateur demande juste une ACTION assistant (mail, rappel, doc),
+  NE FAIS PAS de proposition stats — fais juste l'action via [ACTION:X].
 """
 
 
@@ -484,6 +608,47 @@ async def agent2_chat(
     if not key:
         return Agent2ChatOut(message="Agent indisponible -- cle API manquante.")
 
+    # ── Gating par plan : Agent 2 reserve aux plans Avance / Team ──────
+    # Les utilisateurs Free n'ont pas acces a Agent 2 (cf. FREE_FEATURES dans
+    # QuotasPage : ligne marquee 'excluded'). On bloque cote backend en plus
+    # du gating UI.
+    if user_id:
+        try:
+            from api.agent3_quotas import get_user_plan_async as _get_plan
+            _plan = await _get_plan(user_id)
+            plan_name = _plan.get('name', 'free')
+        except Exception:
+            plan_name = 'free'
+        if plan_name == 'free':
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Agent Sylea 2 est reserve a l'abonnement Avance ou superieur. "
+                    "Passe au plan Avance pour activer l'assistant executant."
+                ),
+            )
+
+        # ── Quota quotidien d'actions IA (10 free / 30 pro / illimite team) ──
+        # Compte les decisions + agent_messages + agent2_messages depuis 00h.
+        try:
+            from api.daily_action_limit import check_daily_action_quota_async
+            repo = ProfilRepository(db)
+            if repo.existe(auth_user_id=user_id):
+                _p = repo.charger(auth_user_id=user_id)
+                ok, count, limit = await check_daily_action_quota_async(_p.id, user_id, plan_name)
+                if not ok:
+                    raise HTTPException(
+                        status_code=429,
+                        detail=(
+                            f"Quota quotidien atteint ({count}/{limit} actions aujourd'hui). "
+                            f"{'Passe a Avance pour 30 actions/jour.' if plan_name == 'free' else 'Reessaie demain.'}"
+                        ),
+                    )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # Best-effort : ne pas bloquer si check echoue (defense en profondeur)
+
     # Load user data
     repo = ProfilRepository(db)
     profil_data = None
@@ -521,49 +686,70 @@ async def agent2_chat(
         else []
     )
 
-    # Load sub-objectives
+    # Load sub-objectives / collected info / reminders.
+    # Migration PG (2026-05-13) : SELECT via SQLAlchemy text() async — compat SQLite + PG.
     sous_objectifs: list[dict] = []
+    collected_info = ""
+    reminders: list[dict] = []
     try:
-        cursor = db.conn.execute(
-            "SELECT titre, progression FROM sous_objectifs "
-            "WHERE user_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1)",
-            (user_id or "",),
-        )
-        sous_objectifs = [{"titre": r[0], "progression": r[1]} for r in cursor.fetchall()]
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        _factory = _gsf()
+        async with _factory() as _session:
+            try:
+                _r = await _session.execute(
+                    _sa_text(
+                        "SELECT titre, progression FROM sous_objectifs "
+                        "WHERE user_id = (SELECT id FROM profil_utilisateur "
+                        "WHERE auth_user_id = :auid LIMIT 1)"
+                    ),
+                    {"auid": user_id or ""},
+                )
+                sous_objectifs = [
+                    {"titre": m["titre"], "progression": m["progression"]}
+                    for m in _r.mappings().all()
+                ]
+            except Exception:
+                pass
+
+            if user_id:
+                try:
+                    _r = await _session.execute(
+                        _sa_text(
+                            "SELECT field, value FROM agent_collected_info "
+                            "WHERE user_id = :uid ORDER BY collected_at DESC LIMIT 30"
+                        ),
+                        {"uid": user_id},
+                    )
+                    _rows = _r.mappings().all()
+                    if _rows:
+                        collected_info = "\nINFORMATIONS COLLECTEES :\n"
+                        for m in _rows:
+                            collected_info += f"  - {m['field']}: {m['value']}\n"
+                except Exception:
+                    pass
+
+                try:
+                    _r = await _session.execute(
+                        _sa_text(
+                            "SELECT time, date, message FROM agent_reminders "
+                            "WHERE user_id = :uid AND completed = 0 "
+                            "ORDER BY date, time LIMIT 10"
+                        ),
+                        {"uid": user_id},
+                    )
+                    reminders = [
+                        {"time": m["time"], "date": m["date"], "message": m["message"]}
+                        for m in _r.mappings().all()
+                    ]
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    # Load collected info
-    collected_info = ""
-    if user_id:
-        try:
-            rows = db.conn.execute(
-                "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 30",
-                (user_id,),
-            ).fetchall()
-            if rows:
-                collected_info = "\nINFORMATIONS COLLECTEES :\n"
-                for field, value in rows:
-                    collected_info += f"  - {field}: {value}\n"
-        except Exception:
-            pass
-
-    # Load active reminders
-    reminders: list[dict] = []
-    if user_id:
-        try:
-            cursor = db.conn.execute(
-                "SELECT time, date, message FROM agent_reminders "
-                "WHERE user_id = ? AND completed = 0 ORDER BY date, time LIMIT 10",
-                (user_id,),
-            )
-            reminders = [{"time": r[0], "date": r[1], "message": r[2]} for r in cursor.fetchall()]
-        except Exception:
-            pass
-
     # Build prompt
     device_ctx = format_device_context(data.contexte_appareil) if data.contexte_appareil else ""
-    full_ctx = build_full_user_context(db, user_id)
+    full_ctx = await build_full_user_context_async(db, user_id)
 
     # v2 enrichments — awareness + shared memory + Google context
     awareness_blk = ""
@@ -571,16 +757,19 @@ async def agent2_chat(
     google_blk = ""
     if user_id:
         try:
-            awareness_blk = build_awareness_block(db, user_id) or ""
+            awareness_blk = await build_awareness_block_async(user_id) or ""
         except Exception:
             pass
         try:
-            mem = load_memories(db, user_id, limit=30)
-            memory_blk = format_memories(mem, max_items=25) if mem else ""
+            # Memoire long terme : 80 souvenirs chargees, 60 injectes.
+            # Agent 2 a besoin d'autant de contexte qu'Agent 1 pour proposer
+            # des actions pertinentes (ex: rappels d'objectif, contacts repetes).
+            mem = await load_memories_async(user_id, limit=80)
+            memory_blk = format_memories(mem, max_items=60) if mem else ""
         except Exception:
             pass
         try:
-            google_blk = await build_google_context_block(db, user_id) or ""
+            google_blk = await build_google_context_block_async(user_id) or ""
         except Exception:
             pass
 
@@ -592,9 +781,9 @@ async def agent2_chat(
         google_block=google_blk,
     )
 
-    # Build chat context
+    # Build chat context (Migration PG : helpers async)
     if user_id:
-        db_messages = _load_agent2_messages(db, user_id, limit=50)
+        db_messages = await _load_agent2_messages_async(user_id, limit=50)
         chat_messages = [
             {"role": "assistant" if m["role"] == "agent" else "user", "content": m["content"]}
             for m in db_messages
@@ -613,49 +802,94 @@ async def agent2_chat(
 
     # Call Claude
     import anthropic
+    import logging
+    _agent2_logger = logging.getLogger("sylea.agent2")
+
+    # Sanitization stricte : Anthropic refuse les champs autres que role+content
+    # sur les messages. Si on laisse passer "type" ou "audio_data" -> 400 :
+    # "messages.0.type: Extra inputs are not permitted".
+    # La branche user_id authentifie construisait deja des dicts propres, mais
+    # le `else` (user anonyme) renvoyait data.messages[-20:] tel quel.
+    sanitized_messages = [
+        {"role": m["role"], "content": m["content"]}
+        for m in chat_messages[-20:]
+        if m.get("role") and m.get("content")
+    ]
 
     client = anthropic.Anthropic(api_key=key)
-    msg = await asyncio.to_thread(
-        lambda: client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=4000,
-            system=[{
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
-            }],
-            messages=chat_messages[-20:],
+    try:
+        msg = await asyncio.to_thread(
+            lambda: client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=4000,
+                system=[{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                messages=sanitized_messages,
+            )
         )
-    )
+    except anthropic.APIStatusError as e:
+        _agent2_logger.error(
+            "[agent2] Anthropic API error status=%s msg=%s system_len=%d msgs=%d audio=%s",
+            getattr(e, "status_code", "?"), str(e)[:300],
+            len(system_prompt), len(chat_messages),
+            "yes" if user_msg_type == "voice" else "no",
+        )
+        return Agent2ChatOut(
+            message=f"Erreur Claude {getattr(e, 'status_code', '?')} : {str(e)[:200]}",
+        )
+    except Exception as e:
+        _agent2_logger.error(
+            "[agent2] Erreur inattendue type=%s msg=%s",
+            type(e).__name__, str(e)[:300],
+            exc_info=True,
+        )
+        return Agent2ChatOut(
+            message=f"Erreur interne ({type(e).__name__}) : {str(e)[:200]}",
+        )
 
-    agent_response = msg.content[0].text.strip()
+    agent_response_raw = msg.content[0].text.strip()
+
+    # Extraction d'une proposition agent (event/decision majeure detecte).
+    # Le bloc [[PROPOSITION]]{json}[[/PROPOSITION]] est retire du texte
+    # affiche et sauvegarde en DB pour validation par l'utilisateur via boutons.
+    from api.agent_proposals import extract_proposal_from_text, save_proposal_async
+    agent_response, proposal_payload = extract_proposal_from_text(agent_response_raw)
+    saved_proposal: dict | None = None
+    if proposal_payload and user_id:
+        try:
+            saved_proposal = await save_proposal_async(user_id, "agent2", proposal_payload)
+        except Exception:
+            saved_proposal = None
 
     # Generate TTS audio for agent response if user sent a voice message
     agent_audio_data = ""
     if user_msg_type == "voice":
         agent_audio_data = await _generate_tts_audio(agent_response)
 
-    # Persist messages if authenticated
+    # Persist messages if authenticated (Migration PG : helpers async)
     if user_id:
         if data.messages:
             last_user = data.messages[-1]
             if last_user.get("role") == "user":
-                _save_agent2_message(
-                    db, user_id, "user", last_user["content"], user_msg_type,
+                await _save_agent2_message_async(
+                    user_id, "user", last_user["content"], user_msg_type,
                     audio_data=data.audio_data or "",
                 )
         agent_msg_type = "voice" if user_msg_type == "voice" else "text"
         # Save the RAW response (with [ACTION:...] blocks) so frontend can re-parse on reload
-        _save_agent2_message(
-            db, user_id, "agent", agent_response, agent_msg_type,
+        await _save_agent2_message_async(
+            user_id, "agent", agent_response, agent_msg_type,
             audio_data=agent_audio_data,
         )
 
     # Auto-extract profile info every 5 messages (same as Agent 1)
     if user_id:
-        total_msgs = _count_agent2_messages(db, user_id)
+        total_msgs = await _count_agent2_messages_async(user_id)
         if total_msgs > 0 and total_msgs % 5 == 0:
-            recent = _load_agent2_messages(db, user_id, limit=20)
+            recent = await _load_agent2_messages_async(user_id, limit=20)
             await _extract_and_update_profile(db, user_id, recent)
 
     # v2 : Auto-extract memories partagees (3 agents) — best-effort, non bloquant.
@@ -665,7 +899,7 @@ async def agent2_chat(
     # de la request handler se ferme avant la fin de la coroutine).
     if user_id:
         try:
-            recent_msgs = _load_agent2_messages(db, user_id, limit=10)
+            recent_msgs = await _load_agent2_messages_async(user_id, limit=10)
             recent_msgs = list(reversed(recent_msgs))  # DESC -> ASC chronologique
             turns = [
                 {"role": "agent" if m["role"] == "agent" else "user", "content": m["content"]}
@@ -734,7 +968,7 @@ async def agent2_chat(
             if act.get("type") == "TEXT" and act.get("data", {}).get("content"):
                 try:
                     from api.routers.agent3_openclaw import WORKSPACE_BASE, get_workspace_folder_name
-                    obj_name = get_workspace_folder_name(db, user_id)
+                    obj_name = await get_workspace_folder_name_async(user_id)
                     ws_dir = WORKSPACE_BASE / obj_name
                     ws_dir.mkdir(parents=True, exist_ok=True)
                     doc_title = act["data"].get("title", "Document_Agent2")
@@ -769,24 +1003,47 @@ async def agent2_chat(
         message=clean_message or agent_response,
         actions=actions if actions else None,
         audioData=agent_audio_data if agent_audio_data else None,
+        proposal=saved_proposal,
     )
 
 
 @router.get("/messages", response_model=list[Agent2MessageOut])
 async def get_agent2_messages(
-    db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
+    """Migration PG : SELECT via SQLAlchemy text() — compatible SQLite + PG."""
     if not user_id:
         return []
-    messages = _load_agent2_messages(db, user_id, limit=200)
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT id, role, content, type, created_at, audio_data "
+                    "FROM agent2_messages WHERE auth_user_id = :uid "
+                    "ORDER BY created_at DESC LIMIT :limit"
+                ),
+                {"uid": user_id, "limit": 200},
+            )
+        except Exception:
+            result = await session.execute(
+                text(
+                    "SELECT id, role, content, type, created_at "
+                    "FROM agent2_messages WHERE auth_user_id = :uid "
+                    "ORDER BY created_at DESC LIMIT :limit"
+                ),
+                {"uid": user_id, "limit": 200},
+            )
+        rows = list(reversed(result.mappings().all()))
     return [
         Agent2MessageOut(
             id=m["id"], role=m["role"], content=m["content"],
             type=m["type"], created_at=m["created_at"],
-            audioData=m.get("audio_data", ""),
+            audioData=m.get("audio_data") or "",
         )
-        for m in messages
+        for m in rows
     ]
 
 
@@ -795,8 +1052,9 @@ async def clear_agent2_messages(
     db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
+    """Migration PG (2026-05-13) : DELETE via SQLAlchemy text() async."""
     if user_id:
-        _clear_agent2_messages(db, user_id)
+        await _clear_agent2_messages_async(user_id)
     return {"detail": "Historique de conversation supprime."}
 
 
@@ -837,36 +1095,69 @@ async def create_reminder(
     db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
+    """Migration PG (2026-05-13) : INSERT via SQLAlchemy text() async."""
     if not user_id:
         return {"ok": False, "error": "Authentification requise"}
+    from sqlalchemy import text
+    from api.database import get_session_factory
     now = datetime.now(timezone.utc).isoformat()
-    db.conn.execute(
-        "INSERT INTO agent_reminders (user_id, agent_id, reminder_time, reminder_date, message, completed, created_at) "
-        "VALUES (?, ?, ?, ?, ?, 0, ?)",
-        (user_id, "agent2", data.time, data.date, data.message, now),
-    )
-    db.conn.commit()
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(
+                text(
+                    "INSERT INTO agent_reminders "
+                    "(user_id, agent_id, reminder_time, reminder_date, message, completed, created_at) "
+                    "VALUES (:uid, :aid, :rtime, :rdate, :msg, 0, :created_at)"
+                ),
+                {
+                    "uid": user_id, "aid": "agent2",
+                    "rtime": data.time, "rdate": data.date,
+                    "msg": data.message, "created_at": now,
+                },
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
     return {"ok": True}
 
 
 @router.get("/reminders", response_model=list[ReminderOut])
 async def get_reminders(
-    db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
+    """Migration PG : SELECT via SQLAlchemy text() — compatible SQLite + PG.
+
+    NOTE : la table `agent_reminders` n'est pas encore dans le schema
+    SQLAlchemy ORM (api/database/models.py). Si DATABASE_URL=PG, il faut
+    d'abord ajouter ce modele et regenerer la migration Alembic.
+    """
     if not user_id:
         return []
-    cursor = db.conn.execute(
-        "SELECT id, reminder_time, reminder_date, message, completed, created_at "
-        "FROM agent_reminders WHERE user_id = ? AND completed = 0 ORDER BY reminder_date, reminder_time",
-        (user_id,),
-    )
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT id, reminder_time, reminder_date, message, completed, created_at "
+                    "FROM agent_reminders WHERE user_id = :uid AND completed = 0 "
+                    "ORDER BY reminder_date, reminder_time"
+                ),
+                {"uid": user_id},
+            )
+            rows = result.mappings().all()
+        except Exception:
+            return []  # table absente (ex: PG sans migration), retour vide propre
     return [
         ReminderOut(
-            id=r[0], time=r[1], date=r[2], message=r[3],
-            completed=bool(r[4]), created_at=r[5],
+            id=r["id"], time=r["reminder_time"], date=r["reminder_date"],
+            message=r["message"], completed=bool(r["completed"]),
+            created_at=r["created_at"],
         )
-        for r in cursor.fetchall()
+        for r in rows
     ]
 
 
@@ -876,13 +1167,25 @@ async def complete_reminder(
     db: DatabaseManager = Depends(get_db),
     user_id: str | None = Depends(get_optional_user),
 ):
+    """Migration PG (2026-05-13) : UPDATE via SQLAlchemy text() async."""
     if not user_id:
         return {"ok": False}
-    db.conn.execute(
-        "UPDATE agent_reminders SET completed = 1 WHERE id = ? AND user_id = ?",
-        (reminder_id, user_id),
-    )
-    db.conn.commit()
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(
+                text(
+                    "UPDATE agent_reminders SET completed = 1 "
+                    "WHERE id = :rid AND user_id = :uid"
+                ),
+                {"rid": reminder_id, "uid": user_id},
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
     return {"ok": True}
 
 
@@ -905,25 +1208,53 @@ async def generate_proactive_message(
 
     profil = repo.charger(auth_user_id=user_id)
 
-    # Check last PROACTIVE message time (only agent-initiated, not responses)
-    last_proactive = db.conn.execute(
-        "SELECT created_at FROM agent2_messages WHERE auth_user_id = ? AND role = 'agent' ORDER BY created_at DESC LIMIT 1",
-        (user_id,),
-    ).fetchone()
+    # Check last PROACTIVE message / USER message / decision.
+    # Migration PG (2026-05-13) : SELECT via SQLAlchemy text() async — compat SQLite + PG.
+    last_proactive = None
+    last_user_msg = None
+    last_decision = None
+    try:
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        _factory = _gsf()
+        async with _factory() as _session:
+            _r = await _session.execute(
+                _sa_text(
+                    "SELECT created_at FROM agent2_messages "
+                    "WHERE auth_user_id = :uid AND role = 'agent' "
+                    "ORDER BY created_at DESC LIMIT 1"
+                ),
+                {"uid": user_id},
+            )
+            _row = _r.first()
+            last_proactive = (_row[0],) if _row else None
 
-    # Check last USER interaction (any user message or app usage)
-    last_user_msg = db.conn.execute(
-        "SELECT created_at FROM agent2_messages WHERE auth_user_id = ? AND role = 'user' ORDER BY created_at DESC LIMIT 1",
-        (user_id,),
-    ).fetchone()
+            _r = await _session.execute(
+                _sa_text(
+                    "SELECT created_at FROM agent2_messages "
+                    "WHERE auth_user_id = :uid AND role = 'user' "
+                    "ORDER BY created_at DESC LIMIT 1"
+                ),
+                {"uid": user_id},
+            )
+            _row = _r.first()
+            last_user_msg = (_row[0],) if _row else None
 
-    # Check last decision (indicates app usage)
-    # Bug fix : col `profil_id` n'existe pas dans `decisions`. Use `user_id`
-    # qui pointe vers profil_utilisateur.id.
-    last_decision = db.conn.execute(
-        "SELECT cree_le FROM decisions WHERE user_id = (SELECT id FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1) ORDER BY cree_le DESC LIMIT 1",
-        (user_id,),
-    ).fetchone()
+            # Bug fix : col `profil_id` n'existe pas dans `decisions`. Use `user_id`
+            # qui pointe vers profil_utilisateur.id.
+            _r = await _session.execute(
+                _sa_text(
+                    "SELECT cree_le FROM decisions "
+                    "WHERE user_id = (SELECT id FROM profil_utilisateur "
+                    "WHERE auth_user_id = :uid LIMIT 1) "
+                    "ORDER BY cree_le DESC LIMIT 1"
+                ),
+                {"uid": user_id},
+            )
+            _row = _r.first()
+            last_decision = (_row[0],) if _row else None
+    except Exception:
+        pass
 
     now = datetime.now(timezone.utc)
 
@@ -963,15 +1294,26 @@ async def generate_proactive_message(
 
     last_msg = last_proactive  # For prompt context
 
-    # Load collected info for context
+    # Load collected info for context.
+    # Migration PG (2026-05-13) : SELECT via SQLAlchemy text() async — compat SQLite + PG.
     collected_info_str = ""
     try:
-        rows = db.conn.execute(
-            "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 15",
-            (user_id,),
-        ).fetchall()
-        if rows:
-            collected_info_str = "\nInfos collectees: " + ", ".join(f"{r[0]}={r[1]}" for r in rows)
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        _factory = _gsf()
+        async with _factory() as _session:
+            _r = await _session.execute(
+                _sa_text(
+                    "SELECT field, value FROM agent_collected_info "
+                    "WHERE user_id = :uid ORDER BY collected_at DESC LIMIT 15"
+                ),
+                {"uid": user_id},
+            )
+            _rows = _r.mappings().all()
+        if _rows:
+            collected_info_str = "\nInfos collectees: " + ", ".join(
+                f"{m['field']}={m['value']}" for m in _rows
+            )
     except Exception:
         pass
 
@@ -998,7 +1340,7 @@ Heures depuis derniere activite: {int(hours_since_user)}h
 {reason_context}
 
 REGLES:
-- Message COURT (1-2 phrases max)
+- Message concis, format texto (pas un mail) — un ami qui ecrit, pas un assistant verbeux
 - Propose une action concrete (envoyer un mail, creer un rappel, rediger un texte)
 - Naturel, comme un ami qui envoie un texto
 - Tutoiement
@@ -1019,7 +1361,7 @@ Ecris le message:"""
         )
 
         agent_text = msg.content[0].text.strip()
-        _save_agent2_message(db, user_id, "agent", agent_text, "text")
+        await _save_agent2_message_async(user_id, "agent", agent_text, "text")
         return {"message": agent_text}
     except Exception:
         return {"message": None}
@@ -1064,33 +1406,63 @@ async def text_to_speech(data: dict):
 # ── v2 Google action executors (best-effort, fire-and-forget) ────────────────
 
 async def _refresh_google_token_local(db: DatabaseManager, user_id: str, provider: str) -> str | None:
-    """Refresh OAuth token Google. Reuse pattern de api/routers/integrations.py."""
+    """Refresh OAuth token Google. Reuse pattern de api/routers/integrations.py.
+
+    Migration PG (2026-05-13) : SELECT/UPDATE via SQLAlchemy text() async — compat SQLite + PG.
+    """
     import httpx
     client_id = os.environ.get("GOOGLE_CLIENT_ID")
     client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
     if not client_id or not client_secret:
         return None
-    row = db.conn.execute(
-        "SELECT refresh_token FROM user_integrations WHERE auth_user_id = ? AND provider = ?",
-        (user_id, provider),
-    ).fetchone()
-    if not row or not row[0]:
+
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    _factory = _gsf()
+
+    refresh_token: str | None = None
+    try:
+        async with _factory() as _session:
+            _r = await _session.execute(
+                _sa_text(
+                    "SELECT refresh_token FROM user_integrations "
+                    "WHERE auth_user_id = :uid AND provider = :prov"
+                ),
+                {"uid": user_id, "prov": provider},
+            )
+            _row = _r.first()
+            refresh_token = _row[0] if _row else None
+    except Exception:
         return None
+    if not refresh_token:
+        return None
+
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post("https://oauth2.googleapis.com/token", data={
                 "client_id": client_id, "client_secret": client_secret,
-                "refresh_token": row[0], "grant_type": "refresh_token",
+                "refresh_token": refresh_token, "grant_type": "refresh_token",
             })
             if resp.status_code == 200:
                 new_token = resp.json().get("access_token")
                 if new_token:
-                    db.conn.execute(
-                        "UPDATE user_integrations SET access_token = ?, updated_at = ? "
-                        "WHERE auth_user_id = ? AND provider = ?",
-                        (new_token, datetime.now(timezone.utc).isoformat(), user_id, provider),
-                    )
-                    db.conn.commit()
+                    try:
+                        async with _factory() as _session:
+                            await _session.execute(
+                                _sa_text(
+                                    "UPDATE user_integrations SET access_token = :tok, updated_at = :upd "
+                                    "WHERE auth_user_id = :uid AND provider = :prov"
+                                ),
+                                {
+                                    "tok": new_token,
+                                    "upd": datetime.now(timezone.utc).isoformat(),
+                                    "uid": user_id,
+                                    "prov": provider,
+                                },
+                            )
+                            await _session.commit()
+                    except Exception:
+                        pass
                     return new_token
     except Exception:
         pass
@@ -1103,13 +1475,24 @@ async def _get_token_with_refresh(db: DatabaseManager, user_id: str, provider: s
 
 
 async def _exec_gmail_send(db: DatabaseManager, user_id: str, data: dict) -> None:
-    """Envoie un email REEL via Gmail API avec retry-on-401-refresh."""
+    """Envoie un email REEL via Gmail API avec retry-on-401-refresh.
+
+    Migration PG (2026-05-13) : SELECT via SQLAlchemy text() async.
+    """
     import httpx, base64
     try:
-        row = db.conn.execute(
-            "SELECT access_token FROM user_integrations WHERE auth_user_id = ? AND provider = 'gmail'",
-            (user_id,),
-        ).fetchone()
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        _factory = _gsf()
+        async with _factory() as _session:
+            _r = await _session.execute(
+                _sa_text(
+                    "SELECT access_token FROM user_integrations "
+                    "WHERE auth_user_id = :uid AND provider = 'gmail'"
+                ),
+                {"uid": user_id},
+            )
+            row = _r.first()
         if not row or not row[0] or len(row[0]) < 20:
             return  # Gmail non connecte
         token = row[0]
@@ -1126,30 +1509,41 @@ async def _exec_gmail_send(db: DatabaseManager, user_id: str, data: dict) -> Non
                     json={"raw": encoded},
                 )
                 if r.status_code in (200, 201):
-                    _log_agent2_action(db, user_id, "GMAIL_SEND", success=True, summary=f"to={to[:50]}")
+                    await _log_agent2_action_async(db, user_id, "GMAIL_SEND", success=True, summary=f"to={to[:50]}")
                     return
                 if r.status_code == 401 and attempt == 0:
                     new_token = await _get_token_with_refresh(db, user_id, "gmail", token)
                     if new_token:
                         token = new_token
                         continue
-                _log_agent2_action(db, user_id, "GMAIL_SEND", success=False, summary=f"http {r.status_code}")
+                await _log_agent2_action_async(db, user_id, "GMAIL_SEND", success=False, summary=f"http {r.status_code}")
                 return
     except Exception as e:
         try:
-            _log_agent2_action(db, user_id, "GMAIL_SEND", success=False, summary=str(e)[:80])
+            await _log_agent2_action_async(db, user_id, "GMAIL_SEND", success=False, summary=str(e)[:80])
         except Exception:
             pass
 
 
 async def _exec_calendar_event(db: DatabaseManager, user_id: str, data: dict) -> None:
-    """Cree un event Google Calendar avec retry-on-401-refresh."""
+    """Cree un event Google Calendar avec retry-on-401-refresh.
+
+    Migration PG (2026-05-13) : SELECT via SQLAlchemy text() async.
+    """
     import httpx
     try:
-        row = db.conn.execute(
-            "SELECT access_token FROM user_integrations WHERE auth_user_id = ? AND provider = 'google_calendar'",
-            (user_id,),
-        ).fetchone()
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        _factory = _gsf()
+        async with _factory() as _session:
+            _r = await _session.execute(
+                _sa_text(
+                    "SELECT access_token FROM user_integrations "
+                    "WHERE auth_user_id = :uid AND provider = 'google_calendar'"
+                ),
+                {"uid": user_id},
+            )
+            row = _r.first()
         if not row or not row[0] or len(row[0]) < 20:
             return
         token = row[0]
@@ -1177,30 +1571,41 @@ async def _exec_calendar_event(db: DatabaseManager, user_id: str, data: dict) ->
                     json=payload,
                 )
                 if r.status_code in (200, 201):
-                    _log_agent2_action(db, user_id, "CALENDAR_EVENT", success=True, summary=str(payload.get("summary", ""))[:50])
+                    await _log_agent2_action_async(db, user_id, "CALENDAR_EVENT", success=True, summary=str(payload.get("summary", ""))[:50])
                     return
                 if r.status_code == 401 and attempt == 0:
                     new_token = await _get_token_with_refresh(db, user_id, "google_calendar", token)
                     if new_token:
                         token = new_token
                         continue
-                _log_agent2_action(db, user_id, "CALENDAR_EVENT", success=False, summary=f"http {r.status_code}")
+                await _log_agent2_action_async(db, user_id, "CALENDAR_EVENT", success=False, summary=f"http {r.status_code}")
                 return
     except Exception as e:
         try:
-            _log_agent2_action(db, user_id, "CALENDAR_EVENT", success=False, summary=str(e)[:80])
+            await _log_agent2_action_async(db, user_id, "CALENDAR_EVENT", success=False, summary=str(e)[:80])
         except Exception:
             pass
 
 
 async def _exec_drive_upload(db: DatabaseManager, user_id: str, data: dict) -> None:
-    """Upload un fichier sur Google Drive avec retry-on-401-refresh."""
+    """Upload un fichier sur Google Drive avec retry-on-401-refresh.
+
+    Migration PG (2026-05-13) : SELECT via SQLAlchemy text() async.
+    """
     import httpx
     try:
-        row = db.conn.execute(
-            "SELECT access_token FROM user_integrations WHERE auth_user_id = ? AND provider = 'google_drive'",
-            (user_id,),
-        ).fetchone()
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        _factory = _gsf()
+        async with _factory() as _session:
+            _r = await _session.execute(
+                _sa_text(
+                    "SELECT access_token FROM user_integrations "
+                    "WHERE auth_user_id = :uid AND provider = 'google_drive'"
+                ),
+                {"uid": user_id},
+            )
+            row = _r.first()
         if not row or not row[0] or len(row[0]) < 20:
             return
         token = row[0]
@@ -1229,41 +1634,54 @@ async def _exec_drive_upload(db: DatabaseManager, user_id: str, data: dict) -> N
                     content=body,
                 )
                 if r.status_code in (200, 201):
-                    _log_agent2_action(db, user_id, "DRIVE_UPLOAD", success=True, summary=filename[:50])
+                    await _log_agent2_action_async(db, user_id, "DRIVE_UPLOAD", success=True, summary=filename[:50])
                     return
                 if r.status_code == 401 and attempt == 0:
                     new_token = await _get_token_with_refresh(db, user_id, "google_drive", token)
                     if new_token:
                         token = new_token
                         continue
-                _log_agent2_action(db, user_id, "DRIVE_UPLOAD", success=False, summary=f"http {r.status_code}")
+                await _log_agent2_action_async(db, user_id, "DRIVE_UPLOAD", success=False, summary=f"http {r.status_code}")
                 return
     except Exception as e:
         try:
-            _log_agent2_action(db, user_id, "DRIVE_UPLOAD", success=False, summary=str(e)[:80])
+            await _log_agent2_action_async(db, user_id, "DRIVE_UPLOAD", success=False, summary=str(e)[:80])
         except Exception:
             pass
 
 
-def _log_agent2_action(
+async def _log_agent2_action_async(
     db: DatabaseManager, user_id: str, action_type: str,
     *, success: bool = True, summary: str = "",
 ) -> None:
-    """Trace les actions Google de l'Agent 2 dans agent3_audit_log (table partagee)."""
+    """Async sibling de _log_agent2_action.
+
+    Migration PG (2026-05-13) : INSERT via SQLAlchemy text() async — compat
+    SQLite + PG. `_ensure_audit_table_async` cree la table si manquante.
+    """
     try:
-        from api.agent3_security import _ensure_audit_table
-        _ensure_audit_table(db)
-        db.conn.execute(
-            "INSERT INTO agent3_audit_log "
-            "(id, auth_user_id, action_type, action_summary, success, error_message, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                str(uuid.uuid4()), user_id,
-                f"AGENT2_{action_type}", summary, 1 if success else 0,
-                "" if success else summary,
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        db.conn.commit()
+        from api.agent3_security import _ensure_audit_table_async
+        await _ensure_audit_table_async()
+        from sqlalchemy import text as _sa_text
+        from api.database import get_session_factory as _gsf
+        _factory = _gsf()
+        async with _factory() as _session:
+            await _session.execute(
+                _sa_text(
+                    "INSERT INTO agent3_audit_log "
+                    "(id, auth_user_id, action_type, action_summary, success, error_message, created_at) "
+                    "VALUES (:id, :uid, :atype, :asum, :succ, :err, :cre)"
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "uid": user_id,
+                    "atype": f"AGENT2_{action_type}",
+                    "asum": summary,
+                    "succ": 1 if success else 0,
+                    "err": "" if success else summary,
+                    "cre": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            await _session.commit()
     except Exception:
         pass

@@ -5,18 +5,23 @@ import { useNavigate } from 'react-router-dom'
 import { ProbabilityGauge } from '../components/ProbabilityGauge'
 import { SyleaLogo } from '../components/SyleaLogo'
 import ProfilePhotoAvatar from '../components/ProfilePhotoAvatar'
+import { PendingVerificationBanner } from '../components/PendingVerificationBanner'
+import { ObjectiveProgressMini } from '../components/ObjectiveProgressMini'
+import { ActionLightning } from '../components/ActionLightning'
+import { usePlan } from '../hooks/usePlan'
 import { useStore } from '../store/useStore'
 import { useT } from '../i18n/LanguageContext'
 import { useDeviceContext } from '../contexts/DeviceContext'
 import { api } from '../api/client'
 import { formatJours, gaugePercent } from '../utils/duration'
-import type { ProbabiliteResult, SousObjectif, TachesQuotidiennes, TacheItem } from '../types'
+import type { ProbabiliteResult, SousObjectif, TachesQuotidiennes, TacheItem, Decision } from '../types'
 
 export function DashboardPage() {
   const t = useT()
   const { ctx: deviceCtx } = useDeviceContext()
   const navigate = useNavigate()
   const { profil, setProfil, probCalculee, setProbCalculee, sousObjectifs, setSousObjectifs, refreshSousObjectifs } = useStore()
+  const { isFree } = usePlan()
   const [loading, setLoading] = useState(false)
   const [calcResult, setCalcResult] = useState<ProbabiliteResult | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -27,6 +32,12 @@ export function DashboardPage() {
   const [loadingTaches, setLoadingTaches] = useState(false)
   const [loadingSO, setLoadingSO] = useState(false)
   const [showTasksModal, setShowTasksModal] = useState(false)
+  // Devient true apres le 1er fetch des sous-objectifs (qu'ils soient vides ou pas).
+  // Sert a distinguer "pas encore charge" vs "charge et vide" pour declencher
+  // l'auto-generation uniquement dans le 2e cas.
+  const [soInitialLoaded, setSoInitialLoaded] = useState(false)
+  // Historique des decisions pour le mini-graphique du hero (echelle MAX).
+  const [decisions, setDecisions] = useState<Decision[]>([])
 
   useEffect(() => {
     api.getProfil()
@@ -38,20 +49,37 @@ export function DashboardPage() {
     api.getPersonnalite()
       .then(res => setPersonnalite(res.phrase))
       .catch(() => {})
-    refreshSousObjectifs()
+    refreshSousObjectifs().finally(() => setSoInitialLoaded(true))
     api.checkTachesAujourdhui()
       .then(res => {
         setTachesExist(res.exists)
         if (res.taches) setTachesData(res.taches)
       })
       .catch(() => {})
+    // Decisions pour le mini-graphique de progression dans le hero.
+    api.getHistorique(500)
+      .then(setDecisions)
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
+    // Cas 1 : profil neuf (temps_initial=0) → declenche le calcul + generation SO
     if (profil && !probCalculee && profil.temps_initial_jours === 0 && profil.objectif) {
       handleCalcProb()
+      return
     }
-  }, [profil, probCalculee])
+    // Cas 2 : profil avec temps deja calcule mais SO manquants (etat casse,
+    // par ex. apres un reset_historique). On declenche le meme flow qui appelle
+    // genererSousObjectifs (idempotent : ne re-genere pas si des SO existent).
+    if (
+      profil && profil.objectif &&
+      profil.temps_initial_jours > 0 &&
+      soInitialLoaded && sousObjectifs.length === 0 &&
+      !loading && !loadingSO
+    ) {
+      handleCalcProb()
+    }
+  }, [profil, probCalculee, soInitialLoaded, sousObjectifs.length])
 
   const handleCalcProb = async () => {
     setLoading(true)
@@ -159,10 +187,14 @@ export function DashboardPage() {
 
   return (
     <div className="page animate-fade-in">
+      {/* Bandeau de verification due (decisions en attente de confirmation) */}
+      <PendingVerificationBanner />
       <div className="container page-content">
 
-        {/* En-tête chaleureux */}
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+        {/* En-tête chaleureux. position:relative pour permettre au mini-graphique
+            d'etre positionne en absolu (sinon sa hauteur de 170px imposait une
+            hauteur excessive au hero, creant un gros espace vide sous la bio). */}
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
             <ProfilePhotoAvatar
               photoUrl={profil.photo_url}
@@ -170,16 +202,46 @@ export function DashboardPage() {
               onUpdated={(url) => setProfil(p => p ? { ...p, photo_url: url } : p)}
             />
             <div>
-            <p style={{ color: 'var(--accent-violet-light)', fontSize: '0.82rem', letterSpacing: '0.06em', marginBottom: '0.35rem', opacity: 0.85 }}>{t('dashboard.bon_retour')}</p>
-            <h1 style={{ fontSize: '2rem', fontWeight: 700, marginBottom: '0.3rem', background: 'linear-gradient(135deg, var(--accent-silver), var(--accent-violet-light))', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>{profil.nom}</h1>
+            <p className="eyebrow" style={{ marginBottom: 4 }}>{t('dashboard.bon_retour')}</p>
+            {/* Nom de l'utilisateur + badge éclair (compteur d'actions du jour) sur
+                la même ligne. L'éclair est placé entre le nom et le graphique de
+                progression (qui est positionné absolu plus à droite). */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', marginBottom: 6 }}>
+              <h1 style={{
+                fontSize: 'var(--fs-3xl)', fontWeight: 700,
+                letterSpacing: 'var(--tracking-tight)',
+                color: 'var(--text-primary)',
+                margin: 0, lineHeight: 1.1,
+              }}>{profil.nom}</h1>
+              <ActionLightning
+                size={32}
+                showLimit
+                onClick={() => navigate('/quotas')}
+                style={{ padding: '5px 12px 5px 8px', fontSize: '0.95rem' }}
+              />
+            </div>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span style={{ color: 'var(--accent-violet-light)' }}>{'\u25c6'}</span> {profil.profession}
-              <span style={{ color: 'var(--text-muted)', opacity: 0.4 }}>|</span>
-              <span style={{ color: 'var(--accent-gold)' }}>{'\u25c7'}</span> {profil.ville}
+              <span style={{ color: 'var(--text-secondary)' }}>{profil.profession}</span>
+              <span style={{ width: 3, height: 3, borderRadius: '50%', background: 'var(--text-muted)', opacity: 0.5 }} />
+              <span style={{ color: 'var(--text-secondary)' }}>{profil.ville}</span>
             </p>
             </div>
           </div>
+          {/* Logo Syléa à droite */}
           <SyleaLogo size={52} animated={false} />
+          {/* Mini-graphique de progression — positionne en ABSOLU pour ne pas
+              imposer sa hauteur (170px) au hero. Centre verticalement sur la
+              bio, et place a droite (juste a gauche du logo). pointer-events:
+              none pour ne pas bloquer les clics sur les elements en dessous. */}
+          <div style={{
+            position: 'absolute',
+            right: 'calc(52px + 2.5rem)',
+            top: '50%',
+            transform: 'translateY(-50%)',
+            pointerEvents: 'none',
+          }}>
+            <ObjectiveProgressMini profil={profil} decisions={decisions} />
+          </div>
         </div>
 
         {/* Compétences */}
@@ -231,17 +293,40 @@ export function DashboardPage() {
 
         {/* Jauge principale */}
         <div className="card animate-fade-in-scale"
-          style={{ background: 'linear-gradient(135deg, var(--bg-surface), #0b1525)', border: '1px solid var(--border)', marginBottom: '1.5rem', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '2rem', gap: '1rem' }}>
-          <div style={{ fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.12em', color: 'var(--accent-violet-light)', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          style={{ position: 'relative', background: 'var(--bg-surface)', border: '1px solid var(--border)', marginBottom: 'var(--space-6)', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '2.5rem 2rem', gap: 'var(--space-4)', overflow: 'hidden' }}>
+          <div aria-hidden style={{
+            position: 'absolute', top: 0, left: '50%', transform: 'translateX(-50%)',
+            width: '60%', height: 1,
+            background: 'linear-gradient(90deg, transparent, rgba(59,130,246,0.6), transparent)',
+            pointerEvents: 'none',
+          }} />
+          <div aria-hidden style={{
+            position: 'absolute', top: -120, left: '50%', transform: 'translateX(-50%)',
+            width: 480, height: 240,
+            background: 'radial-gradient(ellipse at center, rgba(59,130,246,0.12) 0%, transparent 70%)',
+            pointerEvents: 'none',
+          }} />
+          <div className="eyebrow" style={{ position: 'relative', zIndex: 1 }}>
             <span>{'\u25c8'}</span> Temps estimé
           </div>
-          <ProbabilityGauge value={gauge.pct} size={200} tempsLigne1={gauge.restant.ligne1} tempsLigne2={gauge.restant.ligne2} />
-          <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', letterSpacing: '0.06em', textAlign: 'center' }}>
-            {t('dashboard.pour_objectif')} — Temps initial : {gauge.initial.label}
+          <div style={{ position: 'relative', zIndex: 1 }}>
+            <ProbabilityGauge value={gauge.pct} size={200} tempsLigne1={gauge.restant.ligne1} tempsLigne2={gauge.restant.ligne2} />
+          </div>
+          <p style={{
+            fontSize: 'var(--fs-xs)', color: 'var(--text-muted)',
+            letterSpacing: 'var(--tracking-wide)', textAlign: 'center',
+            position: 'relative', zIndex: 1,
+          }}>
+            {t('dashboard.pour_objectif')} · Temps initial {gauge.initial.label}
           </p>
-          <div style={{ textAlign: 'center', maxWidth: '440px' }}>
-            <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', fontStyle: 'italic', lineHeight: '1.5', marginBottom: '0.75rem' }}>{objectifDesc}</p>
-            {profil.objectif?.categorie && <span className="badge badge-violet">{profil.objectif.categorie}</span>}
+          <div style={{ textAlign: 'center', maxWidth: 480, position: 'relative', zIndex: 1 }}>
+            <p style={{
+              fontSize: 'var(--fs-md)',
+              color: 'var(--text-secondary)',
+              lineHeight: 1.55, marginBottom: 'var(--space-3)',
+              fontWeight: 400,
+            }}>{objectifDesc}</p>
+            {profil.objectif?.categorie && <span className="badge badge-blue">{profil.objectif.categorie}</span>}
           </div>
           {loading && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--text-muted)' }}>
@@ -250,43 +335,75 @@ export function DashboardPage() {
             </div>
           )}
           {error && <p style={{ color: 'var(--danger)', fontSize: '0.875rem' }}>{'\u26a0'} {error}</p>}
-          <button className="btn btn-outline btn-sm" onClick={handleCalcProb} disabled={loading}>
-            {loading ? 'Calcul…' : t('dashboard.recalculer')}
-          </button>
+          {/* Bouton "Mettre a jour ma progression" masque : la progression est
+              maintenue automatiquement (sous-objectifs auto-generes au 1er
+              rendu si manquants ; impacts appliques via les confirmations
+              Oui/Non des pending_actions). */}
         </div>
 
         {/* Sous-objectifs séquentiels */}
         {sousObjectifs.length > 0 && (() => {
           const activeIdx = sousObjectifs.findIndex(so => so.progression < 100)
-          // Calcul proportionnel : chaque SO affiche sa part du temps INITIAL total
-          // (fixe, ne change pas a chaque decision)
-          // Avec correction d'arrondi pour que la somme = total exact
-          const totalJoursObjectif = tempsInitial
+
+          // ─── Calcul coherence-by-construction ──────────────────────────────
+          // Le backend stocke 2 valeurs separees : `tempsGagne` (cumul depuis
+          // les decisions) et `progression` par SO. Ces 2 sources peuvent
+          // drift (arrondis, decisions anciennes sans recalcul). Pour eviter
+          // des chiffres incoherents a l'ecran, on DERIVE les temps des SO
+          // depuis tempsInitial/tempsGagne, en garantissant 2 invariants :
+          //   I1.  sum(soJoursInitial) = tempsInitial
+          //   I2.  sum(soJoursRestant) = objectifRestant (= tempsInitial - tempsGagne)
+          // Le `progression` ne sert qu'a la barre visuelle, pas au calcul.
+
+          const objectifRestant = Math.max(0, Math.round(tempsInitial - tempsGagne))
           const sumTempsEstime = sousObjectifs.reduce((s, so) => s + (so.temps_estime || 0), 0)
-          // Pré-calculer les jours exacts puis ajuster le dernier pour que la somme soit exacte
-          const soJoursRaw = sousObjectifs.map(so =>
-            sumTempsEstime > 0 ? (so.temps_estime / sumTempsEstime) * totalJoursObjectif : 0
+
+          // I1 : repartit tempsInitial proportionnellement (jamais change)
+          const soJoursInitialRaw = sousObjectifs.map(so =>
+            sumTempsEstime > 0 ? (so.temps_estime / sumTempsEstime) * tempsInitial : 0
           )
-          const sumRaw = soJoursRaw.reduce((s, j) => s + Math.round(j), 0)
-          const diff = Math.round(totalJoursObjectif) - sumRaw
-          // Ajouter la différence d'arrondi au dernier SO
-          const soJoursAjustes = soJoursRaw.map((j, i) =>
-            i === soJoursRaw.length - 1 ? Math.round(j) + diff : Math.round(j)
+          const sumInitialRounded = soJoursInitialRaw.reduce((s, j) => s + Math.round(j), 0)
+          const diffInitial = Math.round(tempsInitial) - sumInitialRounded
+          const soJoursAjustes = soJoursInitialRaw.map((j, i) =>
+            i === soJoursInitialRaw.length - 1 ? Math.round(j) + diffInitial : Math.round(j)
           )
-          // Invariant check: sum(SO_restant) must equal objectif_restant
-          const sumSoRestant = soJoursAjustes.reduce((s, j, i) =>
-            s + Math.round(j * (1 - sousObjectifs[i].progression / 100)), 0
-          )
-          const objectifRestant = Math.round(tempsInitial - tempsGagne)
-          const invariantDelta = Math.abs(sumSoRestant - objectifRestant)
-          const invariantBroken = invariantDelta > 5 // tolerance 5 jours (arrondis)
+
+          // I2 : pour chaque SO, calcule son temps restant "naturel" base sur
+          // sa progression individuelle, PUIS scale l'ensemble pour que la
+          // somme = objectifRestant exactement.
+          //   - SO complete (progression >= 100) -> 0j restant (par construction)
+          //   - SO actif -> soJoursAjustes * (1 - progression/100), puis scale
+          // Avantage : chaque SO conserve sa propre progression visible dans le
+          // chiffre, et la cumulation est toujours exactement = objectifRestant
+          // (pas de drift visible meme si backend incoherent).
+          const soJoursRestantNaturel = soJoursAjustes.map((j, i) => {
+            const p = Math.min(100, Math.max(0, sousObjectifs[i].progression))
+            return Math.max(0, j * (1 - p / 100))
+          })
+          const sumNaturel = soJoursRestantNaturel.reduce((s, j) => s + j, 0)
+          // Scale factor (1.0 si tout cadre, sinon ajuste). On divise par 0 ?
+          // Non : si sumNaturel = 0, tous les SO sont a 100% donc objectifRestant
+          // devrait aussi etre 0 -> on retourne juste 0 partout.
+          const scale = sumNaturel > 0 ? objectifRestant / sumNaturel : 0
+          const soJoursRestantScaled = soJoursRestantNaturel.map(j => j * scale)
+          // Arrondis avec la diff absorbee par le DERNIER SO actif
+          let lastActiveIdx = -1
+          for (let i = sousObjectifs.length - 1; i >= 0; i--) {
+            if (sousObjectifs[i].progression < 100) { lastActiveIdx = i; break }
+          }
+          const sumScaledRounded = soJoursRestantScaled.reduce((s, j) => s + Math.round(j), 0)
+          const diffRest = objectifRestant - sumScaledRounded
+          const soJoursRestantArr = soJoursRestantScaled.map((j, i) => {
+            const base = Math.round(j)
+            return i === lastActiveIdx ? Math.max(0, base + diffRest) : base
+          })
+
           return (
             <div className="card animate-fade-in" style={{ marginBottom: '1.5rem', padding: '1.25rem' }}>
-              {invariantBroken && (
-                <div style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.4)', borderRadius: 'var(--radius-md)', padding: '0.6rem 0.8rem', marginBottom: '0.75rem', fontSize: '0.75rem', color: '#f87171' }}>
-                  Desynchronisation detectee : temps SO ({sumSoRestant}j) ≠ objectif ({objectifRestant}j). Recalculez pour corriger.
-                </div>
-              )}
+              {/* Alerte "Desynchronisation detectee" retiree : la coherence
+                  entre sum(SO_restant) et objectifRestant est maintenant
+                  garantie par construction (cf. invariants I1 et I2 plus haut).
+              */}
               <h3 style={{ fontSize: '0.75rem', fontWeight: 700, letterSpacing: '0.1em', color: 'var(--accent-violet-light)', textTransform: 'uppercase', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <span>{'\u25c7'}</span> {t('dashboard.sous_objectifs')}
               </h3>
@@ -300,9 +417,12 @@ export function DashboardPage() {
                   const soColorLight = SO_COLORS_LIGHT[idx % SO_COLORS_LIGHT.length]
                   const barColor = isCompleted ? 'linear-gradient(90deg, #22c55e, #16a34a)' : isActive ? `linear-gradient(90deg, ${soColor}, ${soColorLight})` : `linear-gradient(90deg, ${soColor}66, ${soColor}33)`
                   const textColor = isCompleted ? '#4ade80' : isActive ? 'var(--text-primary)' : `${soColor}B3`
-                  // Temps proportionnel ajusté (somme = total objectif exact)
+                  // Temps initial (part de tempsInitial) + temps restant (part
+                  // de objectifRestant). Calcules dans le bloc plus haut pour
+                  // garantir sum(initial) = tempsInitial et sum(restant) =
+                  // objectifRestant. Plus de drift possible avec le backend.
                   const soJours = soJoursAjustes[idx]
-                  const soJoursRestant = Math.max(0, Math.round(soJours * (1 - so.progression / 100)))
+                  const soJoursRestant = soJoursRestantArr[idx]
                   const fmtJ = (j: number) => {
                     if (j <= 0) return null
                     if (j >= 365) { const a = Math.floor(j / 365); const m = Math.round((j % 365) / 30); return m > 0 ? `${a}a ${m}m` : `${a}a` }
@@ -346,7 +466,7 @@ export function DashboardPage() {
                           )}
                         </span>
                         {initialLabel && (
-                          <span style={{ fontSize: isActive ? '0.78rem' : '0.72rem', fontWeight: isActive ? 600 : 500, color: isCompleted ? '#4ade80' : isActive ? 'var(--accent-violet-light)' : `${soColor}B3`, opacity: isActive ? 1 : 0.8, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                          <span title={t('dashboard.so_temps_hint')} style={{ fontSize: isActive ? '0.78rem' : '0.72rem', fontWeight: isActive ? 600 : 500, color: isCompleted ? '#4ade80' : isActive ? 'var(--accent-violet-light)' : `${soColor}B3`, opacity: isActive ? 1 : 0.8, display: 'flex', alignItems: 'center', gap: '0.35rem', cursor: 'help' }}>
                             <span style={{ color: isCompleted ? '#4ade80' : isActive ? 'var(--text-primary)' : `${soColor}B3` }}>{restantLabel || '0j'}</span>
                             <span style={{ color: 'var(--text-muted)', fontSize: '0.65rem', opacity: 0.6 }}>/</span>
                             <span style={{ color: 'var(--text-muted)', fontSize: '0.65rem', opacity: 0.6 }}>{initialLabel}</span>
@@ -408,11 +528,20 @@ export function DashboardPage() {
           <ActionCard emoji={'\u27e1'} title={t('dashboard.analyser_choix')} desc="Soumettez un dilemme et recevez une analyse IA pros/cons" onClick={() => navigate('/dilemme')} highlight />
           <ActionCard emoji={'\u25eb'} title={t('dashboard.statistiques')} desc="Visualisez vos décisions passées et votre courbe de progression" onClick={() => navigate('/statistiques')} />
           <ActionCard emoji={'\u25c9'} title={t('dashboard.enregistrer_evenement')} desc="Notifiez un événement et découvrez son impact sur votre objectif" onClick={() => navigate('/evenement')} />
+          {/* Tile "Que faire ?" : reservee aux abonnes Avance. */}
+          {isFree ? (
+            <ActionCard
+              emoji={'✦'}
+              title={t('dashboard.que_faire')}
+              desc={'🔒 Disponible avec Syléa Avancé — cliquez pour découvrir'}
+              onClick={() => navigate('/quotas')}
+            />
+          ) : (
           <ActionCard
             emoji={'\u2726'}
             title={t('dashboard.que_faire')}
             desc={tachesEnCours
-              ? `${tachesData!.taches.filter(t => t.completee).length}/${tachesData!.taches.length} taches completees — Cliquez pour voir`
+              ? `${tachesData!.taches.filter(t => t.completee).length}/${tachesData!.taches.length} tâches complétées — Cliquez pour voir`
               : tachesData && tachesData.statut !== 'en_cours'
                 ? (tachesData.statut === 'terminee' ? "Taches terminees pour aujourd'hui" : "Taches abandonnees pour aujourd'hui")
                 : "Generez votre plan d'action quotidien par l'IA"
@@ -428,6 +557,7 @@ export function DashboardPage() {
             disabled={loadingTaches || (tachesExist && !tachesEnCours)}
             loading={loadingTaches}
           />
+          )}
         </div>
       </div>
 

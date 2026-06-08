@@ -8,15 +8,20 @@ import { SplashPage }        from './pages/SplashPage'
 import { DashboardPage }     from './pages/DashboardPage'
 import { ProfilWizardPage }  from './pages/ProfilWizardPage'
 import { DilemmePage }       from './pages/DilemmePage'
+import { TrackingsPage }     from './pages/TrackingsPage'
+import { TrackingRecapPage } from './pages/TrackingRecapPage'
 import { StatistiquesPage }  from './pages/StatistiquesPage'
 import { EvenementPage }    from './pages/EvenementPage'
 import { BilanPage }        from './pages/BilanPage'
 import { HistoriquePage }   from './pages/HistoriquePage'
 import { ServiceChatbot }   from './components/ServiceChatbot'
 import { DesktopStatusBanner } from './components/DesktopStatusBanner'
+import { TrackingNotifBanner } from './components/TrackingNotifBanner'
+import { RouteErrorBoundary } from './components/RouteErrorBoundary'
 import ParametresPage       from './pages/ParametresPage'
 import AgentsPage           from './pages/AgentsPage'
 import LoginPage            from './pages/LoginPage'
+import LandingPage          from './pages/LandingPage'
 import { ProtectedRoute }   from './auth/ProtectedRoute'
 import { LanguageProvider, useT } from './i18n/LanguageContext'
 import LockScreen           from './security/LockScreen'
@@ -32,9 +37,12 @@ import IntegrationsPage     from './pages/IntegrationsPage'
 import NetworkPage          from './pages/NetworkPage'
 import OutilsPage           from './pages/OutilsPage'
 import AuthCallbackPage     from './pages/AuthCallbackPage'
+import AppleDesktopBridgePage from './pages/AppleDesktopBridgePage'
 import QuotasPage           from './pages/QuotasPage'
 import AdminPage            from './pages/AdminPage'
 import WorkspacesPage       from './pages/WorkspacesPage'
+import { ProgressionDecisionsPage } from './pages/ProgressionDecisionsPage'
+import { SupportPage } from './pages/SupportPage'
 import { ToastProvider }    from './components/Toast'
 
 // ── Application ───────────────────────────────────────────────────────────────
@@ -57,11 +65,14 @@ function AppContent() {
 
       <Routes>
         {/* Routes publiques */}
+        <Route path="/bienvenue" element={<LandingPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/auth/callback" element={<AuthCallbackPage />} />
+        <Route path="/auth/apple-desktop" element={<AppleDesktopBridgePage />} />
         <Route path="/privacy" element={<PrivacyPolicyPage />} />
         <Route path="/terms" element={<TermsPage />} />
         <Route path="/help" element={<HelpPage />} />
+        <Route path="/support" element={<SupportPage />} />
 
         {/* Route splash legacy (navigation directe à /splash) */}
         <Route path="/splash" element={<SplashPage />} />
@@ -75,11 +86,16 @@ function AppContent() {
                 <NavBar onOpenChatbot={() => setChatbotOpen(true)} />
                 {/* Phase 2c — bandeau pont desktop <-> web (vert si OK, rouge sinon) */}
                 <DesktopStatusBanner />
+                {/* Banner global : alerte si periodes de tracking dues OU recap a valider */}
+                <TrackingNotifBanner />
                 <main style={{ flex: 1 }}>
+                  <RouteErrorBoundary>
                   <Routes>
                     <Route path="/"             element={<DashboardPage />} />
                     <Route path="/profil"       element={<ProfilWizardPage />} />
                     <Route path="/dilemme"      element={<DilemmePage />} />
+                    <Route path="/tracking"     element={<TrackingsPage />} />
+                    <Route path="/tracking/:id/recap" element={<TrackingRecapPage />} />
                     <Route path="/statistiques" element={<StatistiquesPage />} />
                     <Route path="/historique"   element={<HistoriquePage />} />
                     <Route path="/evenement"    element={<EvenementPage />} />
@@ -96,10 +112,12 @@ function AppContent() {
                     <Route path="/quotas"         element={<QuotasPage />} />
                     <Route path="/admin"          element={<AdminPage />} />
                     <Route path="/workspaces"     element={<WorkspacesPage />} />
+                    <Route path="/progression-decisions" element={<ProgressionDecisionsPage />} />
                     {/* Backward-compat: /api-keys → onglet "Tokens API B2B" de Intégrations */}
                     <Route path="/api-keys"       element={<Navigate to="/integrations?tab=tokens" replace />} />
                     <Route path="*"             element={<Navigate to="/" replace />} />
                   </Routes>
+                  </RouteErrorBoundary>
                 </main>
                 <ServiceChatbot visible={chatbotOpen} onClose={() => setChatbotOpen(false)} />
 
@@ -123,10 +141,13 @@ function AppContent() {
                   </span>
                   <span style={{ marginLeft: '1.5rem' }}>
                     <a href="/privacy" style={{ color: 'var(--text-muted)', textDecoration: 'none', marginRight: '0.75rem' }}>
-                      Confidentialite
+                      Confidentialité
                     </a>
-                    <a href="/terms" style={{ color: 'var(--text-muted)', textDecoration: 'none' }}>
+                    <a href="/terms" style={{ color: 'var(--text-muted)', textDecoration: 'none', marginRight: '0.75rem' }}>
                       CGU
+                    </a>
+                    <a href="/support" style={{ color: 'var(--accent-violet-light)', textDecoration: 'none', fontWeight: 500 }}>
+                      Support &amp; aide
                     </a>
                   </span>
                 </footer>

@@ -39,8 +39,17 @@ try:
 except ImportError:
     pass
 
+# ── Structured logging + Sentry (avant les autres imports) ───────────────────
+from api.logging_setup import configure_logging, RequestContextMiddleware
+configure_logging()
+
+from api.error_tracking import init_sentry
+init_sentry()
+
 from api.dependencies import get_optional_user
 from api.routers import profil, dilemme, historique, evenement, bilan, objectifs, service_client
+from api.routers import actions as actions_router
+from api.routers.dilemmes_tracking import router as dilemmes_tracking_router
 from api.routers.agent_companion import router as agent_companion_router
 from api.routers.agent_assistant import router as agent_assistant_router
 from api.routers.agent3_openclaw import router as agent3_router
@@ -52,25 +61,51 @@ from api.routers.integrations import router as integrations_router
 from api.routers.notifications import router as notifications_router
 from api.routers.shared_workspaces import router as shared_workspaces_router
 from api.routers.credentials_vault import router as credentials_vault_router
+from api.routers.pending import router as pending_router
 from api.schemas import HealthOut
 
 
-# ── Initialisation tables Agent 3 au démarrage ────────────────────────────────
-def _init_agent3_tables():
-    """Crée les tables Agent 3 (cron, memory, files, preferences, tasks) au démarrage."""
-    try:
-        from sylea.core.storage.database import DatabaseManager
-        from api.routers.agent3_openclaw import _ensure_agent3_tables
-        db = DatabaseManager()
-        db.connect()
-        try:
-            _ensure_agent3_tables(db)
-        finally:
-            db.disconnect()
-    except Exception:
-        pass  # DB not available yet or import error — tables will be created on first use
+# ── Initialisation schema au démarrage (Alembic en PG, DDL en SQLite) ─────────
+def _init_db_schema():
+    """Initialise le schema DB au demarrage.
 
-_init_agent3_tables()
+    - PostgreSQL prod : execute `alembic upgrade head` automatiquement.
+    - SQLite dev      : execute les DDL idempotents (CREATE TABLE IF NOT EXISTS).
+
+    Le choix est fait via DATABASE_URL (postgres / sqlite).
+    """
+    database_url = os.environ.get("DATABASE_URL", "")
+    is_postgres = database_url.startswith(("postgres://", "postgresql://", "postgresql+"))
+
+    if is_postgres:
+        # PG prod : Alembic gere les migrations
+        try:
+            from alembic.config import Config
+            from alembic import command
+            alembic_cfg = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
+            alembic_cfg.set_main_option("sqlalchemy.url", database_url)
+            command.upgrade(alembic_cfg, "head")
+            print("[main] Alembic: schema PostgreSQL synchronise (upgrade head)")
+        except Exception as e:
+            print(f"[main] Alembic upgrade failed: {e}")
+    else:
+        # SQLite dev : DDL idempotents
+        try:
+            from sylea.core.storage.database import DatabaseManager
+            from api.routers.agent3_openclaw import _ensure_agent3_tables
+            from api.dilemmes_tracking import ensure_tracking_tables
+            db = DatabaseManager()
+            db.connect()
+            try:
+                _ensure_agent3_tables(db)
+                ensure_tracking_tables(db)
+            finally:
+                db.disconnect()
+            print("[main] SQLite: tables Agent 3 + dilemmes_tracking initialisees (DDL idempotent)")
+        except Exception:
+            pass  # DB not available yet or import error — tables will be created on first use
+
+_init_db_schema()
 
 # Start background cron scheduler — opt-in via env var pour eviter les fuites
 # de cout quand personne n'utilise l'app. Defaut OFF (protege contre les
@@ -82,6 +117,27 @@ if _scheduler_enabled in ("1", "true", "yes", "on"):
     print("[main] Scheduler cron ACTIVE (SYLEA_SCHEDULER_ENABLED=true)")
 else:
     print("[main] Scheduler cron INACTIF (set SYLEA_SCHEDULER_ENABLED=true pour activer)")
+
+# Scheduler dilemmes tracking — decouple du cron (depuis 2026-06-01).
+# Avant : meme flag que SYLEA_SCHEDULER_ENABLED → si dev avait l'agent OFF
+# pour pas payer Anthropic, il perdait AUSSI les notifs de tracking, alors
+# que le tracking scheduler ne fait que des UPDATE DB + push WS (cout zero
+# LLM). Resultat : creer un tracking impact=1jour ne declenchait JAMAIS
+# de notif en dev → user voyait le countdown decroitre sans alerte.
+# Fix : tracking scheduler ON par defaut (gratuit), opt-out via
+# SYLEA_TRACKING_SCHEDULER_ENABLED=false.
+_tracking_sched_enabled = os.environ.get(
+    "SYLEA_TRACKING_SCHEDULER_ENABLED", "true"
+).strip().lower()
+if _tracking_sched_enabled in ("1", "true", "yes", "on"):
+    try:
+        from api.dilemmes_tracking_scheduler import scheduler as tracking_scheduler
+        tracking_scheduler.start()
+        print("[main] Scheduler dilemmes tracking ACTIVE (cout LLM = 0)")
+    except Exception as e:
+        print(f"[main] Scheduler dilemmes tracking erreur: {e}")
+else:
+    print("[main] Scheduler dilemmes tracking INACTIF (SYLEA_TRACKING_SCHEDULER_ENABLED=false)")
 
 
 # ── Application ────────────────────────────────────────────────────────────────
@@ -101,35 +157,103 @@ async def _close_agent3_http_pool():
         await close_http_client()
     except Exception:
         pass
+    # Stop scheduler dilemmes tracking si lance.
+    try:
+        from api.dilemmes_tracking_scheduler import scheduler as tracking_scheduler
+        tracking_scheduler.stop()
+    except Exception:
+        pass
 
-# CORS : autoriser le frontend React (dev + production)
+# CORS : autoriser le frontend React (dev + production).
+# Important : `allow_origins=["*"]` + `allow_credentials=True` est INTERDIT
+# par le standard (le navigateur refuse). On liste donc explicitement.
 origins = [
+    # Dev local
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:3000",
     "http://localhost:1420",
-    "https://sylea-ai.vercel.app",   # Production frontend
-    "https://*.vercel.app",          # Preview deployments
-    "tauri://localhost",
-    "https://tauri.localhost",
+    # Production
+    "https://sylea-ai.vercel.app",
+    "https://sylea.ai",
+    "https://www.sylea.ai",
+    # Tauri desktop (3 origines possibles selon plateforme + version)
+    "tauri://localhost",        # Linux + macOS Tauri 1.x
+    "https://tauri.localhost",  # Windows WebView2 Tauri 2.x (HTTPS)
+    "http://tauri.localhost",   # Windows WebView2 Tauri 2.x (HTTP, dev)
 ]
 
+# Origines dynamiques depuis env (preview deployments Vercel, etc.)
+# Format : CORS_ORIGINS=https://preview-123.vercel.app,https://staging.sylea.ai
 extra_origins = os.environ.get("CORS_ORIGINS", "")
 if extra_origins:
-    origins.extend(extra_origins.split(","))
+    for o in extra_origins.split(","):
+        o = o.strip()
+        if o and o not in origins:
+            origins.append(o)
+
+# Regex pour matcher les preview Vercel + variations Tauri ports/schemes.
+# On accepte aussi (http|https|tauri)://localhost(:PORT)? et tauri.localhost
+# car les versions futures de Tauri pourraient varier l'origine de la webview.
+_origin_regex = (
+    r"^(https://(sylea-ai-[a-z0-9-]+\.vercel\.app"
+    r"|sylea-ai-git-[a-z0-9-]+\.vercel\.app)"
+    r"|(http|https|tauri)://(tauri\.)?localhost(:\d+)?)$"
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=_origin_regex,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Liste explicite : on autorise les verbes REST standards, pas TRACE/CONNECT
+    # qui peuvent ouvrir des vecteurs XST (Cross-Site Tracing).
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    # Liste explicite des headers attendus. "*" était trop permissif.
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Authorization",
+        "Content-Language",
+        "Content-Type",
+        "X-Request-Id",
+        "X-CSRF-Token",
+    ],
+    # Headers que le frontend peut lire (utile pour le debug + tracing).
+    expose_headers=["X-Request-Id", "Retry-After", "X-RateLimit-Bucket"],
+    max_age=600,  # cache preflight 10 min
 )
+
+# ── Middlewares de sécurité niveau pro ───────────────────────────────────────
+# Ordre important : Starlette applique les middlewares dans l'ordre INVERSE
+# d'ajout (LIFO). On veut donc :
+#   1) IP rate limit (premier rempart, avant tout traitement)
+#   2) CSRF protection (vérifie cookies/headers)
+#   3) Security headers (pose les headers sur la réponse finale)
+# → ordre d'ajout : security_headers d'abord, puis CSRF, puis IP rate limit.
+from api.security_headers import SecurityHeadersMiddleware
+from api.csrf_middleware import CSRFMiddleware
+from api.ip_rate_limiter import IPRateLimitMiddleware
+from api.presence_middleware import PresenceMiddleware
+
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(CSRFMiddleware)
+app.add_middleware(IPRateLimitMiddleware)
+# Presence/engagement tracking — touche users.last_seen_at + last_engaged_at
+# en debounced fire-and-forget. N'ajoute jamais de latence a la reponse user.
+# Fix : avant ce middleware, le seul moyen de detecter qu'un user etait actif
+# etait via chat ou decision, ce qui causait le bug "Yo Lucas 7 jours sans
+# nouvelles" alors que l'user etait connecte (cf api/presence_middleware.py).
+app.add_middleware(PresenceMiddleware)
+# RequestContextMiddleware en DERNIER ajout = exécuté EN PREMIER (LIFO).
+# Génère le request_id avant tout le reste pour qu'il soit dans tous les logs.
+app.add_middleware(RequestContextMiddleware)
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 
 app.include_router(profil.router)
 app.include_router(dilemme.router)
+app.include_router(dilemmes_tracking_router)
 app.include_router(historique.router)
 app.include_router(evenement.router)
 app.include_router(bilan.router)
@@ -146,6 +270,8 @@ app.include_router(integrations_router)
 app.include_router(notifications_router)
 app.include_router(shared_workspaces_router)
 app.include_router(credentials_vault_router)
+app.include_router(pending_router)
+app.include_router(actions_router.router)
 
 
 # ── Routes utilitaires ────────────────────────────────────────────────────────
@@ -156,13 +282,63 @@ def health_check():
     return HealthOut(status="ok", version="1.0.0")
 
 
+@app.get("/api/health/security", tags=["system"])
+def health_security():
+    """Diagnostic des middlewares de sécurité (sans valeur sensible).
+
+    Retourne uniquement les drapeaux on/off et les paramètres publics
+    (capacités, modes). Aucun secret n'est exposé. Utile pour audits.
+    """
+    from api.security_headers import get_security_headers_config
+    from api.ip_rate_limiter import get_ip_rate_limit_config
+    from api.secrets_manager import list_active_backend_info
+
+    return {
+        "security_headers": get_security_headers_config(),
+        "ip_rate_limit": get_ip_rate_limit_config(),
+        "csrf": {
+            "enabled": os.environ.get("SYLEA_DISABLE_CSRF", "").strip().lower()
+                        not in ("1", "true", "yes", "on"),
+            "cookie_secure": os.environ.get(
+                "SYLEA_CSRF_COOKIE_SECURE", ""
+            ).strip().lower() in ("1", "true", "yes", "on"),
+            "cookie_samesite": os.environ.get(
+                "SYLEA_CSRF_COOKIE_SAMESITE", "lax"
+            ),
+        },
+        "secrets": list_active_backend_info(),
+    }
+
+
+@app.get("/api/health/observability", tags=["system"])
+def health_observability():
+    """Diagnostic logging + Sentry + feature flags + LLM router."""
+    from api.error_tracking import get_config as sentry_config
+    from api.feature_flags import list_features
+    from api.llm_router import get_router_config
+
+    return {
+        "logging": {
+            "level": os.environ.get("SYLEA_LOG_LEVEL", "INFO"),
+            "format": os.environ.get("SYLEA_LOG_FORMAT", "auto"),
+        },
+        "sentry": sentry_config(),
+        "feature_flags": {
+            "backend": os.environ.get("SYLEA_FF_BACKEND", "local"),
+            "count": len(list_features()),
+        },
+        "llm_router": get_router_config(),
+    }
+
+
 # ── WebSocket pour le desktop ─────────────────────────────────────────────────
 
 @app.websocket("/ws/agent")
 async def websocket_agent(websocket: WebSocket, token: str = Query(default="")):
     """WebSocket pour l'app desktop Syléa Agent — accepte toutes les origines."""
     from api.websocket import ws_manager
-    from api.auth.security import decode_token
+    from api.auth.security import decode_token_payload
+    from api.dependencies import _get_user_security_state
 
     # Accepter la connexion AVANT la validation du token
     # (sinon le CORS middleware bloque)
@@ -171,11 +347,32 @@ async def websocket_agent(websocket: WebSocket, token: str = Query(default="")):
         await websocket.close(code=4001, reason="Token manquant")
         return
 
-    user_id = decode_token(token)
-    if not user_id:
+    payload = decode_token_payload(token)
+    if not payload or not payload.get("sub"):
         await websocket.accept()
         await websocket.close(code=4001, reason="Token invalide")
         return
+    user_id = payload["sub"]
+
+    # SECURITE (audit 2026-06) : appliquer au WS les MEMES regles que l'auth HTTP
+    # (get_optional_user) — compte desactive (disabled_at) ou token revoque
+    # (iat < tokens_invalidated_before, pose par /logout). Avant, le WS ne faisait
+    # qu'un decode_token nu -> un token revoque ou un compte banni gardait le canal
+    # desktop ouvert jusqu'a l'expiration (7j).
+    try:
+        _disabled, _invalidated_before = await _get_user_security_state(user_id)
+    except Exception:
+        _disabled, _invalidated_before = False, None
+    if _disabled:
+        await websocket.accept()
+        await websocket.close(code=4003, reason="Compte desactive")
+        return
+    if _invalidated_before is not None:
+        _iat = payload.get("iat")
+        if _iat is None or float(_iat) < _invalidated_before:
+            await websocket.accept()
+            await websocket.close(code=4001, reason="Session expiree")
+            return
 
     await ws_manager.connect(websocket, user_id)
     print(f"[WS] User {user_id} connected successfully")

@@ -7,7 +7,7 @@ import { api, API_BASE } from '../api/client'
 interface AuthUser {
   id: string
   email: string
-  provider: 'local' | 'google' | 'github'
+  provider: 'local' | 'google' | 'github' | 'apple'
 }
 
 interface AuthState {
@@ -23,6 +23,11 @@ interface AuthState {
   handleGoogleCallback: (code: string) => Promise<void>
   githubLogin: () => Promise<void>
   handleGithubCallback: (code: string) => Promise<void>
+  appleLogin: () => Promise<void>
+  handleAppleCallback: (
+    code: string,
+    options?: { firstName?: string; lastName?: string; idToken?: string },
+  ) => Promise<void>
   logout: () => void
   loadToken: () => void
   clearError: () => void
@@ -44,10 +49,27 @@ export const useAuthStore = create<AuthState>((set) => ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
+        // credentials: 'include' pour recevoir le cookie sylea_csrf que le
+        // backend pose dans la réponse (utilisé sur les POST suivants).
+        credentials: 'include',
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }))
-        throw new Error(err.detail || `Erreur ${res.status}`)
+        // Cas special : 409 USE_OAUTH = compte OAuth-only.
+        // Le backend renvoie un detail object {code, provider, message}, on
+        // affiche un message friendly pointant vers le bon bouton.
+        if (res.status === 409 && err?.detail?.code === 'USE_OAUTH') {
+          const provider = (err.detail.provider || 'OAuth').toString()
+          const providerCap = provider.charAt(0).toUpperCase() + provider.slice(1)
+          throw new Error(
+            `Ce compte se connecte avec ${providerCap}. Utilise le bouton "Continuer avec ${providerCap}" ci-dessous.`,
+          )
+        }
+        // Cas normal : detail peut etre string ou objet
+        const msg = typeof err?.detail === 'string'
+          ? err.detail
+          : (err?.detail?.message || `Erreur ${res.status}`)
+        throw new Error(msg)
       }
       const data = await res.json()
       const token = data.access_token || data.token
@@ -69,6 +91,7 @@ export const useAuthStore = create<AuthState>((set) => ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password, password_confirm: password }),
+        credentials: 'include',
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }))
@@ -167,6 +190,47 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
+  appleLogin: async () => {
+    set({ loading: true, error: null })
+    try {
+      const redirectUri = `${window.location.origin}/auth/callback`
+      const { url } = await api.authAppleUrl(redirectUri)
+      window.location.href = url
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Erreur Apple Sign-In'
+      set({ loading: false, error: msg })
+    }
+  },
+
+  handleAppleCallback: async (
+    code: string,
+    options?: { firstName?: string; lastName?: string; idToken?: string },
+  ) => {
+    set({ loading: true, error: null })
+    try {
+      const redirectUri = `${window.location.origin}/auth/callback`
+      const data = await api.authOAuthApple(code, redirectUri, options)
+      const token = data.access_token
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      }
+      const meResp = await fetch(`${API_BASE}/api/auth/me`, { headers })
+      const user = meResp.ok
+        ? await meResp.json()
+        : { id: '', email: '', provider: 'apple' }
+
+      localStorage.setItem(AUTH_TOKEN_KEY, token)
+      localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user))
+      set({ token, user, loading: false, error: null })
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Erreur callback Apple'
+      set({ loading: false, error: msg })
+      throw e
+    }
+  },
+
   verifyCode: async (email: string, code: string) => {
     set({ loading: true, error: null })
     try {
@@ -174,6 +238,7 @@ export const useAuthStore = create<AuthState>((set) => ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, code }),
+        credentials: 'include',
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }))
@@ -190,6 +255,12 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: () => {
+    // Revocation server-side (best-effort) : invalide tous les tokens cote
+    // backend AVANT de purger le local. Si l'appel echoue (reseau), on purge
+    // quand meme le local — l'important cote UX est de deconnecter ici.
+    try {
+      void api.authLogout().catch(() => { /* best-effort */ })
+    } catch { /* api indispo */ }
     localStorage.removeItem(AUTH_TOKEN_KEY)
     localStorage.removeItem(AUTH_USER_KEY)
     // Clear profil from main store to prevent flash of old data on next login

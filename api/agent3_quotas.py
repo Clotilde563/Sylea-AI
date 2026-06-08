@@ -38,7 +38,7 @@ PLANS: dict[str, dict[str, Any]] = {
     "free": {
         "name": "free",
         "display_name": "Free",
-        "price_usd": 0,
+        "price_eur": 0,
         "limits": {
             "tokens_per_month": 100_000,
             "skills_installed": 10,
@@ -49,10 +49,12 @@ PLANS: dict[str, dict[str, Any]] = {
             "team_members": 0,
         },
     },
-    "pro": {
-        "name": "pro",
-        "display_name": "Pro",
-        "price_usd": 20,
+    "advanced": {
+        "name": "advanced",
+        "display_name": "Avancé",
+        "price_eur": 19.99,
+        # Devise EUR (marche francais). Anciennement "pro" + price_usd=20 :
+        # rename effectue suite a decision produit "Avance" comme nom marketing.
         "limits": {
             "tokens_per_month": 1_000_000,
             "skills_installed": 50,
@@ -66,7 +68,7 @@ PLANS: dict[str, dict[str, Any]] = {
     "team": {
         "name": "team",
         "display_name": "Team",
-        "price_usd": 50,
+        "price_eur": 49.99,
         "limits": {
             "tokens_per_month": 10_000_000,
             "skills_installed": -1,    # unlimited
@@ -149,112 +151,236 @@ def _now_iso() -> str:
 # Plan management
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_user_plan(db: Any, user_id: str) -> dict[str, Any]:
-    """Retourne le plan de l'user (defaut: free) avec ses limites effectives."""
-    if not user_id:
-        return PLANS["free"]
-    ensure_quota_tables(db)
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
 
+_TRACKED_RESOURCES_ASYNC = frozenset((
+    "tokens", "requests", "skills_installed",
+    "crons", "uploads", "deep_researches",
+))
+
+
+async def get_usage_value_async(user_id: str, resource: str) -> int:
+    """Version async — PG-compatible."""
+    if not user_id or resource not in _TRACKED_RESOURCES_ASYNC:
+        return 0
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
     try:
-        row = db.conn.execute(
-            "SELECT plan_name, custom_limits_json, started_at, expires_at "
-            "FROM user_plans WHERE user_id = ?",
-            (user_id,),
-        ).fetchone()
-    except Exception as e:
-        logger.debug(f"get_user_plan failed: {e}")
-        return PLANS["free"]
-
+        async with factory() as session:
+            # SECURITE : resource est en whitelist statique (TRACKED_RESOURCES_ASYNC).
+            # Jamais derive d'input user → pas d'injection SQL possible.
+            result = await session.execute(
+                text(
+                    f"SELECT {resource} FROM user_quota_usage "
+                    "WHERE user_id = :uid AND month_key = :mk"
+                ),
+                {"uid": user_id, "mk": _current_month_key()},
+            )
+            row = result.first()
+    except Exception:
+        return 0
     if not row:
-        return PLANS["free"]
+        return 0
+    return int(row[0] or 0)
 
-    plan_name = row[0] or "free"
-    base = PLANS.get(plan_name) or PLANS["free"]
-    # Copy pour pas muter le dict module-level
-    plan = {
-        "name": base["name"],
-        "display_name": base["display_name"],
-        "price_usd": base["price_usd"],
-        "limits": dict(base["limits"]),
-        "started_at": row[2],
-        "expires_at": row[3],
+
+async def get_usage_async(
+    user_id: str, month_key: str | None = None,
+) -> dict[str, Any]:
+    """Version async — PG-compatible."""
+    if not user_id:
+        return {}
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    mk = month_key or _current_month_key()
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT tokens, requests, skills_installed, crons, "
+                    "uploads, deep_researches, updated_at "
+                    "FROM user_quota_usage WHERE user_id = :uid AND month_key = :mk"
+                ),
+                {"uid": user_id, "mk": mk},
+            )
+            row = result.mappings().first()
+    except Exception:
+        return {}
+    if not row:
+        return {
+            "month_key": mk, "tokens": 0, "requests": 0,
+            "skills_installed": 0, "crons": 0, "uploads": 0,
+            "deep_researches": 0,
+        }
+    return {
+        "month_key": mk,
+        "tokens": row["tokens"] or 0,
+        "requests": row["requests"] or 0,
+        "skills_installed": row["skills_installed"] or 0,
+        "crons": row["crons"] or 0,
+        "uploads": row["uploads"] or 0,
+        "deep_researches": row["deep_researches"] or 0,
+        "updated_at": row["updated_at"],
     }
-    # Override custom limits si defini
-    if row[1]:
-        try:
-            custom = json.loads(row[1]) or {}
-            if isinstance(custom, dict):
-                plan["limits"].update(custom)
-        except Exception:
-            pass
-    return plan
 
 
-def set_user_plan(
-    db: Any,
+async def record_usage_async(
+    user_id: str, resource: str, amount: int = 1,
+) -> bool:
+    """Version async — PG-compatible.
+
+    Upsert portable (SELECT-then-UPDATE/INSERT) — pas `ON CONFLICT` SQLite-specific.
+    SECURITE : resource est en whitelist (_TRACKED_RESOURCES_ASYNC).
+    """
+    if not user_id or resource not in _TRACKED_RESOURCES_ASYNC or amount == 0:
+        return False
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    mk = _current_month_key()
+    now = _now_iso()
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            try:
+                # Verifier existence
+                result = await session.execute(
+                    text(
+                        "SELECT 1 FROM user_quota_usage "
+                        "WHERE user_id = :uid AND month_key = :mk"
+                    ),
+                    {"uid": user_id, "mk": mk},
+                )
+                existing = result.first()
+                if existing:
+                    await session.execute(
+                        text(
+                            f"UPDATE user_quota_usage SET "
+                            f"{resource} = COALESCE({resource}, 0) + :amount, "
+                            f"updated_at = :now "
+                            f"WHERE user_id = :uid AND month_key = :mk"
+                        ),
+                        {"amount": amount, "now": now,
+                         "uid": user_id, "mk": mk},
+                    )
+                else:
+                    await session.execute(
+                        text(
+                            f"INSERT INTO user_quota_usage "
+                            f"(user_id, month_key, {resource}, updated_at) "
+                            f"VALUES (:uid, :mk, :amount, :now)"
+                        ),
+                        {"uid": user_id, "mk": mk,
+                         "amount": amount, "now": now},
+                    )
+                await session.commit()
+                return True
+            except Exception:
+                await session.rollback()
+                return False
+    except Exception as e:
+        logger.warning(f"record_usage_async failed: {e}")
+        return False
+
+
+async def reset_usage_async(
+    user_id: str, month_key: str | None = None,
+) -> bool:
+    """Version async de reset_usage — PG-compatible."""
+    if not user_id:
+        return False
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    mk = month_key or _current_month_key()
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            try:
+                await session.execute(
+                    text(
+                        "DELETE FROM user_quota_usage "
+                        "WHERE user_id = :uid AND month_key = :mk"
+                    ),
+                    {"uid": user_id, "mk": mk},
+                )
+                await session.commit()
+                return True
+            except Exception:
+                await session.rollback()
+                return False
+    except Exception:
+        return False
+
+
+async def set_user_plan_async(
     user_id: str,
     plan_name: str,
     *,
     custom_limits: dict | None = None,
     expires_at: str | None = None,
 ) -> dict[str, Any]:
-    """Definit le plan d'un user. Cree ou met a jour."""
+    """Version async — PG-compatible. Upsert portable."""
     if not user_id:
         return {"ok": False, "error": "no user_id"}
     if plan_name not in PLANS:
         return {"ok": False, "error": f"unknown plan: {plan_name}"}
-    ensure_quota_tables(db)
-
+    from sqlalchemy import text
+    from api.database import get_session_factory
     now = _now_iso()
     custom_json = json.dumps(custom_limits) if custom_limits else None
+    factory = get_session_factory()
     try:
-        existing = db.conn.execute(
-            "SELECT user_id FROM user_plans WHERE user_id = ?", (user_id,),
-        ).fetchone()
-        if existing:
-            db.conn.execute(
-                "UPDATE user_plans SET plan_name = ?, custom_limits_json = ?, "
-                "expires_at = ?, updated_at = ? WHERE user_id = ?",
-                (plan_name, custom_json, expires_at, now, user_id),
-            )
-        else:
-            db.conn.execute(
-                "INSERT INTO user_plans "
-                "(user_id, plan_name, custom_limits_json, started_at, expires_at, updated_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (user_id, plan_name, custom_json, now, expires_at, now),
-            )
-        db.conn.commit()
+        async with factory() as session:
+            try:
+                result = await session.execute(
+                    text("SELECT user_id FROM user_plans WHERE user_id = :uid"),
+                    {"uid": user_id},
+                )
+                existing = result.first()
+                if existing:
+                    await session.execute(
+                        text(
+                            "UPDATE user_plans SET plan_name = :pname, "
+                            "custom_limits_json = :cjson, expires_at = :exp, "
+                            "updated_at = :now WHERE user_id = :uid"
+                        ),
+                        {"pname": plan_name, "cjson": custom_json,
+                         "exp": expires_at, "now": now, "uid": user_id},
+                    )
+                else:
+                    await session.execute(
+                        text(
+                            "INSERT INTO user_plans "
+                            "(user_id, plan_name, custom_limits_json, "
+                            "started_at, expires_at, updated_at) "
+                            "VALUES (:uid, :pname, :cjson, :started, :exp, :now)"
+                        ),
+                        {"uid": user_id, "pname": plan_name,
+                         "cjson": custom_json, "started": now,
+                         "exp": expires_at, "now": now},
+                    )
+                await session.commit()
+            except Exception as e:
+                await session.rollback()
+                logger.warning(f"set_user_plan_async failed: {e}")
+                return {"ok": False, "error": str(e)}
     except Exception as e:
-        logger.warning(f"set_user_plan failed: {e}")
         return {"ok": False, "error": str(e)}
     return {"ok": True, "plan": plan_name}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Quota checking
-# ─────────────────────────────────────────────────────────────────────────────
-
-def check_quota(
-    db: Any, user_id: str, resource: str, amount: int = 1,
+async def check_quota_async(
+    user_id: str, resource: str, amount: int = 1,
 ) -> tuple[bool, str, int]:
-    """Verifie qu'il reste du quota pour `resource` + `amount`.
-
-    Retourne (ok, reason, remaining) :
-      - ok=True : quota OK, reason = "", remaining = N
-      - ok=False : depasse, reason = message, remaining = 0
-
-    Les resources cummulatives (tokens, uploads, deep_researches) sont trackees
-    mois par mois. Les resources-instance (skills_installed, crons) comparent
-    simplement le count actuel.
-    """
+    """Version async — PG-compatible. Note : ne fire pas les webhooks
+    (best-effort, peut etre ajoute plus tard via async task)."""
     if not user_id:
-        return True, "anon", -1  # anon : pas de quota (limite par IP/reverse proxy)
-
-    plan = get_user_plan(db, user_id)
+        return True, "anon", -1
+    plan = await get_user_plan_async(user_id)
     limits = plan["limits"]
-
-    # Mapping resource -> cle de limite dans le plan
     limit_keys = {
         "tokens": "tokens_per_month",
         "uploads": "uploads_per_month",
@@ -265,156 +391,86 @@ def check_quota(
     limit_key = limit_keys.get(resource)
     if not limit_key:
         return True, f"unknown resource {resource}", -1
-
     limit = limits.get(limit_key)
     if limit is None:
         return True, "no limit defined", -1
     if limit == -1:
         return True, "unlimited", -1
 
-    current = get_usage_value(db, user_id, resource)
-
+    current = await get_usage_value_async(user_id, resource)
     if current + amount > limit:
         remaining = max(0, limit - current)
-        # Webhook : fire quota.exceeded (best-effort, non-blocking)
-        try:
-            from api.agent3_webhooks import fire_and_forget as _fire_wh
-            _fire_wh(db, "quota.exceeded", {
-                "user_id": user_id,
-                "resource": resource,
-                "current": current,
-                "limit": limit,
-                "plan": plan.get("name"),
-            }, user_id=user_id)
-        except Exception:
-            pass
         return False, (
             f"Quota {resource} depasse : {current}/{limit} "
             f"(plan {plan['name']}). Passe au plan superieur."
         ), remaining
-
-    # Webhook : fire quota.warning si on franchit le seuil 80% sur cet appel
-    new_total = current + amount
-    if limit > 0 and current < int(limit * 0.8) <= new_total:
-        try:
-            from api.agent3_webhooks import fire_and_forget as _fire_wh
-            _fire_wh(db, "quota.warning", {
-                "user_id": user_id,
-                "resource": resource,
-                "current": new_total,
-                "limit": limit,
-                "percent": int(new_total * 100 / limit),
-                "plan": plan.get("name"),
-            }, user_id=user_id)
-        except Exception:
-            pass
-
     return True, "ok", limit - current - amount
 
 
-def get_usage_value(db: Any, user_id: str, resource: str) -> int:
-    """Retourne la valeur actuelle pour resource (mois courant si resource mensuelle)."""
-    if not user_id or resource not in TRACKED_RESOURCES:
-        return 0
-    ensure_quota_tables(db)
+async def get_user_plan_async(user_id: str) -> dict[str, Any]:
+    """Version async de get_user_plan — PG-compatible.
 
-    try:
-        row = db.conn.execute(
-            f"SELECT {resource} FROM user_quota_usage "
-            "WHERE user_id = ? AND month_key = ?",
-            (user_id, _current_month_key()),
-        ).fetchone()
-    except Exception:
-        return 0
-    if not row:
-        return 0
-    return int(row[0] or 0)
-
-
-def get_usage(db: Any, user_id: str, month_key: str | None = None) -> dict[str, Any]:
-    """Snapshot usage du user pour le mois courant (ou specifie)."""
+    Plus de parametre `db` : utilise get_session_factory(). Si la table
+    user_plans n'existe pas (PG fresh schema), fallback gracieux a 'free'.
+    """
     if not user_id:
-        return {}
-    ensure_quota_tables(db)
-    mk = month_key or _current_month_key()
+        return PLANS["free"]
+
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
     try:
-        row = db.conn.execute(
-            "SELECT tokens, requests, skills_installed, crons, uploads, deep_researches, updated_at "
-            "FROM user_quota_usage WHERE user_id = ? AND month_key = ?",
-            (user_id, mk),
-        ).fetchone()
-    except Exception:
-        return {}
-    if not row:
-        return {
-            "month_key": mk,
-            "tokens": 0, "requests": 0, "skills_installed": 0,
-            "crons": 0, "uploads": 0, "deep_researches": 0,
-        }
-    return {
-        "month_key": mk,
-        "tokens": row[0] or 0,
-        "requests": row[1] or 0,
-        "skills_installed": row[2] or 0,
-        "crons": row[3] or 0,
-        "uploads": row[4] or 0,
-        "deep_researches": row[5] or 0,
-        "updated_at": row[6],
-    }
-
-
-def record_usage(
-    db: Any, user_id: str, resource: str, amount: int = 1,
-) -> bool:
-    """Incremente le compteur d'usage. Upsert sur (user_id, month_key)."""
-    if not user_id or resource not in TRACKED_RESOURCES or amount == 0:
-        return False
-    ensure_quota_tables(db)
-
-    mk = _current_month_key()
-    now = _now_iso()
-    try:
-        # Upsert via SQLite ON CONFLICT
-        db.conn.execute(
-            f"INSERT INTO user_quota_usage (user_id, month_key, {resource}, updated_at) "
-            f"VALUES (?, ?, ?, ?) "
-            f"ON CONFLICT(user_id, month_key) DO UPDATE SET "
-            f"{resource} = {resource} + ?, updated_at = ?",
-            (user_id, mk, amount, now, amount, now),
-        )
-        db.conn.commit()
-        return True
+        async with factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT plan_name, custom_limits_json, started_at, expires_at "
+                    "FROM user_plans WHERE user_id = :uid"
+                ),
+                {"uid": user_id},
+            )
+            row = result.mappings().first()
     except Exception as e:
-        logger.warning(f"record_usage failed: {e}")
-        return False
+        logger.debug(f"get_user_plan_async failed: {e}")
+        return PLANS["free"]
 
+    if not row:
+        return PLANS["free"]
 
-def reset_usage(db: Any, user_id: str, month_key: str | None = None) -> bool:
-    """Reset l'usage d'un user pour un mois (admin only)."""
-    if not user_id:
-        return False
-    ensure_quota_tables(db)
-    mk = month_key or _current_month_key()
-    try:
-        db.conn.execute(
-            "DELETE FROM user_quota_usage WHERE user_id = ? AND month_key = ?",
-            (user_id, mk),
-        )
-        db.conn.commit()
-        return True
-    except Exception:
-        return False
+    plan_name = row["plan_name"] or "free"
+    # Backward-compat : ancien plan "pro" -> nouveau "advanced" (rename effectue
+    # apres decision produit "Avance" comme nom marketing). Si une ligne DB
+    # contient encore "pro", on la traite comme "advanced".
+    if plan_name == "pro":
+        plan_name = "advanced"
+    base = PLANS.get(plan_name) or PLANS["free"]
+    plan = {
+        "name": base["name"],
+        "display_name": base["display_name"],
+        "price_eur": base.get("price_eur", 0),
+        "limits": dict(base["limits"]),
+        "started_at": row["started_at"],
+        "expires_at": row["expires_at"],
+    }
+    # Override custom limits si defini
+    if row["custom_limits_json"]:
+        try:
+            custom = json.loads(row["custom_limits_json"]) or {}
+            if isinstance(custom, dict):
+                plan["limits"].update(custom)
+        except Exception:
+            pass
+    return plan
 
 
 __all__ = [
     "PLANS",
     "TRACKED_RESOURCES",
     "ensure_quota_tables",
-    "get_user_plan",
-    "set_user_plan",
-    "check_quota",
-    "get_usage",
-    "get_usage_value",
-    "record_usage",
-    "reset_usage",
+    "get_user_plan_async",
+    "set_user_plan_async",
+    "check_quota_async",
+    "get_usage_async",
+    "get_usage_value_async",
+    "record_usage_async",
+    "reset_usage_async",
 ]

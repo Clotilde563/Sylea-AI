@@ -126,29 +126,50 @@ class SyleaScheduler:
                 time.sleep(1)
 
     def _check_and_execute(self):
-        """Check all enabled cron jobs and execute matching ones."""
-        from sylea.core.storage.database import DatabaseManager
+        """Check all enabled cron jobs and execute matching ones.
 
+        Migration PG (2026-05-13) : utilise asyncio.run() pour exposer
+        get_session_factory() async depuis ce thread sync. Le SELECT et
+        l'UPDATE passent par SQLAlchemy text() — compat SQLite + PostgreSQL.
+        """
+        import asyncio as _asyncio
+        from sylea.core.storage.database import DatabaseManager
+        from sqlalchemy import text
+        from api.database import get_session_factory
+
+        # SELECT crons enabled via async session (PG-compatible)
+        async def _load_crons() -> list[tuple]:
+            factory = get_session_factory()
+            async with factory() as session:
+                result = await session.execute(
+                    text(
+                        "SELECT id, auth_user_id, label, instruction, cron_expr "
+                        "FROM agent3_cron WHERE enabled = 1"
+                    )
+                )
+                return [
+                    (r["id"], r["auth_user_id"], r["label"],
+                     r["instruction"], r["cron_expr"])
+                    for r in result.mappings().all()
+                ]
+        try:
+            crons = _asyncio.run(_load_crons())
+        except Exception as e:
+            print(f"[Scheduler] load crons failed: {e}")
+            crons = []
+
+        # Le DatabaseManager sync reste utilise pour _execute_cron et
+        # _check_reminders (writes UPDATE + cleanup). On le maintient
+        # pour ne pas tout refactorer en une fois.
         db = DatabaseManager()
         db.connect()
         try:
-            rows = db.conn.execute(
-                "SELECT id, auth_user_id, label, instruction, cron_expr "
-                "FROM agent3_cron WHERE enabled = 1"
-            ).fetchall()
-
             now = datetime.now()
-            # Use minute-level key to avoid re-executing within same minute
             current_minute = now.strftime("%Y-%m-%d %H:%M")
 
-            for row in rows:
-                cron_id = row[0]
-                user_id = row[1]
-                label = row[2]
-                instruction = row[3]
-                cron_expr = row[4]
+            for row in crons:
+                cron_id, user_id, label, instruction, cron_expr = row
 
-                # Skip if already executed this minute
                 if self._last_check.get(cron_id) == current_minute:
                     continue
 
@@ -157,13 +178,13 @@ class SyleaScheduler:
                     print(f"[Scheduler] Execution: '{label}' (cron: {cron_expr})")
                     self._execute_cron(db, cron_id, user_id, instruction)
 
-            # Also check reminders
             self._check_reminders(db, now)
 
-            # Phase 9B : retention pass (interne, idempotent 6h min entre runs)
+            # Phase 9B : retention pass (version async via event loop dedie).
             try:
-                from api.agent3_retention import run_retention_pass
-                run_retention_pass(db)  # no-op si < 6h depuis dernier run
+                import asyncio as _aio
+                from api.agent3_retention import run_retention_pass_async
+                _aio.run(run_retention_pass_async())
             except Exception as e:
                 print(f"[Scheduler] retention_pass warning: {e}")
         finally:
@@ -197,14 +218,7 @@ class SyleaScheduler:
                 f"[Cron skip — budget quotidien ${cap:.2f} atteint "
                 f"(${spent:.4f} depenses). Reprend demain.]"
             )
-            try:
-                db.conn.execute(
-                    "UPDATE agent3_cron SET last_run = ?, last_result = ? WHERE id = ?",
-                    (datetime.now().isoformat(), result_text, cron_id),
-                )
-                db.conn.commit()
-            except Exception:
-                pass
+            self._update_cron_result(cron_id, result_text)
             return
 
         model = os.environ.get("SYLEA_SCHEDULER_MODEL", "claude-haiku-4-5-20251001")
@@ -265,15 +279,8 @@ class SyleaScheduler:
         except Exception as e:
             result_text = f"[Erreur: {str(e)[:200]}]"
 
-        # Update last_run and last_result
-        try:
-            db.conn.execute(
-                "UPDATE agent3_cron SET last_run = ?, last_result = ? WHERE id = ?",
-                (datetime.now().isoformat(), result_text, cron_id),
-            )
-            db.conn.commit()
-        except Exception:
-            pass
+        # Update last_run and last_result (async via SQLAlchemy text(), compat PG).
+        self._update_cron_result(cron_id, result_text)
 
         # Send WebSocket notification to user
         try:
@@ -290,17 +297,76 @@ class SyleaScheduler:
         except Exception:
             pass
 
-    def _check_reminders(self, db, now: datetime):
-        """Check for due reminders and send notifications."""
+    def _update_cron_result(self, cron_id: str, result_text: str) -> None:
+        """Update last_run/last_result d'un cron via session async (PG-compatible)."""
+        import asyncio as _aio
         try:
+            from sqlalchemy import text as _sa_text
+            from api.database import get_session_factory as _gsf
+            now_iso = datetime.now().isoformat()
+
+            async def _do_update():
+                _factory = _gsf()
+                async with _factory() as _session:
+                    try:
+                        await _session.execute(
+                            _sa_text(
+                                "UPDATE agent3_cron SET last_run = :now, "
+                                "last_result = :res WHERE id = :cid"
+                            ),
+                            {"now": now_iso, "res": result_text, "cid": cron_id},
+                        )
+                        await _session.commit()
+                    except Exception:
+                        await _session.rollback()
+
+            _aio.run(_do_update())
+        except Exception:
+            pass
+
+    def _check_reminders(self, db, now: datetime):
+        """Check for due reminders and send notifications (async via SQLAlchemy)."""
+        import asyncio as _aio
+        try:
+            from sqlalchemy import text as _sa_text
+            from api.database import get_session_factory as _gsf
             today = now.strftime("%Y-%m-%d")
             current_time = now.strftime("%H:%M")
 
-            rows = db.conn.execute(
-                "SELECT id, user_id, message, reminder_time, reminder_date "
-                "FROM agent_reminders WHERE completed = 0 AND reminder_date = ? AND reminder_time <= ?",
-                (today, current_time),
-            ).fetchall()
+            async def _fetch_due():
+                _factory = _gsf()
+                async with _factory() as _session:
+                    _result = await _session.execute(
+                        _sa_text(
+                            "SELECT id, user_id, message, reminder_time, "
+                            "reminder_date FROM agent_reminders "
+                            "WHERE completed = 0 AND reminder_date = :today "
+                            "AND reminder_time <= :ctime"
+                        ),
+                        {"today": today, "ctime": current_time},
+                    )
+                    return [
+                        (r["id"], r["user_id"], r["message"],
+                         r["reminder_time"], r["reminder_date"])
+                        for r in _result.mappings().all()
+                    ]
+
+            async def _mark_completed(reminder_id: int):
+                _factory = _gsf()
+                async with _factory() as _session:
+                    try:
+                        await _session.execute(
+                            _sa_text(
+                                "UPDATE agent_reminders SET completed = 1 "
+                                "WHERE id = :rid"
+                            ),
+                            {"rid": reminder_id},
+                        )
+                        await _session.commit()
+                    except Exception:
+                        await _session.rollback()
+
+            rows = _aio.run(_fetch_due())
 
             for row in rows:
                 reminder_id = row[0]
@@ -331,13 +397,9 @@ class SyleaScheduler:
                 except Exception:
                     pass
 
-                # Mark as completed
+                # Mark as completed (async, compat PG).
                 try:
-                    db.conn.execute(
-                        "UPDATE agent_reminders SET completed = 1 WHERE id = ?",
-                        (reminder_id,),
-                    )
-                    db.conn.commit()
+                    _aio.run(_mark_completed(reminder_id))
                 except Exception:
                     pass
         except Exception:

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- ═══ Hardened Runtime (obligatoire pour notarization) ════════════════ -->
+    <!-- App Sandbox : DÉSACTIVÉ car Syléa Agent doit pouvoir accéder au -->
+    <!-- système (OpenClaw lance des processus locaux, lit/écrit fichiers -->
+    <!-- pour les skills email/notes/calendrier). Pour App Store, il faudrait -->
+    <!-- l'activer et passer par des entitlements granulaires. -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!-- Permet à l'app de spawn des subprocess (OpenClaw, ClawHub CLIs) -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Sign in with Apple : capability requise pour utiliser ASAuthorization -->
+    <!-- (l'API native macOS pour Sign in with Apple). Pour le flux web/deep- -->
+    <!-- link, on n'en a PAS besoin techniquement, mais on l'ajoute pour -->
+    <!-- pouvoir basculer vers natif sans re-signer. -->
+    <key>com.apple.developer.applesignin</key>
+    <array>
+        <string>Default</string>
+    </array>
+
+    <!-- Réseau (sortie HTTPS vers api.sylea.ai, Anthropic, etc.) -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- Réseau (serveur local : OpenClaw écoute sur 127.0.0.1:18789) -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- Fichiers : lire/écrire dans le sandbox utilisateur (skills file_io) -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <key>com.apple.security.files.downloads.read-write</key>
+    <true/>
+
+    <!-- AppleScript / Automation (pour skill Outlook/Mail/Calendar.app) -->
+    <!-- Liste explicite des apps que Syléa peut piloter via osascript -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>

@@ -196,7 +196,10 @@ export function ProtectedRoute() {
   }
 
   if (!token) {
-    return <Navigate to="/login" replace />
+    // Non connecté → landing publique (intro + documentation + CTA central),
+    // pas le login direct. Le bouton "Prendre en main mon objectif de vie"
+    // (et "Se connecter") de la landing mène ensuite à /login.
+    return <Navigate to="/bienvenue" replace />
   }
 
   return <Outlet />

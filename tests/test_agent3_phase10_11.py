@@ -5,19 +5,53 @@ Tests Phase 10+11 — Tier 4 (Quotas/Workspaces/Admin/API publique)
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from sylea.core.storage.database import DatabaseManager
+from tests.conftest import make_shared_db, dispose_shared_db
 
 
 @pytest.fixture
-def db():
-    d = DatabaseManager(db_path=Path(":memory:"))
-    d.connect()
-    return d
+def db(tmp_path, monkeypatch):
+    """DB SQLite partagee (sync + async) via fichier temp.
+    Migration shared-DB : remplace `:memory:` pour permettre a l'async
+    session_factory de pointer sur la meme DB."""
+    d = make_shared_db(tmp_path, monkeypatch)
+    # Bootstrap tables Agent 3 utilisees par les helpers async (qui ne creent
+    # pas leurs tables a la volee, contrairement aux variantes sync).
+    try:
+        from api.agent3_quotas import ensure_quota_tables
+        ensure_quota_tables(d)
+    except Exception:
+        pass
+    try:
+        import asyncio as _asyncio
+        from api.agent3_workspaces import ensure_workspace_tables_async
+        _asyncio.run(ensure_workspace_tables_async())
+    except Exception:
+        pass
+    try:
+        import asyncio as _asyncio
+        from api.agent3_admin import ensure_admin_columns_async
+        _asyncio.run(ensure_admin_columns_async())
+    except Exception:
+        pass
+    try:
+        from api.agent3_api_keys import ensure_api_keys_table
+        ensure_api_keys_table(d)
+    except Exception:
+        pass
+    try:
+        from api.agent3_webhooks import ensure_webhook_tables
+        ensure_webhook_tables(d)
+    except Exception:
+        pass
+    yield d
+    dispose_shared_db(d)
 
 
 def _seed_user(db, user_id: str, email: str) -> None:
@@ -37,73 +71,74 @@ def _seed_user(db, user_id: str, email: str) -> None:
 
 class TestPlans:
     def test_default_plan_is_free(self, db):
-        from api.agent3_quotas import get_user_plan
-        plan = get_user_plan(db, "u_new")
+        from api.agent3_quotas import get_user_plan_async
+        plan = asyncio.run(get_user_plan_async("u_new"))
         assert plan["name"] == "free"
         assert plan["limits"]["tokens_per_month"] == 100_000
 
-    def test_set_plan_pro(self, db):
-        from api.agent3_quotas import set_user_plan, get_user_plan
-        r = set_user_plan(db, "u_pro", "pro")
+    def test_set_plan_advanced(self, db):
+        from api.agent3_quotas import set_user_plan_async, get_user_plan_async
+        # NB (audit 2026-06) : plan "pro" renomme en "advanced".
+        r = asyncio.run(set_user_plan_async("u_pro", "advanced"))
         assert r["ok"] is True
-        plan = get_user_plan(db, "u_pro")
-        assert plan["name"] == "pro"
+        plan = asyncio.run(get_user_plan_async("u_pro"))
+        assert plan["name"] == "advanced"
         assert plan["limits"]["tokens_per_month"] == 1_000_000
 
     def test_set_unknown_plan_rejected(self, db):
-        from api.agent3_quotas import set_user_plan
-        r = set_user_plan(db, "u", "premium")
+        from api.agent3_quotas import set_user_plan_async
+        r = asyncio.run(set_user_plan_async("u", "premium"))
         assert r["ok"] is False
 
     def test_custom_limits_override(self, db):
-        from api.agent3_quotas import set_user_plan, get_user_plan
-        set_user_plan(db, "u", "free", custom_limits={"tokens_per_month": 500_000})
-        plan = get_user_plan(db, "u")
+        from api.agent3_quotas import set_user_plan_async, get_user_plan_async
+        asyncio.run(set_user_plan_async("u", "free", custom_limits={"tokens_per_month": 500_000}))
+        plan = asyncio.run(get_user_plan_async("u"))
         assert plan["limits"]["tokens_per_month"] == 500_000
 
 
 class TestQuotas:
     def test_record_and_get_usage(self, db):
-        from api.agent3_quotas import record_usage, get_usage
-        record_usage(db, "u1", "tokens", 5000)
-        record_usage(db, "u1", "tokens", 3000)
-        usage = get_usage(db, "u1")
+        from api.agent3_quotas import record_usage_async, get_usage_async
+        asyncio.run(record_usage_async("u1", "tokens", 5000))
+        asyncio.run(record_usage_async("u1", "tokens", 3000))
+        usage = asyncio.run(get_usage_async("u1"))
         assert usage["tokens"] == 8000
 
     def test_check_quota_under_limit(self, db):
-        from api.agent3_quotas import check_quota, record_usage
-        record_usage(db, "u1", "tokens", 50_000)
-        ok, _, rem = check_quota(db, "u1", "tokens", 1000)
+        from api.agent3_quotas import check_quota_async, record_usage_async
+        asyncio.run(record_usage_async("u1", "tokens", 50_000))
+        ok, _, rem = asyncio.run(check_quota_async("u1", "tokens", 1000))
         assert ok is True
         assert rem > 0
 
     def test_check_quota_over_limit(self, db):
-        from api.agent3_quotas import check_quota, record_usage
+        from api.agent3_quotas import check_quota_async, record_usage_async
         # Free = 100k tokens
-        record_usage(db, "u1", "tokens", 99_000)
-        ok, reason, rem = check_quota(db, "u1", "tokens", 5000)
+        asyncio.run(record_usage_async("u1", "tokens", 99_000))
+        ok, reason, rem = asyncio.run(check_quota_async("u1", "tokens", 5000))
         assert ok is False
         assert "depasse" in reason.lower() or "quota" in reason.lower()
 
     def test_unlimited_team_plan(self, db):
-        from api.agent3_quotas import set_user_plan, check_quota, record_usage
-        set_user_plan(db, "u_team", "team")
+        from api.agent3_quotas import set_user_plan_async, check_quota_async, record_usage_async
+        asyncio.run(set_user_plan_async("u_team", "team"))
         # Team : skills_installed -1 = unlimited
-        ok, reason, _ = check_quota(db, "u_team", "skills_installed", 999_999)
+        ok, reason, _ = asyncio.run(check_quota_async("u_team", "skills_installed", 999_999))
         assert ok is True
 
     def test_isolation_per_user(self, db):
-        from api.agent3_quotas import record_usage, get_usage
-        record_usage(db, "alice", "tokens", 10_000)
-        record_usage(db, "bob", "tokens", 20_000)
-        assert get_usage(db, "alice")["tokens"] == 10_000
-        assert get_usage(db, "bob")["tokens"] == 20_000
+        from api.agent3_quotas import record_usage_async, get_usage_async
+        asyncio.run(record_usage_async("alice", "tokens", 10_000))
+        asyncio.run(record_usage_async("bob", "tokens", 20_000))
+        assert asyncio.run(get_usage_async("alice"))["tokens"] == 10_000
+        assert asyncio.run(get_usage_async("bob"))["tokens"] == 20_000
 
     def test_reset_usage(self, db):
-        from api.agent3_quotas import record_usage, reset_usage, get_usage
-        record_usage(db, "u", "tokens", 5000)
-        reset_usage(db, "u")
-        assert get_usage(db, "u")["tokens"] == 0
+        from api.agent3_quotas import record_usage_async, reset_usage_async, get_usage_async
+        asyncio.run(record_usage_async("u", "tokens", 5000))
+        asyncio.run(reset_usage_async("u"))
+        assert asyncio.run(get_usage_async("u"))["tokens"] == 0
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -112,58 +147,58 @@ class TestQuotas:
 
 class TestWorkspaces:
     def test_create_workspace_and_owner_role(self, db):
-        from api.agent3_workspaces import create_workspace, get_user_role
-        r = create_workspace(db, "alice", "My Team")
+        from api.agent3_workspaces import create_workspace_async, get_user_role_async
+        r = asyncio.run(create_workspace_async("alice", "My Team"))
         assert r["ok"] is True
-        assert get_user_role(db, r["workspace_id"], "alice") == "owner"
+        assert asyncio.run(get_user_role_async(r["workspace_id"], "alice")) == "owner"
 
     def test_add_member_by_owner(self, db):
-        from api.agent3_workspaces import create_workspace, add_member, list_members
-        r = create_workspace(db, "alice", "T1")
+        from api.agent3_workspaces import create_workspace_async, add_member_async, list_members_async
+        r = asyncio.run(create_workspace_async("alice", "T1"))
         wid = r["workspace_id"]
-        m = add_member(db, wid, "bob", "member", requester_id="alice")
+        m = asyncio.run(add_member_async(wid, "bob", "member", requester_id="alice"))
         assert m["ok"] is True
-        members = list_members(db, wid)
+        members = asyncio.run(list_members_async(wid))
         assert len(members) == 2
 
     def test_add_member_non_admin_forbidden(self, db):
-        from api.agent3_workspaces import create_workspace, add_member
-        r = create_workspace(db, "alice", "T")
-        add_member(db, r["workspace_id"], "bob", "member", requester_id="alice")
+        from api.agent3_workspaces import create_workspace_async, add_member_async
+        r = asyncio.run(create_workspace_async("alice", "T"))
+        asyncio.run(add_member_async(r["workspace_id"], "bob", "member", requester_id="alice"))
         # Bob (member) essaie d'inviter Charlie
-        m = add_member(db, r["workspace_id"], "charlie", "member", requester_id="bob")
+        m = asyncio.run(add_member_async(r["workspace_id"], "charlie", "member", requester_id="bob"))
         assert m["ok"] is False
 
     def test_remove_owner_forbidden(self, db):
-        from api.agent3_workspaces import create_workspace, remove_member
-        r = create_workspace(db, "alice", "T")
-        m = remove_member(db, r["workspace_id"], "alice", requester_id="alice")
+        from api.agent3_workspaces import create_workspace_async, remove_member_async
+        r = asyncio.run(create_workspace_async("alice", "T"))
+        m = asyncio.run(remove_member_async(r["workspace_id"], "alice", requester_id="alice"))
         assert m["ok"] is False
 
     def test_list_user_workspaces(self, db):
-        from api.agent3_workspaces import create_workspace, list_user_workspaces
-        create_workspace(db, "u", "A")
-        create_workspace(db, "u", "B")
-        ws = list_user_workspaces(db, "u")
+        from api.agent3_workspaces import create_workspace_async, list_user_workspaces_async
+        asyncio.run(create_workspace_async("u", "A"))
+        asyncio.run(create_workspace_async("u", "B"))
+        ws = asyncio.run(list_user_workspaces_async("u"))
         assert len(ws) == 2
 
     def test_share_memory_requires_member(self, db):
-        from api.agent3_workspaces import create_workspace, share_memory
-        r = create_workspace(db, "alice", "T")
+        from api.agent3_workspaces import create_workspace_async, share_memory_async
+        r = asyncio.run(create_workspace_async("alice", "T"))
         # Alice membre (owner) OK
-        ok = share_memory(db, r["workspace_id"], "alice", key="k", value="v")
+        ok = asyncio.run(share_memory_async(r["workspace_id"], "alice", key="k", value="v"))
         assert ok["ok"] is True
         # Bob pas membre → forbidden
-        ko = share_memory(db, r["workspace_id"], "bob", key="k2", value="v2")
+        ko = asyncio.run(share_memory_async(r["workspace_id"], "bob", key="k2", value="v2"))
         assert ko["ok"] is False
 
     def test_delete_workspace_by_owner(self, db):
-        from api.agent3_workspaces import create_workspace, delete_workspace, get_workspace
-        r = create_workspace(db, "alice", "T")
+        from api.agent3_workspaces import create_workspace_async, delete_workspace_async, get_workspace_async
+        r = asyncio.run(create_workspace_async("alice", "T"))
         wid = r["workspace_id"]
-        d = delete_workspace(db, wid, "alice")
+        d = asyncio.run(delete_workspace_async(wid, "alice"))
         assert d["ok"] is True
-        assert get_workspace(db, wid) is None
+        assert asyncio.run(get_workspace_async(wid)) is None
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -172,28 +207,28 @@ class TestWorkspaces:
 
 class TestAdmin:
     def test_is_admin_false_by_default(self, db):
-        from api.agent3_admin import is_admin
+        from api.agent3_admin import is_admin_async
         _seed_user(db, "u_normal", "u@x.com")
-        assert is_admin(db, "u_normal") is False
+        assert asyncio.run(is_admin_async("u_normal")) is False
 
     def test_promote_and_demote(self, db):
-        from api.agent3_admin import is_admin, promote_user_to_admin, demote_user
+        from api.agent3_admin import is_admin_async, promote_user_to_admin_async, demote_user_async
         _seed_user(db, "u_admin", "a@x.com")
-        promote_user_to_admin(db, "u_admin")
-        assert is_admin(db, "u_admin") is True
-        demote_user(db, "u_admin")
-        assert is_admin(db, "u_admin") is False
+        asyncio.run(promote_user_to_admin_async("u_admin"))
+        assert asyncio.run(is_admin_async("u_admin")) is True
+        asyncio.run(demote_user_async("u_admin"))
+        assert asyncio.run(is_admin_async("u_admin")) is False
 
     def test_env_whitelist_auto_promote(self, db, monkeypatch):
-        from api.agent3_admin import is_admin
+        from api.agent3_admin import is_admin_async
         _seed_user(db, "u_env", "envadmin@sylea.ai")
         monkeypatch.setenv("SYLEA_ADMIN_EMAILS", "envadmin@sylea.ai")
-        assert is_admin(db, "u_env") is True
+        assert asyncio.run(is_admin_async("u_env")) is True
 
     def test_disable_user(self, db):
-        from api.agent3_admin import disable_user, ensure_admin_columns
+        from api.agent3_admin import disable_user_async, ensure_admin_columns_async
         _seed_user(db, "u_dis", "dis@x.com")
-        r = disable_user(db, "u_dis")
+        r = asyncio.run(disable_user_async("u_dis"))
         assert r["ok"] is True
         row = db.conn.execute(
             "SELECT disabled_at FROM users WHERE id = ?", ("u_dis",),
@@ -201,10 +236,10 @@ class TestAdmin:
         assert row[0] is not None
 
     def test_global_stats(self, db):
-        from api.agent3_admin import get_global_stats
+        from api.agent3_admin import get_global_stats_async
         _seed_user(db, "u_a", "a@x.com")
         _seed_user(db, "u_b", "b@x.com")
-        stats = get_global_stats(db)
+        stats = asyncio.run(get_global_stats_async())
         assert stats["users_total"] >= 2
         assert "plans_distribution" in stats
 
@@ -215,40 +250,40 @@ class TestAdmin:
 
 class TestAPIKeys:
     def test_create_returns_plaintext_once(self, db):
-        from api.agent3_api_keys import create_api_key
-        r = create_api_key(db, "u", "My App")
+        from api.agent3_api_keys import create_api_key_async
+        r = asyncio.run(create_api_key_async("u", "My App"))
         assert r["ok"] is True
         assert r["token"].startswith("sk-sylea-")
         assert "warning" in r
 
     def test_validate_valid_token(self, db):
-        from api.agent3_api_keys import create_api_key, validate_api_key
-        r = create_api_key(db, "u", "k1")
-        res = validate_api_key(db, r["token"])
+        from api.agent3_api_keys import create_api_key_async, validate_api_key_async
+        r = asyncio.run(create_api_key_async("u", "k1"))
+        res = asyncio.run(validate_api_key_async(r["token"]))
         assert res is not None
         assert res["user_id"] == "u"
 
     def test_validate_invalid_token(self, db):
-        from api.agent3_api_keys import validate_api_key
-        assert validate_api_key(db, "sk-sylea-invalid") is None
-        assert validate_api_key(db, "not-a-key") is None
+        from api.agent3_api_keys import validate_api_key_async
+        assert asyncio.run(validate_api_key_async("sk-sylea-invalid")) is None
+        assert asyncio.run(validate_api_key_async("not-a-key")) is None
 
     def test_revoke_disables_token(self, db):
-        from api.agent3_api_keys import create_api_key, revoke_api_key, validate_api_key
-        r = create_api_key(db, "u", "k")
-        revoke_api_key(db, r["key_id"], "u")
-        assert validate_api_key(db, r["token"]) is None
+        from api.agent3_api_keys import create_api_key_async, revoke_api_key_async, validate_api_key_async
+        r = asyncio.run(create_api_key_async("u", "k"))
+        asyncio.run(revoke_api_key_async(r["key_id"], "u"))
+        assert asyncio.run(validate_api_key_async(r["token"])) is None
 
     def test_revoke_wrong_owner_forbidden(self, db):
-        from api.agent3_api_keys import create_api_key, revoke_api_key
-        r = create_api_key(db, "alice", "k")
-        res = revoke_api_key(db, r["key_id"], "bob")
+        from api.agent3_api_keys import create_api_key_async, revoke_api_key_async
+        r = asyncio.run(create_api_key_async("alice", "k"))
+        res = asyncio.run(revoke_api_key_async(r["key_id"], "bob"))
         assert res["ok"] is False
 
     def test_list_keys_no_plaintext(self, db):
-        from api.agent3_api_keys import create_api_key, list_api_keys
-        create_api_key(db, "u", "k1")
-        keys = list_api_keys(db, "u")
+        from api.agent3_api_keys import create_api_key_async, list_api_keys_async
+        asyncio.run(create_api_key_async("u", "k1"))
+        keys = asyncio.run(list_api_keys_async("u"))
         assert len(keys) == 1
         assert "prefix" in keys[0]
         assert "token" not in keys[0]  # jamais reexpose
@@ -256,37 +291,37 @@ class TestAPIKeys:
 
 class TestWebhooks:
     def test_create_subscription_https_required(self, db):
-        from api.agent3_webhooks import create_subscription
+        from api.agent3_webhooks import create_subscription_async
         # http:// public refuse
-        r = create_subscription(db, "u", "http://evil.example.com/hook", ["message.completed"])
+        r = asyncio.run(create_subscription_async("u", "http://evil.example.com/hook", ["message.completed"]))
         assert r["ok"] is False
 
     def test_create_subscription_valid(self, db):
-        from api.agent3_webhooks import create_subscription
-        r = create_subscription(
-            db, "u", "https://api.example.com/webhook", ["message.completed"],
-        )
+        from api.agent3_webhooks import create_subscription_async
+        r = asyncio.run(create_subscription_async(
+            "u", "https://api.example.com/webhook", ["message.completed"],
+        ))
         assert r["ok"] is True
         assert "secret" in r
 
     def test_invalid_event_rejected(self, db):
-        from api.agent3_webhooks import create_subscription
-        r = create_subscription(
-            db, "u", "https://api.example.com/h", ["unknown.event"],
-        )
+        from api.agent3_webhooks import create_subscription_async
+        r = asyncio.run(create_subscription_async(
+            "u", "https://api.example.com/h", ["unknown.event"],
+        ))
         assert r["ok"] is False
 
     def test_list_and_delete(self, db):
         from api.agent3_webhooks import (
-            create_subscription, list_subscriptions, delete_subscription,
+            create_subscription_async, list_subscriptions_async, delete_subscription_async,
         )
-        r = create_subscription(
-            db, "u", "https://api.example.com/h", ["*"],
-        )
-        subs = list_subscriptions(db, "u")
+        r = asyncio.run(create_subscription_async(
+            "u", "https://api.example.com/h", ["*"],
+        ))
+        subs = asyncio.run(list_subscriptions_async("u"))
         assert len(subs) == 1
-        delete_subscription(db, r["subscription_id"], "u")
-        assert list_subscriptions(db, "u") == []
+        asyncio.run(delete_subscription_async(r["subscription_id"], "u"))
+        assert asyncio.run(list_subscriptions_async("u")) == []
 
     @pytest.mark.asyncio
     async def test_fire_event_no_subs_returns_zero(self, db):
@@ -372,65 +407,12 @@ class TestSelfReflection:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Phase 11B — Long-term planner
+# Phase 11B — Long-term planner (SUPPRIME)
+# Le module api/agent3_longterm a ete retire dans une session precedente
+# (l'utilisateur a juge la fonctionnalite redondante avec memory + sous-objectifs
+# auto-generes a l'onboarding). Les 8 tests de TestLongTerm ont ete supprimes
+# en consequence.
 # ═════════════════════════════════════════════════════════════════════════════
-
-class TestLongTerm:
-    def test_create_and_get_plan(self, db):
-        from api.agent3_longterm import create_plan, get_plan
-        r = create_plan(db, "u", title="Livre IA", goal="Ecrire un livre de 10 chapitres")
-        assert r["ok"] is True
-        p = get_plan(db, r["plan_id"])
-        assert p["title"] == "Livre IA"
-        assert p["status"] == "active"
-        assert p["progress_pct"] == 0
-
-    def test_list_user_plans_with_filter(self, db):
-        from api.agent3_longterm import create_plan, update_plan, list_user_plans
-        r = create_plan(db, "u", title="A", goal="aa")
-        create_plan(db, "u", title="B", goal="bb")
-        update_plan(db, r["plan_id"], "u", status="completed")
-        active = list_user_plans(db, "u", status="active")
-        assert len(active) == 1
-        assert active[0]["title"] == "B"
-
-    def test_record_check_in_updates_progress(self, db):
-        from api.agent3_longterm import create_plan, record_check_in, get_plan
-        r = create_plan(db, "u", title="P", goal="g")
-        record_check_in(db, r["plan_id"], progress_delta=30, summary="Phase 1 done")
-        p = get_plan(db, r["plan_id"])
-        assert p["progress_pct"] == 30
-        assert len(p["check_ins"]) == 1
-
-    def test_check_in_100pct_completes(self, db):
-        from api.agent3_longterm import create_plan, record_check_in, get_plan
-        r = create_plan(db, "u", title="P", goal="g")
-        record_check_in(db, r["plan_id"], progress_delta=100)
-        p = get_plan(db, r["plan_id"])
-        assert p["status"] == "completed"
-
-    def test_update_plan_ownership(self, db):
-        from api.agent3_longterm import create_plan, update_plan
-        r = create_plan(db, "alice", title="P", goal="g")
-        res = update_plan(db, r["plan_id"], "bob", title="Hacked")
-        assert res["ok"] is False
-
-    def test_format_plans_for_prompt(self, db):
-        from api.agent3_longterm import create_plan, format_plans_for_prompt
-        create_plan(db, "u", title="Mon Livre", goal="Ecrire 10 chapitres")
-        ctx = format_plans_for_prompt(db, "u")
-        assert "OBJECTIFS LONG-TERME" in ctx
-        assert "Mon Livre" in ctx
-
-    def test_format_empty_when_no_plans(self, db):
-        from api.agent3_longterm import format_plans_for_prompt
-        assert format_plans_for_prompt(db, "u_nothing") == ""
-
-    def test_delete_plan(self, db):
-        from api.agent3_longterm import create_plan, delete_plan, get_plan
-        r = create_plan(db, "u", title="P", goal="g")
-        delete_plan(db, r["plan_id"], "u")
-        assert get_plan(db, r["plan_id"]) is None
 
 
 # ═════════════════════════════════════════════════════════════════════════════

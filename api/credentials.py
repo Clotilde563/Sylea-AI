@@ -165,35 +165,43 @@ def mask_credential_value(value: str) -> str:
 # Audit log
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _log_access(
-    db: Any, user_id: str, provider: str, field: str, action: str, context: str = "",
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Toutes les fonctions ont une signature compatible : `db` reste accepte
+# pour compat de signature mais n'est plus utilise — on passe par
+# get_session_factory(). Le param `db` peut etre supprime apres migration.
+
+async def _log_access_async(
+    user_id: str, provider: str, field: str, action: str, context: str = "",
 ) -> None:
+    """Version async de _log_access — best-effort."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
     try:
-        db.conn.execute(
-            "INSERT INTO credential_access_log "
-            "(id, auth_user_id, provider_slug, field_key, action, context, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                str(uuid.uuid4()),
-                user_id or "",
-                provider,
-                field,
-                action,
-                (context or "")[:500],
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        db.conn.commit()
+        factory = get_session_factory()
+        async with factory() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO credential_access_log "
+                    "(id, auth_user_id, provider_slug, field_key, action, context, created_at) "
+                    "VALUES (:id, :uid, :prov, :field, :act, :ctx, :now)"
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "uid": user_id or "",
+                    "prov": provider, "field": field, "act": action,
+                    "ctx": (context or "")[:500],
+                    "now": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            await session.commit()
     except Exception as e:
-        logger.debug(f"credential access log failed: {e}")
+        logger.debug(f"credential access log async failed: {e}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# API publique
-# ─────────────────────────────────────────────────────────────────────────────
-
-def save_credential(
-    db: Any,
+async def save_credential_async(
     user_id: str,
     provider_slug: str,
     field_key: str,
@@ -203,7 +211,7 @@ def save_credential(
     expires_at: str | None = None,
     test_ok: bool | None = None,
 ) -> str:
-    """Chiffre et stocke (ou met a jour) une credential. Retourne l'id."""
+    """Version async — PG-compatible. Upsert portable."""
     if not user_id:
         raise ValueError("user_id required")
     if not provider_slug or not field_key:
@@ -211,205 +219,275 @@ def save_credential(
     if not isinstance(value, str) or not value:
         raise ValueError("value must be a non-empty string")
 
-    ensure_credentials_tables(db)
+    from sqlalchemy import text
+    from api.database import get_session_factory
     now = datetime.now(timezone.utc).isoformat()
     preview = mask_credential_value(value)
     encrypted = _fernet().encrypt(value.encode("utf-8"))
     meta_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
+    test_ok_int = 1 if test_ok else (0 if test_ok is False else None)
+    test_at = now if test_ok is not None else None
 
-    # UPSERT manuel (SQLite ne supporte pas nativement INSERT OR UPDATE avec tous les champs)
-    existing = db.conn.execute(
-        "SELECT id FROM user_credentials "
-        "WHERE auth_user_id = ? AND provider_slug = ? AND field_key = ?",
-        (user_id, provider_slug, field_key),
-    ).fetchone()
-
-    if existing:
-        cid = existing[0]
-        db.conn.execute(
-            "UPDATE user_credentials SET "
-            "encrypted_value = ?, metadata_json = ?, preview = ?, "
-            "updated_at = ?, expires_at = ?, "
-            "last_tested_at = ?, last_test_ok = ? "
-            "WHERE id = ?",
-            (
-                encrypted, meta_json, preview, now, expires_at,
-                now if test_ok is not None else None,
-                1 if test_ok else (0 if test_ok is False else None),
-                cid,
-            ),
-        )
-        _log_access(db, user_id, provider_slug, field_key, "update")
-    else:
-        cid = str(uuid.uuid4())
-        db.conn.execute(
-            "INSERT INTO user_credentials "
-            "(id, auth_user_id, provider_slug, field_key, encrypted_value, "
-            " metadata_json, preview, created_at, updated_at, "
-            " last_tested_at, last_test_ok, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                cid, user_id, provider_slug, field_key, encrypted,
-                meta_json, preview, now, now,
-                now if test_ok is not None else None,
-                1 if test_ok else (0 if test_ok is False else None),
-                expires_at,
-            ),
-        )
-        _log_access(db, user_id, provider_slug, field_key, "create")
-
-    db.conn.commit()
+    factory = get_session_factory()
+    cid: str
+    action = "create"
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT id FROM user_credentials "
+                    "WHERE auth_user_id = :uid AND provider_slug = :prov "
+                    "AND field_key = :field"
+                ),
+                {"uid": user_id, "prov": provider_slug, "field": field_key},
+            )
+            existing = result.first()
+            if existing:
+                cid = existing[0]
+                action = "update"
+                await session.execute(
+                    text(
+                        "UPDATE user_credentials SET "
+                        "encrypted_value = :enc, metadata_json = :meta, "
+                        "preview = :preview, updated_at = :now, "
+                        "expires_at = :exp, last_tested_at = :test_at, "
+                        "last_test_ok = :test_ok WHERE id = :cid"
+                    ),
+                    {
+                        "enc": encrypted, "meta": meta_json,
+                        "preview": preview, "now": now,
+                        "exp": expires_at, "test_at": test_at,
+                        "test_ok": test_ok_int, "cid": cid,
+                    },
+                )
+            else:
+                cid = str(uuid.uuid4())
+                await session.execute(
+                    text(
+                        "INSERT INTO user_credentials "
+                        "(id, auth_user_id, provider_slug, field_key, encrypted_value, "
+                        "metadata_json, preview, created_at, updated_at, "
+                        "last_tested_at, last_test_ok, expires_at) "
+                        "VALUES (:id, :uid, :prov, :field, :enc, :meta, :preview, "
+                        ":now, :now, :test_at, :test_ok, :exp)"
+                    ),
+                    {
+                        "id": cid, "uid": user_id, "prov": provider_slug,
+                        "field": field_key, "enc": encrypted,
+                        "meta": meta_json, "preview": preview, "now": now,
+                        "test_at": test_at, "test_ok": test_ok_int,
+                        "exp": expires_at,
+                    },
+                )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+    await _log_access_async(user_id, provider_slug, field_key, action)
     return cid
 
 
-def get_credential(
-    db: Any, user_id: str, provider_slug: str, field_key: str,
+async def get_credential_async(
+    user_id: str, provider_slug: str, field_key: str,
     *, context: str = "",
 ) -> str | None:
-    """Dechiffre et retourne la valeur (ou None si absente). Incrementes last_used_at."""
+    """Version async — PG-compatible."""
     if not user_id:
         return None
-    ensure_credentials_tables(db)
-    row = db.conn.execute(
-        "SELECT id, encrypted_value FROM user_credentials "
-        "WHERE auth_user_id = ? AND provider_slug = ? AND field_key = ?",
-        (user_id, provider_slug, field_key),
-    ).fetchone()
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT id, encrypted_value FROM user_credentials "
+                "WHERE auth_user_id = :uid AND provider_slug = :prov "
+                "AND field_key = :field"
+            ),
+            {"uid": user_id, "prov": provider_slug, "field": field_key},
+        )
+        row = result.first()
     if not row:
         return None
     cid, encrypted = row[0], row[1]
     try:
-        value = _fernet().decrypt(encrypted).decode("utf-8")
+        # Si encrypted vient de PG (memoryview/bytes), .decrypt l'accepte
+        value = _fernet().decrypt(bytes(encrypted)).decode("utf-8")
     except InvalidToken:
-        logger.error(f"Invalid Fernet token for credential {cid} (master key rotated?)")
+        logger.error(f"Invalid Fernet token for credential {cid}")
         return None
 
-    # Update last_used_at
     now = datetime.now(timezone.utc).isoformat()
     try:
-        db.conn.execute(
-            "UPDATE user_credentials SET last_used_at = ? WHERE id = ?",
-            (now, cid),
-        )
-        db.conn.commit()
+        async with factory() as session:
+            try:
+                await session.execute(
+                    text("UPDATE user_credentials SET last_used_at = :now WHERE id = :cid"),
+                    {"now": now, "cid": cid},
+                )
+                await session.commit()
+            except Exception:
+                await session.rollback()
     except Exception:
         pass
 
-    _log_access(db, user_id, provider_slug, field_key, "read", context=context)
+    await _log_access_async(user_id, provider_slug, field_key, "read", context=context)
     return value
 
 
-def list_credentials(db: Any, user_id: str) -> list[dict]:
-    """Liste des credentials du user avec valeurs MASQUEES (jamais les vraies valeurs)."""
+async def list_credentials_async(user_id: str) -> list[dict]:
+    """Version async — PG-compatible. Valeurs MASQUEES."""
     if not user_id:
         return []
-    ensure_credentials_tables(db)
-    rows = db.conn.execute(
-        "SELECT provider_slug, field_key, preview, metadata_json, "
-        "created_at, updated_at, last_used_at, last_tested_at, last_test_ok, expires_at "
-        "FROM user_credentials WHERE auth_user_id = ? "
-        "ORDER BY provider_slug, field_key",
-        (user_id,),
-    ).fetchall()
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT provider_slug, field_key, preview, metadata_json, "
+                "created_at, updated_at, last_used_at, last_tested_at, "
+                "last_test_ok, expires_at FROM user_credentials "
+                "WHERE auth_user_id = :uid "
+                "ORDER BY provider_slug, field_key"
+            ),
+            {"uid": user_id},
+        )
+        rows = result.mappings().all()
     out = []
     for r in rows:
         meta = None
-        if r[3]:
+        if r["metadata_json"]:
             try:
-                meta = json.loads(r[3])
+                meta = json.loads(r["metadata_json"])
             except Exception:
                 meta = None
         out.append({
-            "provider_slug": r[0],
-            "field_key": r[1],
-            "preview": r[2] or "",
+            "provider_slug": r["provider_slug"],
+            "field_key": r["field_key"],
+            "preview": r["preview"] or "",
             "metadata": meta,
-            "created_at": r[4],
-            "updated_at": r[5],
-            "last_used_at": r[6],
-            "last_tested_at": r[7],
-            "last_test_ok": bool(r[8]) if r[8] is not None else None,
-            "expires_at": r[9],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+            "last_used_at": r["last_used_at"],
+            "last_tested_at": r["last_tested_at"],
+            "last_test_ok": (
+                bool(r["last_test_ok"]) if r["last_test_ok"] is not None else None
+            ),
+            "expires_at": r["expires_at"],
         })
     return out
 
 
-def delete_credential(
-    db: Any, user_id: str, provider_slug: str, field_key: str,
+async def delete_credential_async(
+    user_id: str, provider_slug: str, field_key: str,
 ) -> bool:
-    """Supprime une credential. Retourne True si quelque chose a ete supprime."""
+    """Version async — PG-compatible."""
     if not user_id:
         return False
-    ensure_credentials_tables(db)
-    cursor = db.conn.execute(
-        "DELETE FROM user_credentials "
-        "WHERE auth_user_id = ? AND provider_slug = ? AND field_key = ?",
-        (user_id, provider_slug, field_key),
-    )
-    db.conn.commit()
-    if cursor.rowcount > 0:
-        _log_access(db, user_id, provider_slug, field_key, "delete")
-        return True
-    return False
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "DELETE FROM user_credentials "
+                    "WHERE auth_user_id = :uid AND provider_slug = :prov "
+                    "AND field_key = :field"
+                ),
+                {"uid": user_id, "prov": provider_slug, "field": field_key},
+            )
+            deleted = (result.rowcount or 0) > 0
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            return False
+    if deleted:
+        await _log_access_async(user_id, provider_slug, field_key, "delete")
+    return deleted
 
 
-def delete_all_credentials(db: Any, user_id: str) -> int:
-    """Purge toutes les credentials d'un user (RGPD right-to-forget). Retourne le nombre supprime."""
+async def delete_all_credentials_async(user_id: str) -> int:
+    """Version async — PG-compatible (RGPD right-to-forget)."""
     if not user_id:
         return 0
-    ensure_credentials_tables(db)
-    cursor = db.conn.execute(
-        "DELETE FROM user_credentials WHERE auth_user_id = ?",
-        (user_id,),
-    )
-    db.conn.commit()
-    return cursor.rowcount or 0
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text("DELETE FROM user_credentials WHERE auth_user_id = :uid"),
+                {"uid": user_id},
+            )
+            await session.commit()
+            return result.rowcount or 0
+        except Exception:
+            await session.rollback()
+            return 0
 
 
-def has_credential(db: Any, user_id: str, provider_slug: str, field_key: str) -> bool:
-    """Check rapide sans dechiffrer."""
+async def has_credential_async(
+    user_id: str, provider_slug: str, field_key: str,
+) -> bool:
+    """Version async — PG-compatible."""
     if not user_id:
         return False
-    ensure_credentials_tables(db)
-    row = db.conn.execute(
-        "SELECT 1 FROM user_credentials "
-        "WHERE auth_user_id = ? AND provider_slug = ? AND field_key = ? LIMIT 1",
-        (user_id, provider_slug, field_key),
-    ).fetchone()
-    return row is not None
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT 1 FROM user_credentials "
+                "WHERE auth_user_id = :uid AND provider_slug = :prov "
+                "AND field_key = :field LIMIT 1"
+            ),
+            {"uid": user_id, "prov": provider_slug, "field": field_key},
+        )
+        return result.first() is not None
 
 
-def get_provider_credentials_bundle(
-    db: Any, user_id: str, provider_slug: str,
+async def get_provider_credentials_bundle_async(
+    user_id: str, provider_slug: str,
 ) -> dict[str, str]:
-    """Retourne toutes les credentials d'un provider (dict field_key -> value)."""
+    """Version async — PG-compatible."""
     if not user_id:
         return {}
-    ensure_credentials_tables(db)
-    rows = db.conn.execute(
-        "SELECT field_key, encrypted_value FROM user_credentials "
-        "WHERE auth_user_id = ? AND provider_slug = ?",
-        (user_id, provider_slug),
-    ).fetchall()
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT field_key, encrypted_value FROM user_credentials "
+                "WHERE auth_user_id = :uid AND provider_slug = :prov"
+            ),
+            {"uid": user_id, "prov": provider_slug},
+        )
+        rows = result.mappings().all()
     out: dict[str, str] = {}
     for r in rows:
         try:
-            out[r[0]] = _fernet().decrypt(r[1]).decode("utf-8")
+            out[r["field_key"]] = _fernet().decrypt(
+                bytes(r["encrypted_value"])
+            ).decode("utf-8")
         except InvalidToken:
-            logger.error(f"Invalid Fernet for {user_id}/{provider_slug}/{r[0]}")
+            logger.error(f"Invalid Fernet for {user_id}/{provider_slug}/{r['field_key']}")
     if out:
-        _log_access(db, user_id, provider_slug, "*", "bundle_read")
+        await _log_access_async(user_id, provider_slug, "*", "bundle_read")
     return out
 
 
 __all__ = [
     "ensure_credentials_tables",
     "mask_credential_value",
-    "save_credential",
-    "get_credential",
-    "list_credentials",
-    "delete_credential",
-    "delete_all_credentials",
-    "has_credential",
-    "get_provider_credentials_bundle",
+    "save_credential_async",
+    "get_credential_async",
+    "list_credentials_async",
+    "delete_credential_async",
+    "delete_all_credentials_async",
+    "has_credential_async",
+    "get_provider_credentials_bundle_async",
 ]

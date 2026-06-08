@@ -5,13 +5,19 @@ import { api } from '../api/client'
 import { useDeviceContext } from '../contexts/DeviceContext'
 import { useStore } from '../store/useStore'
 import { useToast } from '../components/Toast'
+import { openExternalSafe } from '../utils/safeOpen'
+import { sanitizeAgentHtml } from '../utils/sanitize'
 
 // Agent 2 feature flag — set to true when desktop version is ready
 const AGENT2_ENABLED = true
+// Agent 3 feature flag — masqué tant que la fonctionnalité n'est pas opérationnelle
+const AGENT3_ENABLED = false
 
 // VoiceCall is only used by Agent 2 — import kept but component only rendered when AGENT2_ENABLED is true
 import VoiceCall from '../components/VoiceCall'
 import FeedbackButton from '../components/FeedbackButton'
+import { ProposalCard } from '../components/ProposalCard'
+import { ActionLightning } from '../components/ActionLightning'
 
 // Agent 3 Plan Mode / Permissions / Cost UI (Claude-Code-inspired, ethically reimplemented)
 import {
@@ -69,6 +75,17 @@ interface AgentMessage {
   audioUrl?: string  // blob URL for user recorded audio (legacy, ephemeral)
   audioData?: string  // base64 encoded audio (persisted server-side)
   actions?: Array<{ type: string; data: Record<string, string> }>  // parsed actions from backend
+  proposal?: {
+    id: string
+    agent_label: string
+    type: string
+    description: string
+    impact_jours: number
+    resume: string
+    rationale: string
+    target_so_hint: string
+    statut: 'pending' | 'confirmed' | 'rejected'
+  } | null
 }
 
 // ── Storage keys ─────────────────────────────────────────────────────────────
@@ -110,7 +127,7 @@ function relativeTime(iso: string): string {
   return `il y a ${days} jour${days > 1 ? 's' : ''}`
 }
 
-const WELCOME_MESSAGE = "Bonjour ! Je suis votre Agent Sylea 1. Mon role est de vous accompagner au quotidien vers votre objectif. Comment allez-vous aujourd'hui ?"
+const WELCOME_MESSAGE = "Bonjour ! Je suis votre Agent Syléa 1. Mon rôle est de vous accompagner au quotidien vers votre objectif. Comment allez-vous aujourd'hui ?"
 
 // ── TTS helper ──────────────────────────────────────────────────────────────
 function speakMessage(text: string) {
@@ -145,9 +162,27 @@ function speakMessage(text: string) {
   synth.speak(utterance)
 }
 
+// ── Strip des blocs [[PROPOSITION]] dans le texte affiché ──────────────────
+// L'agent peut emettre des blocs [[PROPOSITION]]{json}[[/PROPOSITION]] qui
+// sont parses cote backend pour creer une ProposalCard. Le bloc lui-meme
+// ne doit JAMAIS s'afficher comme du texte. Si une ancienne reponse en DB
+// contient encore un bloc (parser backend a echoue, troncature, etc.), on
+// le strippe ici pour avoir un affichage propre.
+function stripProposalBlocks(text: string): string {
+  if (!text) return text
+  // Cas 1 : bloc complet [[PROPOSITION]]...[[/PROPOSITION]]
+  let cleaned = text.replace(/\[\[PROPOSITION\]\][\s\S]*?\[\[\/PROPOSITION\]\]/g, '')
+  // Cas 2 : bloc tronque [[PROPOSITION]]... jusqu'a la fin du texte
+  cleaned = cleaned.replace(/\[\[PROPOSITION\]\][\s\S]*$/g, '')
+  return cleaned.trim()
+}
+
 // ── Markdown-light renderer ─────────────────────────────────────────────────
 // Converts markdown-ish text (links, bold, tables, headers, lists, hr) to React elements
 function renderFormattedText(text: string) {
+  if (!text) return null
+  // Nettoie d'eventuels blocs [[PROPOSITION]] residuels avant rendu
+  text = stripProposalBlocks(text)
   if (!text) return null
   const lines = text.split('\n')
   const elements: React.ReactNode[] = []
@@ -314,7 +349,7 @@ function formatInline(text: string): React.ReactNode {
               border: '1px solid rgba(255,255,255,0.1)',
               cursor: 'zoom-in',
             }}
-            onClick={() => window.open(imgUrl, '_blank')}
+            onClick={() => openExternalSafe(imgUrl)}
           />
           {altText && altText !== 'image' && (
             <div style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.5)', marginTop: '0.3rem', fontStyle: 'italic' }}>
@@ -684,6 +719,15 @@ export default function AgentsPage() {
   const { toast } = useToast()
   const { ctx: deviceCtx } = useDeviceContext()
   const API = import.meta.env.VITE_API_URL || ''
+  // Plan utilisateur (free / pro / team) — utilise pour gater Agent 2 (Avance+)
+  // et Agent 3 (Team+). Chargee au montage. null = pas encore charge.
+  const [userPlan, setUserPlan] = useState<string | null>(null)
+  useEffect(() => {
+    api.getPlan()
+      .then(d => setUserPlan(d.plan.name))
+      .catch(() => setUserPlan('free'))  // Defaut safe : assume free
+  }, [])
+  const isFreePlan = userPlan === 'free'
   const [active, setActive] = useState(loadActive)
   const [showActivateModal, setShowActivateModal] = useState(false)
   const [showDeactivateModal, setShowDeactivateModal] = useState(false)
@@ -867,12 +911,19 @@ export default function AgentsPage() {
         timestamp: new Date().toISOString(),
         type: agentResponseType,
         audioData: res.audioData || undefined,
+        proposal: (res.proposal && (res.proposal as any).id)
+          ? { ...(res.proposal as any), statut: 'pending' }
+          : null,
       }
       setMessages(prev => [...prev, agentMsg])
-    } catch {
+    } catch (err: unknown) {
+      // Log l'erreur réelle dans la console pour debug
+      console.error('[Agent 1] Erreur chat:', err)
+      const errMessage = err instanceof Error ? err.message : 'Erreur inconnue'
       const errMsg: AgentMessage = {
         role: 'agent',
-        content: "Desole, une erreur est survenue. Reessayez dans un instant.",
+        // Affiche le détail de l'erreur pour aider à diagnostiquer
+        content: `Désolé, une erreur est survenue : ${errMessage}. Réessayez dans un instant.`,
         timestamp: new Date().toISOString(),
         type: 'text',
       }
@@ -1259,7 +1310,7 @@ export default function AgentsPage() {
           const reminderTime = new Date(`${r.date}T${r.time}`)
           if (Math.abs(now.getTime() - reminderTime.getTime()) < 60000 && !r.completed) {
             if ('Notification' in window && Notification.permission === 'granted') {
-              new Notification('Agent Sylea 2 - Rappel', { body: r.message })
+              new Notification('Agent Syléa 2 — Rappel', { body: r.message })
             }
             api.agent2CompleteReminder(r.id)
           }
@@ -1293,7 +1344,7 @@ export default function AgentsPage() {
     setChat2Open(false)
   }
 
-  const WELCOME_MESSAGE_2 = "Salut ! Je suis ton Agent Sylea 2. Je peux envoyer des mails, rediger des textes, creer des rappels et bien plus. Qu'est-ce que je peux faire pour toi ?"
+  const WELCOME_MESSAGE_2 = "Salut ! Je suis ton Agent Syléa 2. Je peux envoyer des mails, rédiger des textes, créer des rappels et bien plus. Qu'est-ce que je peux faire pour toi ?"
 
   const openChat2 = useCallback(async () => {
     setChat2Open(true)
@@ -1353,6 +1404,10 @@ export default function AgentsPage() {
     text = text.replace(/<\/?(?:function_calls|invoke|antml:\w+)[^>]*>/g, '')
     // Strip remaining code blocks with JSON
     text = text.replace(/```(?:json)?\s*\{[\s\S]*?\}\s*```/g, '')
+    // Strip les blocs [[PROPOSITION]]...[[/PROPOSITION]] (et leur variante
+    // tronquee sans fermeture due a max_tokens) — ils sont parses cote
+    // backend pour generer la ProposalCard, jamais affiches en texte brut.
+    text = stripProposalBlocks(text)
     return { text: text.trim(), actions }
   }
 
@@ -1362,7 +1417,7 @@ export default function AgentsPage() {
         try {
           const res = await api.agent2SendEmail(action.data.to, action.data.subject, action.data.body)
           if (res.gmail_url) {
-            window.open(res.gmail_url, '_blank')
+            openExternalSafe(res.gmail_url)
             setActionToast('Gmail ouvert — ton mail est pret, il ne reste plus qu\'a l\'envoyer !')
           } else {
             setActionToast('Erreur ouverture Gmail')
@@ -1411,7 +1466,11 @@ export default function AgentsPage() {
         break
       }
       case 'LINK':
-        window.open(action.data.url, '_blank')
+        // P0 : URL fournie par le LLM — openExternalSafe rejette javascript:/data:/etc.
+        if (!openExternalSafe(action.data.url)) {
+          setActionToast('Lien invalide ou non sécurisé, ouverture annulée.')
+          setTimeout(() => setActionToast(null), 3000)
+        }
         break
       case 'COPY':
         try {
@@ -1486,11 +1545,16 @@ export default function AgentsPage() {
         timestamp: new Date().toISOString(), type: agentResponseType,
         audioData: res.audioData || undefined,
         actions: res.actions || undefined,
+        proposal: (res.proposal && (res.proposal as any).id)
+          ? { ...(res.proposal as any), statut: 'pending' }
+          : null,
       }])
-    } catch {
+    } catch (err: unknown) {
+      console.error('[Agent 2] Erreur chat:', err)
+      const errMessage = err instanceof Error ? err.message : 'Erreur inconnue'
       setStreamSteps2(prev => prev.map(s => s.status === 'running' ? { ...s, status: 'error' } : s))
       setMessages2(prev => [...prev, {
-        role: 'agent', content: "Desole, une erreur est survenue. Reessayez dans un instant.",
+        role: 'agent', content: `Désolé, une erreur est survenue : ${errMessage}. Réessayez dans un instant.`,
         timestamp: new Date().toISOString(), type: 'text',
       }])
     } finally {
@@ -2077,12 +2141,12 @@ export default function AgentsPage() {
 
   const handleActivate3 = async () => {
     if (active) {
-      setConflictModal('Agent Sylea 1')
+      setConflictModal('Agent Syléa 1')
       setShowActivateModal3(false)
       return
     }
     if (active2) {
-      setConflictModal('Agent Sylea 2')
+      setConflictModal('Agent Syléa 2')
       setShowActivateModal3(false)
       return
     }
@@ -2926,8 +2990,8 @@ export default function AgentsPage() {
     { name: 'Super Agent Sylea', subtitle: 'Cerveau autonome 24/7', desc: 'Agit pour vous pendant que vous dormez' },
   ]
 
-  // ── Agent 3 Chat view ────────────────────────────────────────────────────
-  if (chat3Open) {
+  // ── Agent 3 Chat view — masque tant que AGENT3_ENABLED = false ─────────
+  if (AGENT3_ENABLED && chat3Open) {
     return (
       <div className="page animate-fade-in" style={{ flex: 1, height: 'calc(100vh - 3.5rem - 3rem)', minHeight: 0, maxHeight: 'calc(100vh - 3.5rem - 3rem)', overflow: 'hidden' }}>
         <style>{`
@@ -4155,7 +4219,7 @@ export default function AgentsPage() {
                                 borderRadius: '8px', overflow: 'hidden', border: '1px solid rgba(139,92,246,0.2)',
                                 background: 'rgba(0,0,0,0.15)', maxHeight: '500px', overflowY: 'auto',
                               }}>
-                                <div dangerouslySetInnerHTML={{ __html: `<style>table{width:100%;border-collapse:collapse;font-size:0.75rem;color:#e2e8f0}th{padding:0.5rem 0.7rem;text-align:left;background:rgba(139,92,246,0.12);color:#a78bfa;font-weight:600;border-bottom:1px solid rgba(139,92,246,0.2)}td{padding:0.4rem 0.7rem;border-bottom:1px solid rgba(255,255,255,0.06)}tr:hover td{background:rgba(139,92,246,0.04)}strong{color:#c4b5fd}</style>${action.data.content}` }} />
+                                <div className="sylea-agent-table" dangerouslySetInnerHTML={{ __html: sanitizeAgentHtml(action.data.content) }} />
                               </div>
                             ) : (action.data.type === 'chart' || action.data.type === 'diagram') && typeof action.data.content === 'string' ? (() => {
                               // Parse chart data: "pie_chart:Label-Value%,..." or "bar_chart:..." or simple "Label-Value%,..."
@@ -5759,12 +5823,19 @@ export default function AgentsPage() {
               <path d={S_PATH} stroke="#050810" strokeWidth="18" fill="none" strokeLinecap="butt" />
             </svg>
             <div style={{ flex: 1 }}>
-              <p style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)', lineHeight: 1.2 }}>Agent Sylea 2</p>
+              <p style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)', lineHeight: 1.2 }}>Agent Syléa 2</p>
               <p style={{ fontSize: '0.7rem', color: '#4ade80', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
                 <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', display: 'inline-block' }} />
                 {t('agents.status_active')}
               </p>
             </div>
+
+            {/* Badge eclair : compteur d'actions restantes aujourd'hui */}
+            <ActionLightning
+              size={32}
+              onClick={() => window.location.assign('/quotas')}
+              style={{ padding: '6px 12px 6px 8px', fontSize: '0.95rem' }}
+            />
 
             {/* Voice auto-play toggle */}
             {isTTSSupported() && (
@@ -6066,6 +6137,40 @@ export default function AgentsPage() {
                         )}
                       </div>
                     ))}
+                    {/* Proposal card : événement/décision majeure détectée par
+                        Agent 2, en attente de confirmation utilisateur. */}
+                    {msg.role === 'agent' && msg.proposal && (
+                      <ProposalCard
+                        proposal={msg.proposal}
+                        onConfirm={async () => {
+                          try {
+                            const res = await api.confirmAgentProposal(msg.proposal!.id)
+                            setMessages2(prev => prev.map((m, i) =>
+                              i === idx
+                                ? { ...m, proposal: m.proposal ? { ...m.proposal, statut: 'confirmed' } : null }
+                                : m
+                            ))
+                            setActionToast(
+                              `Enregistre. ${res.sous_objectif_impacte ? 'Impact sur : ' + res.sous_objectif_impacte : ''}`.trim()
+                            )
+                            setTimeout(() => setActionToast(null), 3500)
+                          } catch {
+                            setActionToast('Erreur lors de la confirmation')
+                            setTimeout(() => setActionToast(null), 2500)
+                          }
+                        }}
+                        onReject={async () => {
+                          try {
+                            await api.rejectAgentProposal(msg.proposal!.id)
+                            setMessages2(prev => prev.map((m, i) =>
+                              i === idx
+                                ? { ...m, proposal: m.proposal ? { ...m.proposal, statut: 'rejected' } : null }
+                                : m
+                            ))
+                          } catch {}
+                        }}
+                      />
+                    )}
                   </div>
                 </div>
               )
@@ -6347,12 +6452,19 @@ export default function AgentsPage() {
             </button>
             <AgentSyleaLogo size={24} />
             <div style={{ flex: 1 }}>
-              <p style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)', lineHeight: 1.2 }}>Agent Sylea 1</p>
+              <p style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-primary)', lineHeight: 1.2 }}>Agent Syléa 1</p>
               <p style={{ fontSize: '0.7rem', color: '#4ade80', display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
                 <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#4ade80', display: 'inline-block' }} />
                 {t('agents.status_active')}
               </p>
             </div>
+
+            {/* Badge eclair : compteur d'actions restantes aujourd'hui */}
+            <ActionLightning
+              size={32}
+              onClick={() => window.location.assign('/quotas')}
+              style={{ padding: '6px 12px 6px 8px', fontSize: '0.95rem' }}
+            />
 
             {/* Voice auto-play toggle */}
             {isTTSSupported() && (
@@ -6456,6 +6568,40 @@ export default function AgentsPage() {
                         )}
                       </div>
                     </div>
+                    {/* Proposal card : événement/décision majeure détectée par
+                        l'agent, en attente de confirmation utilisateur. */}
+                    {msg.role === 'agent' && msg.proposal && (
+                      <ProposalCard
+                        proposal={msg.proposal}
+                        onConfirm={async () => {
+                          try {
+                            const res = await api.confirmAgentProposal(msg.proposal!.id)
+                            setMessages(prev => prev.map((m, i) =>
+                              i === idx
+                                ? { ...m, proposal: m.proposal ? { ...m.proposal, statut: 'confirmed' } : null }
+                                : m
+                            ))
+                            setActionToast(
+                              `Enregistre. ${res.sous_objectif_impacte ? 'Impact sur : ' + res.sous_objectif_impacte : ''}`.trim()
+                            )
+                            setTimeout(() => setActionToast(null), 3500)
+                          } catch (e) {
+                            setActionToast('Erreur lors de la confirmation')
+                            setTimeout(() => setActionToast(null), 2500)
+                          }
+                        }}
+                        onReject={async () => {
+                          try {
+                            await api.rejectAgentProposal(msg.proposal!.id)
+                            setMessages(prev => prev.map((m, i) =>
+                              i === idx
+                                ? { ...m, proposal: m.proposal ? { ...m.proposal, statut: 'rejected' } : null }
+                                : m
+                            ))
+                          } catch {}
+                        }}
+                      />
+                    )}
                     {/* QCM supprimé — réponses trop imprécises */}
                   </div>
                 )}
@@ -7002,6 +7148,30 @@ export default function AgentsPage() {
                   Desactiver cet agent
                 </button>
               </>
+            ) : isFreePlan ? (
+              // Gating Free : Agent 2 reserve aux plans Avance+. On affiche
+              // un bouton paywall qui pointe vers /quotas plutot que le
+              // bouton d'activation.
+              <button
+                onClick={() => { window.location.href = '/quotas' }}
+                style={{
+                  padding: '0.55rem 1.4rem', borderRadius: 'var(--radius-md)',
+                  border: '1px solid rgba(239,68,68,0.4)', cursor: 'pointer',
+                  fontWeight: 600, fontSize: '0.82rem',
+                  background: 'rgba(239,68,68,0.08)',
+                  color: '#f87171', transition: 'all 0.2s', whiteSpace: 'nowrap',
+                  display: 'inline-flex', alignItems: 'center', gap: '0.35rem',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.15)' }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.08)' }}
+                title="Agent Sylea 2 est inclus dans l'abonnement Avance"
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                  <rect x="3" y="11" width="18" height="11" rx="2" />
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                </svg>
+                Plan Avance requis
+              </button>
             ) : (
               <button
                 onClick={() => setShowActivateModal2(true)}
@@ -7202,18 +7372,38 @@ export default function AgentsPage() {
             box-shadow: 0 0 0 2px rgba(37,99,235,0.15), 0 0 0 4px rgba(212,160,23,0.08) !important;
           }
         `}</style>
-        <div className={active3 ? 'agent3-card-active' : ''} style={{
+        {/* Agent 3 — affiche en mode "grise/locked" (carte visible mais non
+            cliquable) tant que la fonctionnalite n'est pas operationnelle.
+            Decision produit : on prefere montrer ce qui arrive plutot que
+            de cacher la roadmap. Le badge "Bientot disponible" est rendu
+            via le style opacity + pointerEvents:none + badge ajoute ci-dessous. */}
+        {(<div style={{
           display: 'flex', alignItems: 'center', gap: '1rem',
-          background: active3
-            ? 'linear-gradient(135deg, rgba(37,99,235,0.08), rgba(212,160,23,0.03), var(--bg-surface))'
-            : 'var(--bg-surface)',
-          border: active3 ? '1px solid rgba(37,99,235,0.3)' : '1px solid var(--border)',
+          background: 'var(--bg-surface)',
+          border: '1px solid rgba(255,255,255,0.06)',
           borderRadius: 'var(--radius-lg)',
           padding: '1rem 1.25rem',
-          boxShadow: active3 ? '0 2px 20px rgba(37,99,235,0.1)' : '0 1px 8px rgba(0,0,0,0.15)',
+          boxShadow: '0 1px 8px rgba(0,0,0,0.15)',
           transition: 'all 0.3s',
           marginBottom: '0.75rem',
+          opacity: AGENT3_ENABLED ? 1 : 0.45,
+          pointerEvents: AGENT3_ENABLED ? 'auto' : 'none',
+          position: 'relative',
         }}>
+          {!AGENT3_ENABLED && (
+            <div style={{
+              position: 'absolute', top: 10, right: 14,
+              fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.1em',
+              textTransform: 'uppercase',
+              color: '#a78bfa',
+              background: 'rgba(167,139,250,0.12)',
+              border: '1px solid rgba(167,139,250,0.35)',
+              borderRadius: 'var(--radius-pill)',
+              padding: '0.2rem 0.55rem',
+            }}>
+              ⧗ Bientôt disponible
+            </div>
+          )}
           {/* Logo — blue+gold shimmering */}
           <div style={{ flexShrink: 0 }}>
             <svg width={48} height={48} viewBox="0 0 380 380" style={{ overflow: 'visible' }}>
@@ -7271,15 +7461,7 @@ export default function AgentsPage() {
               }}>
                 Agent Sylea 3
               </h3>
-              {/* OpenClaw status dot */}
-              {active3 && (
-                <span title={openclawConnected ? 'OpenClaw connecte' : 'OpenClaw deconnecte'} style={{
-                  width: 7, height: 7, borderRadius: '50%',
-                  background: openclawConnected ? '#4ade80' : '#ef4444',
-                  display: 'inline-block', flexShrink: 0,
-                  boxShadow: openclawConnected ? '0 0 6px rgba(74,222,128,0.5)' : '0 0 6px rgba(239,68,68,0.5)',
-                }} />
-              )}
+              {/* OpenClaw status dot masque tant qu'Agent 3 est "a venir" */}
             </div>
             <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', margin: '0 0 0.25rem', lineHeight: 1.3 }}>
               Agent d'elite
@@ -7287,110 +7469,41 @@ export default function AgentsPage() {
             <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
               Execution de taches complexes, recherche approfondie, analyses detaillees, multi-tache.
             </p>
-            {active3 && (
-              <p style={{ fontSize: '0.68rem', color: 'var(--text-muted)', margin: '0.2rem 0 0', fontStyle: 'italic', opacity: 0.7 }}>
-                {lastInteraction3}
-              </p>
-            )}
           </div>
 
           {/* Status + buttons right */}
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.4rem', flexShrink: 0 }}>
-            {/* Status badge */}
-            {active3 ? (
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
-                padding: '0.2rem 0.6rem', borderRadius: '999px', fontSize: '0.65rem',
-                fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
-                background: 'rgba(74,222,128,0.1)', border: '1px solid rgba(74,222,128,0.3)',
-                color: '#4ade80', whiteSpace: 'nowrap',
-              }}>
-                <span style={{
-                  width: 6, height: 6, borderRadius: '50%', background: '#4ade80',
-                  animation: 'agent-pulse-dot 2s ease-in-out infinite',
-                }} />
-                ACTIF
-              </span>
-            ) : (
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
-                padding: '0.2rem 0.6rem', borderRadius: '999px', fontSize: '0.65rem',
-                fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
-                background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)',
-                color: 'var(--text-muted)', whiteSpace: 'nowrap',
-              }}>
-                INACTIF
-              </span>
-            )}
+            {/* Status badge : "A VENIR" force tant qu'Agent 3 n'est pas
+                officiellement disponible (pas pour free ni avance) */}
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+              padding: '0.2rem 0.6rem', borderRadius: '999px', fontSize: '0.65rem',
+              fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
+              background: 'rgba(212,160,23,0.08)',
+              border: '1px solid rgba(212,160,23,0.25)',
+              color: '#d4a017', whiteSpace: 'nowrap',
+            }}>
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+              A VENIR
+            </span>
 
-            {/* Action buttons */}
-            {active3 ? (
-              <>
-                <div style={{ display: 'flex', gap: '0.4rem' }}>
-                  <button
-                    className="agent3-btn-shimmer"
-                    onClick={openChat3}
-                    style={{
-                      padding: '0.55rem 1rem', borderRadius: 'var(--radius-md)',
-                      border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '0.82rem',
-                      color: '#fff', transition: 'all 0.2s', whiteSpace: 'nowrap',
-                      boxShadow: '0 2px 10px rgba(212,160,23,0.3)',
-                    }}
-                    onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-1px)'}
-                    onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}
-                  >
-                    Discuter
-                  </button>
-                  <button
-                    onClick={() => setInCall3(true)}
-                    className="agent3-btn-shimmer"
-                    style={{
-                      padding: '0.55rem 0.8rem', borderRadius: 'var(--radius-md)',
-                      border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '0.82rem',
-                      color: '#fff', transition: 'all 0.2s', whiteSpace: 'nowrap',
-                      boxShadow: '0 2px 10px rgba(212,160,23,0.3)',
-                      display: 'flex', alignItems: 'center', gap: '0.3rem',
-                    }}
-                    onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-1px)'}
-                    onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2z" />
-                    </svg>
-                    Appeler
-                  </button>
-                </div>
-                <button
-                  onClick={() => setShowDeactivateModal3(true)}
-                  className="agent3-small-btn agent3-text-glow"
-                  style={{
-                    borderRadius: 'var(--radius-md)', cursor: 'pointer',
-                    fontSize: '0.78rem', fontWeight: 600,
-                    padding: '0.4rem 1rem',
-                    transition: 'all 0.15s', whiteSpace: 'nowrap',
-                  }}
-                >
-                  Desactiver cet agent
-                </button>
-              </>
-            ) : (
-              <button
-                className="agent3-btn-shimmer"
-                onClick={() => setShowActivateModal3(true)}
-                style={{
-                  padding: '0.55rem 1.4rem', borderRadius: 'var(--radius-md)',
-                  border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '0.85rem',
-                  color: '#fff', transition: 'all 0.2s', whiteSpace: 'nowrap',
-                  boxShadow: '0 2px 10px rgba(212,160,23,0.3)',
-                }}
-                onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-1px)'}
-                onMouseLeave={e => e.currentTarget.style.transform = 'translateY(0)'}
-              >
-                Activer cet agent
-              </button>
-            )}
+            {/* Bouton remplace par un texte "Disponible bientot" (Agent 3 a venir,
+                pas dispo pour free ni avance). */}
+            <span style={{
+              padding: '0.4rem 0.9rem', borderRadius: 'var(--radius-md)',
+              fontSize: '0.75rem', fontWeight: 600,
+              color: 'var(--text-muted)',
+              background: 'rgba(255,255,255,0.04)',
+              border: '1px dashed rgba(255,255,255,0.12)',
+              whiteSpace: 'nowrap',
+            }}>
+              Disponible bientôt
+            </span>
           </div>
-        </div>
+        </div>)}
 
         {/* Future agent placeholder cards */}
         {futureAgents.map((agent, i) => (
@@ -7446,13 +7559,13 @@ export default function AgentsPage() {
         />
       )}
 
-      {/* ── Voice Call overlay (Agent 3) ── */}
-      {inCall3 && (
+      {/* ── Voice Call overlay (Agent 3) — masque ── */}
+      {AGENT3_ENABLED && inCall3 && (
         <VoiceCall
           onEndCall={() => setInCall3(false)}
           onMessage={handleVoiceCallMessage3}
           agentColor="#2563eb"
-          agentName="Agent Sylea 3"
+          agentName="Agent Syléa 3"
           chatEndpoint={agent3ChatEndpoint}
         />
       )}
@@ -7673,8 +7786,8 @@ export default function AgentsPage() {
         </div>
       )}
 
-      {/* ── Agent 3 Activation modal ── */}
-      {showActivateModal3 && (
+      {/* ── Agent 3 Activation modal — masque ── */}
+      {AGENT3_ENABLED && showActivateModal3 && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 1000,
           background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)',
@@ -8245,8 +8358,8 @@ export default function AgentsPage() {
         </div>
       )}
 
-      {/* ── Agent 3 Deactivation modal ── */}
-      {showDeactivateModal3 && (
+      {/* ── Agent 3 Deactivation modal — masque ── */}
+      {AGENT3_ENABLED && showDeactivateModal3 && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 1000,
           background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)',

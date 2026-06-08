@@ -20,13 +20,17 @@ import pytest
 
 from api.agent3_native_dispatcher import Agent3ActionDispatcher
 from sylea.core.storage.database import DatabaseManager
+from tests.conftest import make_shared_db, dispose_shared_db
 
 
 @pytest.fixture
-def db():
-    d = DatabaseManager(db_path=Path(":memory:"))
-    d.connect()
-    return d
+def db(tmp_path, monkeypatch):
+    """DB SQLite partagee (sync + async) via fichier temp.
+    Migration shared-DB : remplace `:memory:` pour permettre a l'async
+    session_factory de pointer sur la meme DB."""
+    d = make_shared_db(tmp_path, monkeypatch)
+    yield d
+    dispose_shared_db(d)
 
 
 @pytest.fixture
@@ -337,8 +341,8 @@ class TestVisionAnalyze:
     @pytest.mark.asyncio
     async def test_file_not_found(self, db, dispatcher):
         # Assurer que la table existe
-        from api.routers.agent3_openclaw import _ensure_agent3_tables
-        _ensure_agent3_tables(db)
+        from api.routers.agent3_openclaw import _ensure_agent3_tables_async
+        await _ensure_agent3_tables_async()
         r = await dispatcher.execute(
             "VISION_ANALYZE", {"file_id": "zzz_inexistant", "prompt": "?"},
         )
@@ -347,8 +351,8 @@ class TestVisionAnalyze:
 
     @pytest.mark.asyncio
     async def test_file_not_image(self, db, dispatcher, tmp_path):
-        from api.routers.agent3_openclaw import _ensure_agent3_tables
-        _ensure_agent3_tables(db)
+        from api.routers.agent3_openclaw import _ensure_agent3_tables_async
+        await _ensure_agent3_tables_async()
         # Creer un file PDF enregistre pour ce user
         pdf_path = tmp_path / "doc.pdf"
         pdf_path.write_bytes(b"%PDF-1.4 fake")
@@ -366,8 +370,8 @@ class TestVisionAnalyze:
 
     @pytest.mark.asyncio
     async def test_image_ok_mocked(self, db, dispatcher, tmp_path, monkeypatch):
-        from api.routers.agent3_openclaw import _ensure_agent3_tables
-        _ensure_agent3_tables(db)
+        from api.routers.agent3_openclaw import _ensure_agent3_tables_async
+        await _ensure_agent3_tables_async()
         img_path = tmp_path / "pic.png"
         img_path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
         db.conn.execute(

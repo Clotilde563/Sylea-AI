@@ -126,7 +126,7 @@ def _get_nested(d: dict, path: list[str]) -> Any:
 # Main sync function
 # ─────────────────────────────────────────────────────────────────────────────
 
-def sync_user_credentials_to_openclaw(
+async def sync_user_credentials_to_openclaw(
     db: Any,
     user_id: str,
     *,
@@ -168,9 +168,9 @@ def sync_user_credentials_to_openclaw(
     except Exception as e:
         return {"ok": False, "error": f"lecture config failed : {e}"}
 
-    # Lecture Vault Sylea
+    # Lecture Vault Sylea (async/PG)
     try:
-        from api.credentials import get_credential
+        from api.credentials import get_credential_async
     except Exception as e:
         return {"ok": False, "error": f"credentials module absent : {e}"}
 
@@ -180,9 +180,9 @@ def sync_user_credentials_to_openclaw(
 
     for provider_slug, mapping in _SYNC_MAP.items():
         try:
-            api_key = get_credential(db, user_id, provider_slug, "api_key", context="openclaw_sync")
+            api_key = await get_credential_async(user_id, provider_slug, "api_key", context="openclaw_sync")
         except Exception as e:
-            logger.debug(f"sync: get_credential({provider_slug}) failed : {e}")
+            logger.debug(f"sync: get_credential_async({provider_slug}) failed : {e}")
             api_key = None
 
         existing = _get_nested(config, mapping["path"])

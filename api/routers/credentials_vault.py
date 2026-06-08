@@ -24,12 +24,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from api.credentials import (
-    delete_credential,
-    get_credential,
-    has_credential,
-    list_credentials,
+    delete_credential_async,
+    get_credential_async,
+    has_credential_async,
+    list_credentials_async,
     mask_credential_value,
-    save_credential,
+    save_credential_async,
 )
 from api.dependencies import get_db, get_optional_user
 from api.providers_registry import (
@@ -205,7 +205,7 @@ async def missing_for_installed_skills(
     uid = _require_user(user_id)
     try:
         from api.agent3_skills.clawhub_loader import load_all_skills
-        from api.credentials import has_credential as _has_cred
+        from api.credentials import has_credential_async as _has_cred_async
     except Exception as e:
         logger.warning(f"missing_for_skills imports failed: {e}")
         return {"skills": [], "total_missing_count": 0}
@@ -231,7 +231,7 @@ async def missing_for_installed_skills(
                 )
                 has = False
                 if first_required_field:
-                    has = _has_cred(db, uid, matched_slug, first_required_field)
+                    has = await _has_cred_async(uid, matched_slug, first_required_field)
                 missing_items.append({
                     "env_name": env_name,
                     "matched_provider": matched_slug,
@@ -243,7 +243,7 @@ async def missing_for_installed_skills(
             else:
                 # Credential custom / inconnue : namespace generic clawhub_skill_<slug>
                 custom_slug = f"clawhub_skill_{meta.slug}"
-                has = _has_cred(db, uid, custom_slug, env_name)
+                has = await _has_cred_async(uid, custom_slug, env_name)
                 missing_items.append({
                     "env_name": env_name,
                     "matched_provider": None,  # pas dans le catalogue
@@ -295,8 +295,8 @@ async def save_custom_skill_env(
         )
 
     provider_slug = f"clawhub_skill_{body.skill_slug}"
-    save_credential(
-        db, uid, provider_slug, body.env_name, body.value.strip(),
+    await save_credential_async(
+        uid, provider_slug, body.env_name, body.value.strip(),
         metadata={"source": "clawhub_custom", "skill_slug": body.skill_slug},
     )
     return {
@@ -317,7 +317,7 @@ async def list_my_credentials(
     user_id: str | None = Depends(get_optional_user),
 ):
     uid = _require_user(user_id)
-    creds = list_credentials(db, uid)
+    creds = await list_credentials_async(uid)
     return {"credentials": creds, "count": len(creds)}
 
 
@@ -442,8 +442,8 @@ async def quick_save(
             "message": "Cle invalide (authentification refusee par le provider). Non sauvegardee.",
         }
 
-    save_credential(
-        db, uid, provider_slug, field_key, raw,
+    await save_credential_async(
+        uid, provider_slug, field_key, raw,
         metadata=detected_metadata or None,
         test_ok=test_ok,
     )
@@ -455,7 +455,7 @@ async def quick_save(
             sync_user_credentials_to_openclaw, _SYNC_MAP,
         )
         if provider_slug in _SYNC_MAP:
-            sync_result = sync_user_credentials_to_openclaw(db, uid)
+            sync_result = await sync_user_credentials_to_openclaw(db, uid)
             openclaw_synced = sync_result.get("ok") and any(
                 c.get("provider") == provider_slug
                 for c in sync_result.get("changes", [])
@@ -524,8 +524,8 @@ async def save_manual(
     # Save tous les champs fournis
     for key in saved_fields:
         val = body.values[key].strip()
-        save_credential(
-            db, uid, body.provider_slug, key, val,
+        await save_credential_async(
+            uid, body.provider_slug, key, val,
             metadata=body.metadata,
             test_ok=test_ok,
         )
@@ -551,7 +551,7 @@ async def delete_one(
     user_id: str | None = Depends(get_optional_user),
 ):
     uid = _require_user(user_id)
-    removed = delete_credential(db, uid, provider_slug, field_key)
+    removed = await delete_credential_async(uid, provider_slug, field_key)
     return {"success": removed, "deleted": removed}
 
 
@@ -568,7 +568,7 @@ async def delete_provider(
         raise HTTPException(status_code=404, detail="Provider inconnu")
     count = 0
     for f in provider.get("fields", []):
-        if delete_credential(db, uid, provider_slug, f["key"]):
+        if await delete_credential_async(uid, provider_slug, f["key"]):
             count += 1
     return {"success": count > 0, "deleted_count": count}
 
@@ -590,7 +590,7 @@ async def test_existing(
 
     values: dict[str, str] = {}
     for f in provider.get("fields", []):
-        val = get_credential(db, uid, provider_slug, f["key"], context="test")
+        val = await get_credential_async(uid, provider_slug, f["key"], context="test")
         if val:
             values[f["key"]] = val
     if not values:

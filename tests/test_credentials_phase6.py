@@ -17,7 +17,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from api.credentials import has_credential, save_credential
+import asyncio
+from api.credentials import has_credential_async, save_credential_async
 from api.providers_registry import (
     PROVIDERS,
     all_providers,
@@ -33,18 +34,15 @@ def _reset_fernet(monkeypatch):
     cred_mod._fernet_instance = None
 
 
-class _ThreadSafeDB:
-    def __init__(self):
-        self.conn = sqlite3.connect(":memory:", check_same_thread=False)
-    def connect(self): pass
-    def disconnect(self):
-        try: self.conn.close()
-        except Exception: pass
-
-
 @pytest.fixture
-def db():
-    return _ThreadSafeDB()
+def db(tmp_path, monkeypatch):
+    """Shared-DB (sync + async) — migration PG."""
+    from tests.conftest import make_shared_db, dispose_shared_db
+    from api.credentials import ensure_credentials_tables
+    d = make_shared_db(tmp_path, monkeypatch)
+    ensure_credentials_tables(d)
+    yield d
+    dispose_shared_db(d)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -225,7 +223,7 @@ class TestMissingForSkills:
 
     def test_existing_credential_marks_has(self, db):
         # Cas mixte : une cred existe (stripe), l'autre non (custom)
-        save_credential(db, "phase6-user", "stripe", "api_key", "sk_live_test")
+        asyncio.run(save_credential_async("phase6-user", "stripe", "api_key", "sk_live_test"))
         from api.agent3_skills.clawhub_loader import ClawHubSkillMeta
         fake_meta = ClawHubSkillMeta(
             slug="multi-skill",
@@ -281,7 +279,7 @@ class TestCustomSkillEnv:
             assert data["provider_slug"] == "clawhub_skill_my-skill"
             assert data["field_key"] == "MY_CUSTOM_TOKEN"
             # Verifie que la valeur est bien stockee chiffrée
-            assert has_credential(db, "phase6-user", "clawhub_skill_my-skill", "MY_CUSTOM_TOKEN")
+            assert asyncio.run(has_credential_async("phase6-user", "clawhub_skill_my-skill", "MY_CUSTOM_TOKEN"))
         finally:
             from api.main import app
             app.dependency_overrides.clear()
@@ -350,8 +348,8 @@ Corps du SKILL.md.
         _reset_cache()
         monkeypatch.setattr(loader, "BUNDLED_SKILLS_DIRS", [])
 
-        # L'user a deja la stripe cred
-        save_credential(db, "usr-skill-e2e", "stripe", "api_key", "sk_live_x")
+        # L'user a deja la stripe cred (test est async — await direct)
+        await save_credential_async("usr-skill-e2e", "stripe", "api_key", "sk_live_x")
 
         from api.agent3_skills.skill_executor import dispatch_skill_invocation
         r = await dispatch_skill_invocation(

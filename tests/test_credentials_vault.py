@@ -7,16 +7,29 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import asyncio
+
 from api.credentials import (
-    delete_all_credentials,
-    delete_credential,
-    get_credential,
-    get_provider_credentials_bundle,
-    has_credential,
-    list_credentials,
+    delete_all_credentials_async,
+    delete_credential_async,
+    get_credential_async,
+    get_provider_credentials_bundle_async,
+    has_credential_async,
+    list_credentials_async,
     mask_credential_value,
-    save_credential,
+    save_credential_async,
 )
+
+
+def _run(coro):
+    """Helper : execute une coroutine, compat sync/async test contexts."""
+    try:
+        asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    except RuntimeError:
+        return asyncio.run(coro)
 from api.providers_registry import (
     all_providers,
     detect_provider_from_key,
@@ -44,10 +57,14 @@ SK_TEST_DEMO = "_".join(["sk", "test", "51HGqR7abcdefGHIJKLMNopQR"])
 
 
 @pytest.fixture
-def db():
-    d = DatabaseManager(db_path=Path(":memory:"))
-    d.connect()
-    return d
+def db(tmp_path, monkeypatch):
+    """Shared-DB (sync + async) — migration PG."""
+    from tests.conftest import make_shared_db, dispose_shared_db
+    from api.credentials import ensure_credentials_tables
+    d = make_shared_db(tmp_path, monkeypatch)
+    ensure_credentials_tables(d)
+    yield d
+    dispose_shared_db(d)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -81,8 +98,8 @@ class TestVault:
         from api import credentials as cred_mod
         cred_mod._fernet_instance = None
 
-        save_credential(db, "user_a", "stripe", "api_key", SK_LIVE_SHORT)
-        val = get_credential(db, "user_a", "stripe", "api_key")
+        _run(save_credential_async("user_a", "stripe", "api_key", SK_LIVE_SHORT))
+        val = _run(get_credential_async("user_a", "stripe", "api_key"))
         assert val == SK_LIVE_SHORT
 
     def test_users_isolated(self, db, monkeypatch):
@@ -90,21 +107,21 @@ class TestVault:
         from api import credentials as cred_mod
         cred_mod._fernet_instance = None
 
-        save_credential(db, "user_a", "stripe", "api_key", "sk_a")
-        save_credential(db, "user_b", "stripe", "api_key", "sk_b")
-        assert get_credential(db, "user_a", "stripe", "api_key") == "sk_a"
-        assert get_credential(db, "user_b", "stripe", "api_key") == "sk_b"
+        _run(save_credential_async("user_a", "stripe", "api_key", "sk_a"))
+        _run(save_credential_async("user_b", "stripe", "api_key", "sk_b"))
+        assert _run(get_credential_async("user_a", "stripe", "api_key")) == "sk_a"
+        assert _run(get_credential_async("user_b", "stripe", "api_key")) == "sk_b"
 
     def test_update_overwrites(self, db, monkeypatch):
         monkeypatch.setenv("SYLEA_CREDENTIALS_MASTER_KEY", "test-key-not-for-prod-123456789")
         from api import credentials as cred_mod
         cred_mod._fernet_instance = None
 
-        save_credential(db, "user_a", "stripe", "api_key", "old_value")
-        save_credential(db, "user_a", "stripe", "api_key", "new_value")
-        assert get_credential(db, "user_a", "stripe", "api_key") == "new_value"
+        _run(save_credential_async("user_a", "stripe", "api_key", "old_value"))
+        _run(save_credential_async("user_a", "stripe", "api_key", "new_value"))
+        assert _run(get_credential_async("user_a", "stripe", "api_key")) == "new_value"
         # Une seule entree (pas de doublons)
-        creds = list_credentials(db, "user_a")
+        creds = _run(list_credentials_async("user_a"))
         assert len([c for c in creds if c["provider_slug"] == "stripe"]) == 1
 
     def test_list_masks_values(self, db, monkeypatch):
@@ -112,9 +129,9 @@ class TestVault:
         from api import credentials as cred_mod
         cred_mod._fernet_instance = None
 
-        save_credential(db, "user_a", "stripe", "api_key", SK_LIVE_SECRET)
-        save_credential(db, "user_a", "notion", "integration_token", "secret_" + "A" * 43)
-        creds = list_credentials(db, "user_a")
+        _run(save_credential_async("user_a", "stripe", "api_key", SK_LIVE_SECRET))
+        _run(save_credential_async("user_a", "notion", "integration_token", "secret_" + "A" * 43))
+        creds = _run(list_credentials_async("user_a"))
         # Les valeurs sont masquees, jamais en clair
         for c in creds:
             assert "SECRET" not in c["preview"]
@@ -128,35 +145,35 @@ class TestVault:
         from api import credentials as cred_mod
         cred_mod._fernet_instance = None
 
-        save_credential(db, "user_a", "stripe", "api_key", "sk_x")
-        assert has_credential(db, "user_a", "stripe", "api_key") is True
-        assert delete_credential(db, "user_a", "stripe", "api_key") is True
-        assert has_credential(db, "user_a", "stripe", "api_key") is False
-        assert get_credential(db, "user_a", "stripe", "api_key") is None
+        _run(save_credential_async("user_a", "stripe", "api_key", "sk_x"))
+        assert _run(has_credential_async("user_a", "stripe", "api_key")) is True
+        assert _run(delete_credential_async("user_a", "stripe", "api_key")) is True
+        assert _run(has_credential_async("user_a", "stripe", "api_key")) is False
+        assert _run(get_credential_async("user_a", "stripe", "api_key")) is None
 
     def test_delete_all_for_user(self, db, monkeypatch):
         monkeypatch.setenv("SYLEA_CREDENTIALS_MASTER_KEY", "test-key-not-for-prod-123456789")
         from api import credentials as cred_mod
         cred_mod._fernet_instance = None
 
-        save_credential(db, "user_a", "stripe", "api_key", "x")
-        save_credential(db, "user_a", "notion", "integration_token", "y")
-        save_credential(db, "user_b", "stripe", "api_key", "z")
+        _run(save_credential_async("user_a", "stripe", "api_key", "x"))
+        _run(save_credential_async("user_a", "notion", "integration_token", "y"))
+        _run(save_credential_async("user_b", "stripe", "api_key", "z"))
 
-        n = delete_all_credentials(db, "user_a")
+        n = _run(delete_all_credentials_async("user_a"))
         assert n == 2
         # user_b intact
-        assert get_credential(db, "user_b", "stripe", "api_key") == "z"
-        assert get_credential(db, "user_a", "stripe", "api_key") is None
+        assert _run(get_credential_async("user_b", "stripe", "api_key")) == "z"
+        assert _run(get_credential_async("user_a", "stripe", "api_key")) is None
 
     def test_bundle_read(self, db, monkeypatch):
         monkeypatch.setenv("SYLEA_CREDENTIALS_MASTER_KEY", "test-key-not-for-prod-123456789")
         from api import credentials as cred_mod
         cred_mod._fernet_instance = None
 
-        save_credential(db, "user_a", "stripe", "api_key", "sk_x")
-        save_credential(db, "user_a", "stripe", "webhook_secret", "whsec_y")
-        bundle = get_provider_credentials_bundle(db, "user_a", "stripe")
+        _run(save_credential_async("user_a", "stripe", "api_key", "sk_x"))
+        _run(save_credential_async("user_a", "stripe", "webhook_secret", "whsec_y"))
+        bundle = _run(get_provider_credentials_bundle_async("user_a", "stripe"))
         assert bundle == {"api_key": "sk_x", "webhook_secret": "whsec_y"}
 
     def test_metadata_stored_and_retrieved(self, db, monkeypatch):
@@ -164,9 +181,9 @@ class TestVault:
         from api import credentials as cred_mod
         cred_mod._fernet_instance = None
 
-        save_credential(db, "user_a", "stripe", "api_key", "sk_x",
-                        metadata={"environment": "test", "scope": "full"})
-        creds = list_credentials(db, "user_a")
+        _run(save_credential_async("user_a", "stripe", "api_key", "sk_x",
+                        metadata={"environment": "test", "scope": "full"}))
+        creds = _run(list_credentials_async("user_a"))
         c = next(c for c in creds if c["provider_slug"] == "stripe")
         assert c["metadata"] == {"environment": "test", "scope": "full"}
 
@@ -401,13 +418,13 @@ class TestEndpoints:
             assert data["provider_slug"] == "stripe"
             assert data["validated"] is True
             # La clef est bien en base
-            assert has_credential(db, "test-user-123", "stripe", "api_key")
+            assert _run(has_credential_async("test-user-123", "stripe", "api_key"))
         finally:
             from api.main import app
             app.dependency_overrides.clear()
 
-    def test_quick_save_rejects_invalid_401(self, monkeypatch):
-        client, db = self._setup_client(monkeypatch=monkeypatch)
+    def test_quick_save_rejects_invalid_401(self, monkeypatch, db):
+        client, _ = self._setup_client(monkeypatch=monkeypatch, shared_db=db)
         try:
             async def fake_test(*args, **kwargs):
                 return False, "Echec (401)"
@@ -418,15 +435,15 @@ class TestEndpoints:
             data = r.json()
             assert data["success"] is False
             # Pas sauvegardee car 401 (clef invalide)
-            assert not has_credential(db, "test-user-123", "stripe", "api_key")
+            assert not _run(has_credential_async("test-user-123", "stripe", "api_key"))
         finally:
             from api.main import app
             app.dependency_overrides.clear()
 
-    def test_list_mine_returns_masked(self, monkeypatch):
-        client, db = self._setup_client(monkeypatch=monkeypatch)
+    def test_list_mine_returns_masked(self, monkeypatch, db):
+        client, _ = self._setup_client(monkeypatch=monkeypatch, shared_db=db)
         try:
-            save_credential(db, "test-user-123", "stripe", "api_key", SK_LIVE_BARE)
+            _run(save_credential_async("test-user-123", "stripe", "api_key", SK_LIVE_BARE))
             r = client.get("/api/credentials")
             assert r.status_code == 200
             data = r.json()
@@ -436,15 +453,15 @@ class TestEndpoints:
             from api.main import app
             app.dependency_overrides.clear()
 
-    def test_delete_provider(self, monkeypatch):
-        client, db = self._setup_client(monkeypatch=monkeypatch)
+    def test_delete_provider(self, monkeypatch, db):
+        client, _ = self._setup_client(monkeypatch=monkeypatch, shared_db=db)
         try:
-            save_credential(db, "test-user-123", "stripe", "api_key", "x")
-            save_credential(db, "test-user-123", "stripe", "webhook_secret", "y")
+            _run(save_credential_async("test-user-123", "stripe", "api_key", "x"))
+            _run(save_credential_async("test-user-123", "stripe", "webhook_secret", "y"))
             r = client.delete("/api/credentials/stripe")
             assert r.status_code == 200
             assert r.json()["deleted_count"] == 2
-            assert not has_credential(db, "test-user-123", "stripe", "api_key")
+            assert not _run(has_credential_async("test-user-123", "stripe", "api_key"))
         finally:
             from api.main import app
             app.dependency_overrides.clear()

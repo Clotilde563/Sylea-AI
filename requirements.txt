@@ -2,17 +2,53 @@ anthropic>=0.40.0
 rich>=13.7.0
 python-dotenv>=1.0.0
 pydantic>=2.0.0
-pytest>=7.4.0
+# email-validator : requis par pydantic.EmailStr (api/auth/models.RegisterIn).
+# Avant P3, EmailStr etait importe mais inutilise + absent des requirements
+# → crash potentiel sur fresh install des qu'un champ EmailStr est valide.
+email-validator>=2.2.0
+# pytest >=9.0.3 corrige CVE-2025-71176 (cache poisoning via metadata)
+pytest>=9.0.3
 pytest-cov>=4.1.0
+# pytest-asyncio : REQUIS par la suite (asyncio_mode=strict dans pytest.ini) —
+# sans lui, les tests async lèvent "async def not natively supported" en CI.
+pytest-asyncio>=1.0.0
 
 # Web GUI (FastAPI)
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
-python-multipart>=0.0.9
+# python-multipart >=0.0.27 corrige CVE-2026-40347 (DoS) + CVE-2026-42561 (bypass)
+python-multipart>=0.0.27
 httpx>=0.27.0
 aiosqlite>=0.20.0
 
+# ─── Hardening : pins minimums anti-CVE (audit 2026-05-19) ────────────────────
+# cryptography >=46.0.7 corrige CVE-2026-34073 + CVE-2026-39892 (parsing X.509)
+cryptography>=46.0.7
+# lxml >=6.1.0 corrige CVE-2026-41066 (XXE bypass)
+lxml>=6.1.0
+# pygments >=2.20.0 corrige CVE-2026-4539 (ReDoS dans certains lexers)
+pygments>=2.20.0
+# ecdsa >=0.19.2 corrige CVE-2026-33936 (timing). CVE-2024-23342 pas fixable
+# cote ecdsa (limite intrinseque) — on accepte le risque vu nos usages
+# limites (verif JWT id_token Apple via jose, pas signature directe).
+ecdsa>=0.19.2
+
+# Database (migration PostgreSQL 2026-05)
+# SQLAlchemy : ORM + couche unifiee SQLite/PG (RawDBProxy + sessions async)
+# asyncpg    : driver async PostgreSQL (utilise par session_factory)
+# psycopg2   : driver sync PostgreSQL (utilise par RawDBProxy en mode sync)
+# alembic    : migrations de schema (auto-startup en prod PG via api/main.py)
+sqlalchemy>=2.0.0
+asyncpg>=0.29.0
+psycopg2-binary>=2.9.0
+alembic>=1.13.0
+
 # Authentication
+# PyJWT : coeur d'auth de l'app (create/decode des access tokens HS256). Mieux
+# maintenu que python-jose et non concerne par les CVE d'algorithm-confusion.
+PyJWT>=2.8.0
+# python-jose : conserve UNIQUEMENT pour la verification RS256 de l'id_token
+# Apple (api/auth/apple_oauth.py, via JWKS). Plus utilise pour les tokens app.
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
 
@@ -27,3 +63,23 @@ pyperclip>=1.8.0
 
 # Stripe (Agent 3 — Phase 13 — paiements Pro/Team)
 stripe>=10.0.0
+
+# Cache distribue (migration 2026-05-17 : in-memory -> Redis pour multi-worker)
+# redis     : client Redis async (cache_layer + distributed_rate_limiter)
+# fakeredis : mock in-process pour tests sans Redis server
+redis>=5.0.0
+fakeredis>=2.20.0
+
+# ─── Tier 1 observabilite / sso / feature flags (2026-05-18) ─────────────────
+# PyYAML : feature flags backend Local (config/feature_flags.yaml)
+PyYAML>=6.0
+
+# Dependances OPTIONNELLES (decommenter selon le besoin prod) :
+# sentry-sdk[fastapi]>=2.0      # error tracking + APM (init via SENTRY_DSN)
+# growthbook>=1.0                # feature flags backend prod (SaaS ou self-host)
+# python3-saml>=1.16             # SSO SAML 2.0 (Okta / Azure AD / Google W.)
+# hvac>=2.0                      # secrets backend HashiCorp Vault
+# boto3>=1.34                    # secrets backend AWS Secrets Manager
+# google-cloud-secret-manager>=2.0  # secrets backend GCP Secret Manager
+# opentelemetry-distro>=0.45     # tracing distribue (Datadog / Honeycomb)
+# opentelemetry-instrumentation-fastapi>=0.45

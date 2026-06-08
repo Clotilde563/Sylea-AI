@@ -6,9 +6,27 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+
+// Cache du dernier deep-link URL recu. Quand le desktop est lance via un
+// deep-link (cold start), le handler Rust fire AVANT que le JS soit pret.
+// On stocke alors l'URL ici, et le JS la consomme via la commande Tauri
+// `take_pending_deep_link()` au boot. C'est un Option<String> derriere Mutex
+// (pas async, pas de contention car set tres rare).
+lazy_static::lazy_static! {
+    static ref PENDING_DEEP_LINK: Mutex<Option<String>> = Mutex::new(None);
+}
+
+/// Recupere et consomme le dernier deep-link en attente. Appelle au boot
+/// par le listener JS pour rattraper un eventuel cold-start via sylea://.
+/// Retourne None si rien en attente.
+#[tauri::command]
+fn take_pending_deep_link() -> Option<String> {
+    PENDING_DEEP_LINK.lock().ok().and_then(|mut g| g.take())
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Systeme de fichiers — Commandes v1 (inchangees)
@@ -687,6 +705,242 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  Sprint 3 — OAuth Google natif (popup Tauri embarquee)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Permet a l'utilisateur de se connecter avec Google SANS quitter l'app
+// desktop : on ouvre une petite fenetre Tauri (500x700) qui charge l'URL
+// d'auth Google, l'user se connecte dedans, on intercepte le redirect
+// vers /auth/callback?code=... AVANT que la page ne charge, on extrait le
+// `code` et on l'emit vers la UI principale via "google-oauth:code".
+// La UI fait ensuite POST /api/auth/oauth/google avec le code pour
+// recuperer le JWT, exactement comme le flow email/mot de passe.
+//
+// Cookies persistes : la popup partage le profil WebView2 avec la fenetre
+// principale (meme userDataFolder), donc Google se souvient de l'user
+// pour les sessions suivantes (comme dans le navigateur).
+//
+// UX flow (cf. App.tsx bouton onClick) :
+//   1. JS appelle invoke('open_google_oauth_popup', { oauthUrl })
+//   2. Rust cree la fenetre "google-oauth", la centre, focused.
+//   3. User se connecte sur la page Google
+//   4. Google redirige vers <redirect_uri>?code=...
+//   5. Rust intercept la nav (avant chargement), extrait code, emit event
+//   6. JS recoit event, POST le code au backend, recupere JWT, setToken
+//
+// Si l'user ferme la popup sans completer : event "google-oauth:cancelled"
+// Si Google renvoie ?error=... : event "google-oauth:error"
+#[tauri::command]
+async fn open_google_oauth_popup(app: AppHandle, oauth_url: String) -> Result<(), String> {
+    use tauri::WebviewUrl;
+
+    let parsed = oauth_url
+        .parse::<url::Url>()
+        .map_err(|e| format!("URL OAuth Google invalide : {}", e))?;
+
+    // Ferme une eventuelle popup precedente (en cas de double-click)
+    if let Some(existing) = app.get_webview_window("google-oauth") {
+        let _ = existing.close();
+    }
+
+    // Flag partage pour distinguer "fermeture apres code" vs "user a annule"
+    let resolved_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let app_handle = app.clone();
+    let resolved_for_nav = resolved_flag.clone();
+    let app_handle_for_close = app.clone();
+    let resolved_for_close = resolved_flag.clone();
+
+    let popup = tauri::WebviewWindowBuilder::new(
+        &app,
+        "google-oauth",
+        WebviewUrl::External(parsed),
+    )
+    .title("Connexion à Sylea avec Google")
+    .inner_size(500.0, 700.0)
+    .center()
+    .resizable(false)
+    .focused(true)
+    .decorations(true) // garder les boutons OS pour permettre fermer/min
+    .on_navigation(move |url| {
+        let url_str = url.to_string();
+        // Log SANS le code/token (security)
+        let log_prefix: String = url_str.chars().take(60).collect();
+        eprintln!("[google-oauth] nav: {}...", log_prefix);
+
+        // Intercept callback URL avant chargement de la page
+        let is_callback = url_str.starts_with("http://localhost:5173/auth/callback")
+            || url_str.starts_with("https://sylea.ai/auth/callback");
+
+        if is_callback {
+            // Extraire code OR error de la query string.
+            // IMPORTANT : on utilise url.query_pairs() qui URL-DECODE chaque
+            // valeur automatiquement. Sans ca, le `code` de Google (qui
+            // contient `/` encode en `%2F`) arriverait au backend sous forme
+            // encodee et Google rejetterait avec "Malformed auth code".
+            let mut code: Option<String> = None;
+            let mut error: Option<String> = None;
+            for (k, v) in url.query_pairs() {
+                match k.as_ref() {
+                    "code" => code = Some(v.into_owned()),
+                    "error" => error = Some(v.into_owned()),
+                    _ => {}
+                }
+            }
+
+            // Mark resolved BEFORE close (close handler skips cancellation)
+            resolved_for_nav.store(true, std::sync::atomic::Ordering::SeqCst);
+
+            if let Some(c) = code {
+                eprintln!("[google-oauth] code received (length {})", c.len());
+                let _ = app_handle.emit("google-oauth:code", c);
+            } else if let Some(e) = error {
+                eprintln!("[google-oauth] error: {}", e);
+                let _ = app_handle.emit("google-oauth:error", e);
+            }
+
+            // Close the popup
+            if let Some(popup) = app_handle.get_webview_window("google-oauth") {
+                let _ = popup.close();
+            }
+            return false; // Cancel the navigation
+        }
+        true
+    })
+    .build()
+    .map_err(|e| format!("Impossible de creer la popup OAuth : {}", e))?;
+
+    // Detect "user ferme la popup sans completer" -> emit cancelled
+    popup.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            // Si on n'a PAS resolved (pas de code/error capture), c'est une annulation
+            if !resolved_for_close.load(std::sync::atomic::Ordering::SeqCst) {
+                eprintln!("[google-oauth] popup closed without code (cancelled)");
+                let _ = app_handle_for_close.emit("google-oauth:cancelled", ());
+            }
+        }
+    });
+
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Sprint 4 — Stripe Checkout popup (paiement in-app)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Permet a l'utilisateur de payer un abonnement Sylea SANS quitter le desktop.
+// On ouvre une mini-fenetre Tauri (600x800) sur l'URL Stripe Checkout retournee
+// par le backend (POST /api/agent3/stripe/checkout). L'user paie sur Stripe
+// (WebView2 partage le profil avec la fenetre principale donc les cookies de
+// session Stripe persistent entre les sessions).
+//
+// Stripe redirige vers success_url ou cancel_url (configurees backend via env
+// STRIPE_SUCCESS_URL / STRIPE_CANCEL_URL ou fallback localhost:5173/quotas).
+// On intercepte ces 2 URLs AVANT chargement, on extrait le session_id (succes)
+// ou rien (annule), et on emet l'event correspondant.
+//
+// Events emis :
+//   - "stripe-checkout:success"   payload = session_id  (paiement OK)
+//   - "stripe-checkout:cancelled" payload = ()           (user a annule)
+//
+// Cote JS, le desktop refetch /api/agent3/plan apres :success pour rafraichir
+// le plan de l'utilisateur (l'update est fait dans la DB par le webhook
+// Stripe declenche en parallele cote backend).
+#[tauri::command]
+async fn open_stripe_checkout_popup(app: AppHandle, checkout_url: String) -> Result<(), String> {
+    use tauri::WebviewUrl;
+
+    let parsed = checkout_url
+        .parse::<url::Url>()
+        .map_err(|e| format!("URL Stripe invalide : {}", e))?;
+
+    // Ferme une eventuelle popup precedente
+    if let Some(existing) = app.get_webview_window("stripe-checkout") {
+        let _ = existing.close();
+    }
+
+    let resolved_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let app_handle = app.clone();
+    let resolved_for_nav = resolved_flag.clone();
+    let app_handle_for_close = app.clone();
+    let resolved_for_close = resolved_flag.clone();
+
+    let popup = tauri::WebviewWindowBuilder::new(
+        &app,
+        "stripe-checkout",
+        WebviewUrl::External(parsed),
+    )
+    .title("Paiement Sylea — Sécurisé via Stripe")
+    .inner_size(600.0, 800.0)
+    .center()
+    .resizable(false)
+    .focused(true)
+    .decorations(true)
+    .on_navigation(move |url| {
+        let url_str = url.to_string();
+        // Log SANS query string (peut contenir des info sensibles type session_id)
+        let log_prefix: String = url_str.chars().take(60).collect();
+        eprintln!("[stripe-checkout] nav: {}...", log_prefix);
+
+        // Interception des URLs de retour. Le backend par defaut renvoie sur
+        // localhost:5173/quotas?paid=1&session_id=... ou ?cancelled=1, mais on
+        // accepte aussi sylea.ai/quotas pour la prod. Le path /quotas est le
+        // marqueur cle (Stripe ne navigue jamais vers /quotas avant la fin).
+        let is_return = url_str.contains("/quotas")
+            && (url_str.contains("paid=1") || url_str.contains("cancelled=1"));
+
+        if is_return {
+            // Mark resolved BEFORE close
+            resolved_for_nav.store(true, std::sync::atomic::Ordering::SeqCst);
+
+            // Extract session_id si succes
+            let mut session_id: Option<String> = None;
+            let mut is_paid = false;
+            if let Some(query) = url.query() {
+                for pair in query.split('&') {
+                    let mut parts = pair.splitn(2, '=');
+                    match (parts.next(), parts.next()) {
+                        (Some("paid"), Some("1")) => is_paid = true,
+                        (Some("session_id"), Some(v)) => session_id = Some(v.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+
+            if is_paid {
+                let sid = session_id.unwrap_or_default();
+                eprintln!("[stripe-checkout] paid (session_id length {})", sid.len());
+                let _ = app_handle.emit("stripe-checkout:success", sid);
+            } else {
+                eprintln!("[stripe-checkout] cancelled by user");
+                let _ = app_handle.emit("stripe-checkout:cancelled", ());
+            }
+
+            // Close popup
+            if let Some(popup) = app_handle.get_webview_window("stripe-checkout") {
+                let _ = popup.close();
+            }
+            return false; // Cancel navigation
+        }
+        true
+    })
+    .build()
+    .map_err(|e| format!("Impossible de creer la popup Stripe : {}", e))?;
+
+    // Detect "user ferme la popup avant la fin" -> emit cancelled
+    popup.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            if !resolved_for_close.load(std::sync::atomic::Ordering::SeqCst) {
+                eprintln!("[stripe-checkout] popup closed before resolution (cancelled)");
+                let _ = app_handle_for_close.emit("stripe-checkout:cancelled", ());
+            }
+        }
+    });
+
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  Sprint 1 — Commandes window/pill/autostart/updater
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -818,12 +1072,48 @@ fn main() {
     let toggle_shortcut_handler = toggle_shortcut.clone();
     let toggle_shortcut_setup = toggle_shortcut.clone();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // Single-instance : Windows/Linux uniquement. Quand une 2e instance se
+    // lance (par exemple via deep-link sylea://), elle envoie ses arguments
+    // a la 1ere instance puis quitte. La 1ere instance recoit le callback,
+    // ramene sa fenetre au premier plan, et reemet le deep-link au handler
+    // tauri-plugin-deep-link (via plugin-side feature "deep-link").
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            eprintln!("[single-instance] new launch args: {:?}", args);
+            // Bring main window to front
+            use tauri::Manager;
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+            // Note : avec la feature "deep-link" du plugin single-instance,
+            // l'URL deep-link contenue dans `args` est automatiquement
+            // forwardee au plugin deep-link (qui declenche on_open_url).
+            // On n'a donc rien d'autre a faire ici.
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        // Notifications OS natives : Windows toast (Action Center) +
+        // macOS UserNotifications. Le frontend (TrackingNotifBanner) appelle
+        // sendNotification() de @tauri-apps/plugin-notification quand un
+        // event WS de tracking arrive (dilemme_tracking_period, etc.).
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Deep-link : permet a sylea://auth/callback?token=... d'arriver dans
+        // l'app (utilise par Sign in with Google + Apple via navigateur
+        // systeme). Sur Windows/Linux, fonctionne en tandem avec single-instance
+        // : les schemes sont forwardes a l'instance courante au lieu de spawner
+        // une nouvelle fenetre.
+        .plugin(tauri_plugin_deep_link::init())
         .plugin({
             // macos_launcher est gate par cfg(target_os = "macos")
             #[cfg(target_os = "macos")]
@@ -868,6 +1158,48 @@ fn main() {
             if let Err(e) = app.global_shortcut().register(toggle_shortcut_setup) {
                 eprintln!("Global shortcut register failed: {}", e);
             }
+
+            // Deep-link handler : sylea://auth/callback?token=...&...
+            // Utilise pour ramener l'utilisateur sur le desktop apres un OAuth
+            // Google/Apple effectue dans le navigateur systeme.
+            //
+            // Enregistrement du scheme sur Windows : en release build sans MSI
+            // installer, le scheme n'est pas enregistre automatiquement dans le
+            // registre. On force l'enregistrement au demarrage via register_all()
+            // (cree HKCU\Software\Classes\sylea\shell\open\command). C'est idempotent.
+            // Sur macOS le scheme est dans Info.plist, sur Linux dans .desktop file
+            // — l'appel register_all() est un no-op gracieux sur ces plateformes.
+            use tauri_plugin_deep_link::DeepLinkExt;
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            {
+                if let Err(e) = app.deep_link().register_all() {
+                    eprintln!("[deep-link] register_all failed (non-fatal): {}", e);
+                } else {
+                    eprintln!("[deep-link] sylea:// scheme registered");
+                }
+            }
+            let app_handle_for_dl = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    let url_str = url.to_string();
+                    // On NE log JAMAIS le token, mais on log le scheme + path
+                    eprintln!("[deep-link] received: {} {}", url.scheme(), url.path());
+                    // Cache pour cold-start (le JS appelle take_pending_deep_link()
+                    // au boot pour recuperer si l'event a fire avant qu'il soit pret)
+                    if let Ok(mut pending) = PENDING_DEEP_LINK.lock() {
+                        *pending = Some(url_str.clone());
+                    }
+                    // Emit vers la UI pour traitement immediat (si JS deja pret)
+                    let _ = app_handle_for_dl.emit("deep-link:received", url_str);
+                    // Focus la fenetre principale pour que l'utilisateur voie
+                    // le resultat (au lieu de rester sur le navigateur)
+                    if let Some(w) = app_handle_for_dl.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                }
+            });
+
             // If launched with --minimized (autostart), hide window at boot
             let args: Vec<String> = std::env::args().collect();
             if args.iter().any(|a| a == "--minimized") {
@@ -875,6 +1207,28 @@ fn main() {
                     let _ = w.hide();
                 }
             }
+
+            // Debug hook : --test-set-nonce <NONCE> injecte un nonce en
+            // localStorage avant que le JS soit pret. Utilisé pour tester le
+            // flow deep-link OAuth sans avoir besoin de cliquer sur le bouton.
+            // Effet : localStorage.setItem('sylea_desktop_oauth_nonce', <NONCE>)
+            // PAS de garde release/debug — c'est explicit opt-in via CLI flag,
+            // pas un security hole car le nonce ne donne aucun pouvoir seul
+            // (faut aussi un JWT valide signe par le backend pour s'auth).
+            if let Some(idx) = args.iter().position(|a| a == "--test-set-nonce") {
+                if let Some(nonce) = args.get(idx + 1).cloned() {
+                    if let Some(w) = app.get_webview_window("main") {
+                        let safe_nonce = nonce.replace('\\', "").replace('\'', "");
+                        let js = format!(
+                            "setTimeout(() => {{ localStorage.setItem('sylea_desktop_oauth_nonce', '{}'); console.log('[test] nonce injected'); }}, 200)",
+                            safe_nonce
+                        );
+                        let _ = w.eval(&js);
+                        eprintln!("[test] --test-set-nonce scheduled (nonce length {})", safe_nonce.len());
+                    }
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -903,6 +1257,12 @@ fn main() {
             list_installed_clawhub_skills,
             // Phase 2c — Bridge desktop -> web
             open_url,
+            // Deep-link cold-start consumer (recupere URL stockee si JS pas pret)
+            take_pending_deep_link,
+            // Sprint 3 — OAuth Google natif (popup Tauri embarquee)
+            open_google_oauth_popup,
+            // Sprint 4 — Stripe Checkout in-app
+            open_stripe_checkout_popup,
             // Sprint 1 — Window/pill/quit
             toggle_pill_mode,
             toggle_main_window,

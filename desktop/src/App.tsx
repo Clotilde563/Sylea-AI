@@ -12,8 +12,15 @@ import { StatsHUD, type StatsHUDData, pushHist } from './StatsHUD'
 import { CountUp } from './CountUp'
 import { SlideIn } from './Motion'
 import { EcouteActive } from './EcouteActive'
+import { apiFetch } from './apiClient'
 
-const API_BASE = 'http://localhost:8000'
+// API backend URL. En dev : localhost. En prod : configurable via VITE_API_BASE
+// (au build Tauri) ou via window.localStorage 'sylea_api_base' (modifiable user).
+const API_BASE = (
+  (typeof window !== 'undefined' && window.localStorage?.getItem('sylea_api_base')) ||
+  (import.meta.env as any)?.VITE_API_BASE ||
+  'http://localhost:8000'
+)
 
 // ── Palette officielle tech ────────────────────────────────────────────────
 // Source de verite : desktop/index.html (variables CSS --sy-*)
@@ -158,6 +165,36 @@ function App() {
   // depuis le bouton sidebar (Agent 2 only).
   const [ecouteActiveOpen, setEcouteActiveOpen] = useState(false)
 
+  // Sign in with Apple — deep-link callback handler.
+  // Quand l'utilisateur clique "Continuer avec Apple" depuis le desktop, on
+  // ouvre le navigateur systeme vers sylea.ai. Apres auth, le backend
+  // redirige vers sylea://auth/callback?token=<JWT>. macOS/Windows reconnait
+  // le scheme et lance Sylea Agent qui emet l'event 'deep-link:received'.
+  useEffect(() => {
+    const unsub = listen<string>('deep-link:received', (event) => {
+      try {
+        const url = new URL(event.payload)
+        if (url.protocol !== 'sylea:') return
+        // Chemin /auth/callback : extrait le token JWT, stocke localStorage
+        // et notifie le web (qui se reconnecte automatiquement via WS).
+        if (url.pathname === '/auth/callback' || url.hostname === 'auth') {
+          const token = url.searchParams.get('token')
+          if (token) {
+            localStorage.setItem('sylea_auth_token', token)
+            // Le web app sera notifie via storage event au refresh
+            // Notification UI minimale pour confirmer
+            console.log('[deep-link] Apple Sign-In token reçu, longueur:', token.length)
+          }
+        }
+      } catch (e) {
+        console.warn('[deep-link] URL invalide:', e)
+      }
+    })
+    return () => {
+      unsub.then((fn) => fn()).catch(() => {})
+    }
+  }, [])
+
   // Sprint 2.1 — Splash screen au premier mount (1.4s). Une seule fois par
   // session, pas re-affiche apres login/logout.
   const [splashDone, setSplashDone] = useState(false)
@@ -201,9 +238,9 @@ function App() {
   //  1. activatedAgents (source de verite : toggle "Activer cet agent" du web)
   //  2. lastActivityByAgent (recent WS message → agent en train d'agir)
   // Un agent est 'active' s'il est ACTIVE dans le web OU s'il a recemment agi.
-  // agent4 est toujours 'locked' (Super Agent — bientot disponible).
+  // agent3 et agent4 sont 'locked' (Sylea 3 + Super Agent — bientot disponibles).
   const AGENTS: AgentInfo[] = AGENTS_BASE.map(base => {
-    if (base.id === 'agent4') {
+    if (base.id === 'agent3' || base.id === 'agent4') {
       return { ...base, status: 'locked', unread: 0 }
     }
     const explicitlyActivated = activatedAgents[base.id] === true
@@ -271,6 +308,12 @@ function App() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
+  // Plan de l'utilisateur — null = pas encore chargé, 'free' = bloqué, autre = OK
+  const [userPlan, setUserPlan] = useState<string | null>(null)
+  const [planLoading, setPlanLoading] = useState(false)
+  // Etats du bouton "Passer a Sylea Avance" (popup Stripe in-app)
+  const [upgradeLoading, setUpgradeLoading] = useState(false)
+  const [upgradeError, setUpgradeError] = useState('')
   const [wsConnected, setWsConnected] = useState(false)
   // Agent selectionne. null = "auto" : suit l'agent le plus recemment actif.
   // Si l'utilisateur clique sur un agent dans la sidebar, on bascule en mode
@@ -341,26 +384,178 @@ function App() {
     stepsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [steps])
 
-  // Login
+  // Login — passe par apiFetch pour avoir credentials:'include' + le cookie
+  // CSRF auto-fetché si nécessaire (le backend l'exige sur tous les POST
+  // depuis le commit b2fe000 "sécurité niveau pro").
   const handleLogin = async () => {
     setError('')
     try {
-      const res = await fetch(`${API_BASE}/api/auth/login`, {
+      const res = await apiFetch(API_BASE, '/api/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
-      })
+      }, { withAuth: false })  // pas de Bearer pour login (on l'a pas encore)
+
+      // Cas special : 409 Conflict = compte OAuth-only (Google/Apple/GitHub).
+      // Le backend nous demande gentiment d'utiliser le bouton OAuth correspondant.
+      if (res.status === 409) {
+        const errData = await res.json().catch(() => ({}))
+        const detail = errData?.detail || {}
+        if (detail.code === 'USE_OAUTH') {
+          const provider = (detail.provider || 'OAuth').toString()
+          const providerCap = provider.charAt(0).toUpperCase() + provider.slice(1)
+          setError(
+            `Ce compte se connecte avec ${providerCap}. Utilise le bouton "Continuer avec ${providerCap}" ci-dessous.`,
+          )
+          return
+        }
+      }
+
       const data = await res.json()
       if (data.access_token) {
         setToken(data.access_token)
         localStorage.setItem('sylea_desktop_token', data.access_token)
       } else {
-        setError(data.detail || 'Identifiants incorrects')
+        setError(typeof data.detail === 'string' ? data.detail : 'Identifiants incorrects')
       }
-    } catch {
-      setError('Serveur inaccessible (localhost:8000)')
+    } catch (e) {
+      setError(`Serveur inaccessible (${API_BASE}) : ${e instanceof Error ? e.message : ''}`)
     }
   }
+
+  // Listener deep-link OAuth — RESERVE pour Apple Sign-In (et tout flow
+  // OAuth qui passerait par le navigateur systeme en fallback). Google
+  // utilise maintenant la popup Tauri native (cf. bouton onClick plus bas),
+  // PAS le deep-link, donc ce listener ne fire JAMAIS pour Google en flow
+  // normal — il reste juste pour Apple qui dépend du navigateur (Apple
+  // n'autorise pas l'OAuth dans une WebView embarquee).
+  //
+  // Securite : on verifie le nonce contre celui stocke en localStorage avant
+  // de setToken — empeche un attaquant qui devine l'URL deep-link de forger
+  // un login.
+  //
+  // Tolerance UX :
+  //   - Pas de nonce stocke → silence (peut etre un attaquant ou un test
+  //     externe ; rien de bon a montrer a l'user, on ignore juste).
+  //   - Nonce mismatch → erreur friendly (sans le mot "forge" qui fait peur).
+  //   - Succes → setToken + suppression du nonce (idempotent : si l'event
+  //     fire 2x, le second find expectedNonce='' et silence proprement).
+  useEffect(() => {
+    let unsub: (() => void) | undefined
+
+    // Handler factorise (memes regles pour event recu live et URL "pending"
+    // recuperee au boot via take_pending_deep_link).
+    const handleDeepLinkUrl = (urlStr: string) => {
+      try {
+        console.log('[deep-link] received in JS:', urlStr.substring(0, 60) + '...')
+        if (!urlStr.startsWith('sylea://auth/callback')) {
+          console.log('[deep-link] ignored (not /auth/callback path)')
+          return
+        }
+        // Parser l'URL — URL ne sait pas parser sylea:// directement, on
+        // convertit en http:// le temps de l'analyse.
+        const httpUrl = urlStr.replace(/^sylea:\/\//, 'http://')
+        const parsed = new URL(httpUrl)
+        const token = parsed.searchParams.get('token') || ''
+        const nonce = parsed.searchParams.get('nonce') || ''
+        const errorCode = parsed.searchParams.get('error') || ''
+        const errorMessage = parsed.searchParams.get('message') || ''
+        console.log('[deep-link] token:', !!token, 'error:', errorCode, 'nonce:', !!nonce)
+
+        // 1. Verification du nonce AVANT tout (anti-forge, applique aux
+        //    payloads token ET error).
+        const expectedNonce = (() => {
+          try { return localStorage.getItem('sylea_desktop_oauth_nonce') || '' }
+          catch { return '' }
+        })()
+        if (!expectedNonce) {
+          // Pas de flow OAuth en cours → on ignore silencieusement.
+          //   - Test envoie un deep-link bidon
+          //   - Un attaquant forge un deep-link
+          //   - Le user lance l'app directement par un lien stale
+          console.warn('[deep-link] no OAuth in progress, ignoring')
+          return
+        }
+        if (expectedNonce !== nonce) {
+          console.warn('[deep-link] nonce mismatch')
+          setError('Connexion Google échouée. Réessaie en cliquant sur le bouton.')
+          try { localStorage.removeItem('sylea_desktop_oauth_nonce') } catch {}
+          return
+        }
+
+        // 2. Si la webview a envoye une erreur (e.g. 409 USE_PASSWORD)
+        if (errorCode) {
+          try { localStorage.removeItem('sylea_desktop_oauth_nonce') } catch {}
+          if (errorCode === 'USE_PASSWORD') {
+            setError(
+              'Ce compte se connecte avec email/mot de passe. Utilise le formulaire ci-dessus.',
+            )
+          } else {
+            setError(`Connexion Google : ${errorMessage || errorCode}`)
+          }
+          return
+        }
+
+        // 3. Cas normal : token recu
+        if (!token) {
+          console.warn('[deep-link] no token and no error, ignoring')
+          return
+        }
+        console.log('[deep-link] login OK, setting token')
+        try { localStorage.removeItem('sylea_desktop_oauth_nonce') } catch {}
+        localStorage.setItem('sylea_desktop_token', token)
+        setToken(token)
+        setError('')
+      } catch (e) {
+        console.error('[deep-link] parse error:', e)
+        setError(`Erreur deep-link : ${e instanceof Error ? e.message : ''}`)
+      }
+    }
+
+    // Listener temps-reel : deep-link recu pendant que l'app tourne
+    listen<string>('deep-link:received', (event) => {
+      handleDeepLinkUrl(event.payload || '')
+    }).then((fn) => { unsub = fn }).catch(() => {})
+
+    // Cold-start : si l'app vient d'etre lancee VIA un sylea://, le handler
+    // Rust a fire avant que ce listener soit attache. On rattrape via la
+    // commande Tauri take_pending_deep_link() qui consomme l'URL cachee.
+    invoke<string | null>('take_pending_deep_link')
+      .then((url) => {
+        if (url) {
+          console.log('[deep-link] cold-start URL detected, processing')
+          handleDeepLinkUrl(url)
+        }
+      })
+      .catch(() => {})
+
+    return () => { try { unsub?.() } catch {} }
+  }, [])
+
+  // Plan check — charge le plan utilisateur apres login.
+  // Le desktop Syléa Agent est reserve aux abonnes payants (Avance / Pro / Team).
+  // Les comptes "free" voient un ecran de proposition d'upgrade au lieu de l'app.
+  useEffect(() => {
+    if (!token) {
+      setUserPlan(null)
+      return
+    }
+    setPlanLoading(true)
+    apiFetch(API_BASE, '/api/agent3/plan')
+      .then(r => r.json())
+      .then(data => {
+        // Le backend renvoie {"plan": {"name": "free"|"advanced"|"pro"|"team", ...}, "usage": {...}}
+        // (cf. api/routers/agent3_openclaw.py @router.get("/plan"))
+        const planObj = data?.plan || data  // fallback si format change
+        const name = (planObj?.name || planObj?.plan_name || 'free').toLowerCase()
+        setUserPlan(name)
+      })
+      .catch(() => {
+        // En cas d'erreur, on suppose free par defaut (securite : ne pas
+        // ouvrir le desktop si on n'arrive pas a confirmer le tier).
+        setUserPlan('free')
+      })
+      .finally(() => setPlanLoading(false))
+  }, [token])
 
   // Request notification permission on mount
   useEffect(() => {
@@ -372,12 +567,12 @@ function App() {
   // Reminder checker — polls every 30s and fires desktop notifications
   useEffect(() => {
     if (!token) return
-    const headers = { 'Authorization': `Bearer ${token}` }
+    // (headers Bearer + CSRF gérés automatiquement par apiFetch)
     const firedReminders = new Set<number>()
 
     const checkReminders = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/agent2/reminders`, { headers })
+        const res = await apiFetch(API_BASE, '/api/agent2/reminders')
         const reminders = await res.json()
         const now = new Date()
         for (const r of reminders) {
@@ -389,9 +584,9 @@ function App() {
             if (!notifsPausedRef.current && 'Notification' in window && Notification.permission === 'granted') {
               new Notification('⏰ Sylea Agent — Rappel', { body: r.message })
             }
-            // Mark as completed
-            fetch(`${API_BASE}/api/agent2/reminders/${r.id}/complete`, {
-              method: 'POST', headers,
+            // Mark as completed (POST → apiFetch ajoute X-CSRF-Token auto)
+            apiFetch(API_BASE, `/api/agent2/reminders/${r.id}/complete`, {
+              method: 'POST',
             }).catch(() => {})
           }
         }
@@ -406,9 +601,7 @@ function App() {
   // Fetch initial agents activation state au boot/login (snapshot)
   useEffect(() => {
     if (!token) return
-    fetch(`${API_BASE}/api/desktop/agents-activation`, {
-      headers: { 'Authorization': `Bearer ${token}` },
-    })
+    apiFetch(API_BASE, '/api/desktop/agents-activation')
       .then(r => r.json())
       .then(data => {
         if (data?.active) setActivatedAgents(data.active)
@@ -421,9 +614,7 @@ function App() {
     if (!token) return
     const checkOpenClaw = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/agent3/status`, {
-          headers: { 'Authorization': `Bearer ${token}` },
-        })
+        const res = await apiFetch(API_BASE, '/api/agent3/status')
         const data = await res.json()
         setOpenclawConnected(data.openclaw_connected === true)
       } catch {
@@ -445,7 +636,9 @@ function App() {
 
     const connect = () => {
       if (isCleaningUp) return
-      const ws = new WebSocket(`ws://localhost:8000/ws/agent?token=${token}`)
+      // WS URL derive de API_BASE : http:// -> ws://, https:// -> wss://
+      const wsBase = API_BASE.replace(/^http/, 'ws')
+      const ws = new WebSocket(`${wsBase}/ws/agent?token=${token}`)
       wsRef.current = ws
 
       ws.onopen = () => {
@@ -549,10 +742,9 @@ function App() {
             try {
               const { invoke } = await import('@tauri-apps/api/core')
               const content = await invoke('read_file', { path: data.path })
-              // Send content back to server
-              const response = await fetch(`${API_BASE}/api/agent3/file-response`, {
+              // Send content back to server (CSRF auto-géré par apiFetch)
+              await apiFetch(API_BASE, '/api/agent3/file-response', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
                 body: JSON.stringify({ request_id: data.request_id, content, path: data.path }),
               })
             } catch (err) {
@@ -649,9 +841,8 @@ function App() {
       case 'EMAIL': {
         addStep('EMAIL', `${tag}Preparation mail pour ${action.data.to}...`, 'running', sourceAgent)
         try {
-          const res = await fetch(`${API_BASE}/api/agent2/send-email`, {
+          const res = await apiFetch(API_BASE, '/api/agent2/send-email', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
             body: JSON.stringify(action.data),
           })
           const result = await res.json()
@@ -709,9 +900,8 @@ function App() {
       case 'REMINDER':
         addStep('REMINDER', `${tag}Creation rappel: ${action.data.message} a ${action.data.time}...`, 'running', sourceAgent)
         try {
-          await fetch(`${API_BASE}/api/agent2/create-reminder`, {
+          await apiFetch(API_BASE, '/api/agent2/create-reminder', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
             body: JSON.stringify({ time: action.data.time, date: action.data.date, message: action.data.message }),
           })
           addStep('REMINDER', `${tag}Rappel cree: ${action.data.message} — ${action.data.date} a ${action.data.time}`, 'done', sourceAgent)
@@ -811,9 +1001,8 @@ function App() {
           addStep('FILE', `${tag}Fichier lu (${content.length} caracteres)`, 'done', sourceAgent)
           // Envoyer le contenu au backend pour que l'agent l'analyse
           try {
-            await fetch(`${API_BASE}/api/agent3/chat`, {
+            await apiFetch(API_BASE, '/api/agent3/chat', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
               body: JSON.stringify({
                 messages: [{ role: 'user', content: `Voici le contenu du fichier "${readPath}":\n\n${content.substring(0, 10000)}` }],
               }),
@@ -845,9 +1034,9 @@ function App() {
         addStep('FILE', `${tag}Telechargement: ${downloadName}...`, 'running', sourceAgent)
         try {
           const { invoke } = await import('@tauri-apps/api/core')
-          const response = await fetch(`${API_BASE}${downloadUrl}`, {
-            headers: { 'Authorization': `Bearer ${token}` },
-          })
+          // GET binaire : apiFetch ajoute Authorization Bearer + credentials:include.
+          // Le Content-Type:application/json sur le request n'a pas d'effet en GET sans body.
+          const response = await apiFetch(API_BASE, downloadUrl)
           const blob = await response.blob()
           const buffer = await blob.arrayBuffer()
           const bytes = new Uint8Array(buffer)
@@ -890,9 +1079,8 @@ function App() {
         // Auto-download le PDF sur le PC
         try {
           const { invoke } = await import('@tauri-apps/api/core')
-          const response = await fetch(`${API_BASE}${pdfUrl}`, {
-            headers: { 'Authorization': `Bearer ${token}` },
-          })
+          // GET binaire PDF (Bearer + credentials gérés par apiFetch)
+          const response = await apiFetch(API_BASE, pdfUrl)
           if (response.ok) {
             const blob = await response.blob()
             const buffer = await blob.arrayBuffer()
@@ -1025,41 +1213,445 @@ function App() {
   // ── ONBOARDING OPENCLAW (Phase 2b) ──
   // Affichage bloquant au 1er lancement : wizard qui installe OpenClaw,
   // genere le token gateway et propose 5 skills ClawHub pre-coches.
+  // NB : tous les ecrans en dehors du dashboard rendent DesktopTitlebar
+  // explicitement (la fenetre est frameless `decorations: false`) — sinon
+  // l'utilisateur n'a aucun moyen de fermer/reduire/maximiser la fenetre.
   if (isOnboarded === null) {
     return (
-      <div style={{
-        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-        minHeight: '100vh', gap: 18,
-      }}>
-        <SyleaLogo size={48} animated />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{
-            display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
-            background: SY.cyan,
-            boxShadow: `0 0 10px ${SY.cyan}`,
-            animation: 'sy-pulse 1.2s ease-in-out infinite',
-          }} />
-          <span style={{
-            fontFamily: SY.mono, fontSize: 11, letterSpacing: '0.18em',
-            color: SY.textMute, textTransform: 'uppercase',
-          }}>
-            Initialisation du systeme
-          </span>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+        <DesktopTitlebar accent={SY.cyanSoft} />
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', gap: 18,
+        }}>
+          <SyleaLogo size={48} animated />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{
+              display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+              background: SY.cyan,
+              boxShadow: `0 0 10px ${SY.cyan}`,
+              animation: 'sy-pulse 1.2s ease-in-out infinite',
+            }} />
+            <span style={{
+              fontFamily: SY.mono, fontSize: 11, letterSpacing: '0.18em',
+              color: SY.textMute, textTransform: 'uppercase',
+            }}>
+              Initialisation du systeme
+            </span>
+          </div>
         </div>
       </div>
     )
   }
   if (isOnboarded === false) {
-    return <OpenClawOnboarding onComplete={() => setIsOnboarded(true)} />
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+        <DesktopTitlebar accent={SY.cyanSoft} />
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          <OpenClawOnboarding onComplete={() => setIsOnboarded(true)} />
+        </div>
+      </div>
+    )
   }
 
   // ── LOGIN ──
+  // ─── Gate plan free ─────────────────────────────────────────────────────
+  // Design CALQUE sur frontend/src/pages/QuotasPage.tsx (web canonical) pour
+  // que la page d'abonnement desktop et web soient visuellement identiques.
+  // Le bouton "Passer a Avance" declenche le flow Stripe popup in-app.
+  if (token && userPlan === 'free' && !planLoading) {
+    // Lance le paiement Stripe via popup Tauri (reutilise par le bouton CTA)
+    const launchStripeUpgrade = async () => {
+      setUpgradeLoading(true)
+      setUpgradeError('')
+      let succUnsub: (() => void) | undefined
+      let cancUnsub: (() => void) | undefined
+      const cleanup = () => {
+        try { succUnsub?.() } catch {}
+        try { cancUnsub?.() } catch {}
+      }
+      try {
+        const res = await apiFetch(API_BASE, '/api/agent3/stripe/checkout', {
+          method: 'POST',
+          body: JSON.stringify({ plan: 'advanced' }),
+        })
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}))
+          const msg = typeof err.detail === 'string' ? err.detail : (err.detail?.message || `Erreur ${res.status}`)
+          throw new Error(msg)
+        }
+        const data = await res.json()
+        if (!data.ok || !data.url) throw new Error(data.error || 'Stripe non configuré')
+
+        const settled = new Promise<'success' | 'cancelled'>((resolve) => {
+          listen<string>('stripe-checkout:success', () => { cleanup(); resolve('success') })
+            .then((fn) => { succUnsub = fn }).catch(() => {})
+          listen('stripe-checkout:cancelled', () => { cleanup(); resolve('cancelled') })
+            .then((fn) => { cancUnsub = fn }).catch(() => {})
+        })
+
+        await invoke('open_stripe_checkout_popup', { checkoutUrl: data.url })
+        const outcome = await settled
+        if (outcome === 'cancelled') {
+          setUpgradeLoading(false)
+          return
+        }
+
+        // Polling pour laisser le webhook Stripe update la DB (1-3s)
+        let attempts = 0
+        let newPlan: string = 'free'
+        while (attempts < 10 && newPlan === 'free') {
+          await new Promise(r => setTimeout(r, 800))
+          attempts++
+          try {
+            const pRes = await apiFetch(API_BASE, '/api/agent3/plan')
+            const pData = await pRes.json()
+            const planObj = pData?.plan || pData
+            newPlan = (planObj?.name || 'free').toLowerCase()
+          } catch { /* retry */ }
+        }
+        setUserPlan(newPlan)
+        setUpgradeLoading(false)
+      } catch (e) {
+        cleanup()
+        console.error('[stripe-upgrade]', e)
+        setUpgradeError(`Paiement impossible : ${e instanceof Error ? e.message : ''}`)
+        setUpgradeLoading(false)
+      }
+    }
+
+    // Features verbatim de QuotasPage.tsx ADVANCED_FEATURES (web canonical)
+    const FREE_FEATURES = [
+      { label: 'Agent Syléa 1 (compagnon personnel)', state: 'included' as const },
+      { label: 'Profil personnalisé + objectif de vie', state: 'included' as const },
+      { label: 'Analyse de choix, évènements et messages Agent 1 — limité à 10 actions / jour', state: 'included' as const },
+      { label: 'Suivi de progression simplifié', state: 'included' as const },
+      { label: '« Que faire ? » — plan d\'action IA quotidien', state: 'excluded' as const },
+      { label: 'Agent Syléa 2 (assistant exécutant)', state: 'excluded' as const },
+      { label: 'Syléa Desktop (mails, calendrier, notes…)', state: 'excluded' as const },
+      { label: 'Intégrations', state: 'excluded' as const },
+    ]
+    const ADVANCED_FEATURES = [
+      { label: 'Agent Syléa 1 + Agent Syléa 2 (assistant exécutant)', state: 'included' as const },
+      { label: '« Que faire ? » — plan d\'action IA quotidien', state: 'included' as const },
+      { label: 'Syléa Desktop (mails, calendrier, notes, prise de cours…)', state: 'included' as const },
+      { label: 'Analyses, évènements et messages — limité à 30 actions / jour', state: 'included' as const },
+      { label: 'Statistiques avancées + courbes de progression', state: 'included' as const },
+      { label: 'Notifications intelligentes & vérifications de tâches', state: 'included' as const },
+      { label: 'Intégrations', state: 'excluded' as const },
+    ]
+
+    // FeatureItem inline — meme look que QuotasPage
+    const FeatureItem = ({ label, state }: { label: string; state: 'included' | 'excluded' }) => {
+      const icon = state === 'included' ? '✓' : '✕'
+      const bg = state === 'included'
+        ? 'linear-gradient(135deg, rgba(124,58,237,0.25), rgba(212,160,23,0.25))'
+        : 'rgba(255,255,255,0.04)'
+      const border = state === 'included'
+        ? '1px solid rgba(212,160,23,0.4)'
+        : '1px solid rgba(255,255,255,0.08)'
+      return (
+        <li style={{
+          display: 'flex', alignItems: 'center', gap: '0.55rem',
+          padding: '0.4rem 0.55rem', borderRadius: 6,
+          background: state === 'included' ? 'rgba(255,255,255,0.02)' : 'transparent',
+          listStyle: 'none',
+        }}>
+          <span style={{
+            flexShrink: 0, width: 20, height: 20, borderRadius: '50%',
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            background: bg, border, fontSize: 10, fontWeight: 700,
+            color: state === 'included' ? '#fff' : 'rgba(255,255,255,0.45)',
+          }}>{icon}</span>
+          <span style={{
+            fontSize: 11.5,
+            color: state === 'included' ? '#e6f0ff' : 'rgba(230,240,255,0.45)',
+            textDecoration: state === 'excluded' ? 'line-through' : 'none',
+            opacity: state === 'excluded' ? 0.55 : 1,
+            lineHeight: 1.4,
+          }}>{label}</span>
+        </li>
+      )
+    }
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+        <DesktopTitlebar accent={SY.cyanSoft} />
+        {/* Animations + orbs (memes effets que QuotasPage web) */}
+        <style>{`
+          @keyframes shimmer-gold {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+          }
+          @keyframes pulse-glow-cta {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(212,160,23,0.4), 0 8px 32px rgba(124,58,237,0.25); }
+            50% { box-shadow: 0 0 0 8px rgba(212,160,23,0), 0 12px 40px rgba(212,160,23,0.35); }
+          }
+          @keyframes float-up-card {
+            from { opacity: 0; transform: translateY(16px); }
+            to { opacity: 1; transform: translateY(0); }
+          }
+          .desktop-gold-shimmer {
+            background: linear-gradient(90deg, #fbbf24, #fde68a, #fbbf24, #d4a017, #fbbf24);
+            background-size: 200% 100%;
+            -webkit-background-clip: text; background-clip: text;
+            -webkit-text-fill-color: transparent; color: transparent;
+            animation: shimmer-gold 4s ease-in-out infinite;
+          }
+          .desktop-advanced-card { animation: float-up-card 0.6s ease-out 0.1s both; }
+          .desktop-free-card { animation: float-up-card 0.5s ease-out; }
+          .desktop-advanced-cta { animation: pulse-glow-cta 2.4s ease-in-out infinite; }
+        `}</style>
+        <div style={{
+          flex: 1, overflow: 'auto', position: 'relative',
+          background: '#0a0612',
+        }}>
+          {/* Background orbs (violet + gold) */}
+          <div style={{
+            position: 'absolute', width: 360, height: 360, top: -100, right: -100,
+            borderRadius: '50%', filter: 'blur(80px)', opacity: 0.30,
+            background: 'radial-gradient(circle, rgba(124,58,237,0.5), transparent)',
+            pointerEvents: 'none',
+          }} />
+          <div style={{
+            position: 'absolute', width: 440, height: 440, bottom: -150, left: -150,
+            borderRadius: '50%', filter: 'blur(80px)', opacity: 0.30,
+            background: 'radial-gradient(circle, rgba(212,160,23,0.4), transparent)',
+            pointerEvents: 'none',
+          }} />
+
+          <div style={{
+            position: 'relative', zIndex: 1,
+            maxWidth: 640, margin: '0 auto',
+            padding: '1.5rem 1.25rem 2rem',
+          }}>
+            {/* Hero */}
+            <div style={{ textAlign: 'center', marginBottom: '1.5rem' }}>
+              <div style={{
+                display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+                padding: '0.3rem 0.85rem', borderRadius: 999, marginBottom: '0.8rem',
+                background: 'rgba(124,58,237,0.12)',
+                border: '1px solid rgba(124,58,237,0.25)',
+                fontSize: 10, fontWeight: 600, letterSpacing: '0.08em',
+                color: '#a78bfa', textTransform: 'uppercase',
+              }}>
+                <span>◈</span> Choisis ton plan
+              </div>
+              <h1 style={{
+                fontSize: 22, fontWeight: 800,
+                margin: '0 0 0.5rem', lineHeight: 1.2, color: '#e6f0ff',
+              }}>
+                Débloque ton plein potentiel<br />
+                <span className="desktop-gold-shimmer">avec Sylea Avancé.</span>
+              </h1>
+              <p style={{
+                color: 'rgba(230,240,255,0.55)', fontSize: 12,
+                margin: '0 auto', lineHeight: 1.5, maxWidth: 440,
+              }}>
+                Sylea t'accompagne chaque jour vers tes objectifs avec un coach IA personnalisé.{' '}
+                <strong style={{ color: 'rgba(230,240,255,0.85)' }}>Sans engagement, annulable à tout moment.</strong>
+              </p>
+            </div>
+
+            {/* Card Gratuit (plan actuel) */}
+            <div className="desktop-free-card" style={{
+              background: 'rgba(255,255,255,0.02)',
+              border: '1px solid rgba(255,255,255,0.06)',
+              borderRadius: 14,
+              padding: '1.1rem 1.25rem',
+              marginBottom: '0.85rem',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 12 }}>
+                <div>
+                  <div style={{
+                    display: 'inline-flex', alignItems: 'center',
+                    padding: '0.2rem 0.55rem', borderRadius: 999,
+                    background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)',
+                    fontSize: 9, fontWeight: 600, color: 'rgba(230,240,255,0.55)',
+                    textTransform: 'uppercase', letterSpacing: '0.08em',
+                    marginBottom: 8,
+                  }}>Plan actuel</div>
+                  <h2 style={{ fontSize: 18, fontWeight: 700, margin: 0, color: '#e6f0ff' }}>Gratuit</h2>
+                  <p style={{ fontSize: 11, color: 'rgba(230,240,255,0.55)', margin: '2px 0 0' }}>
+                    Pour découvrir Sylea
+                  </p>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 3, justifyContent: 'flex-end' }}>
+                    <span style={{ fontSize: 28, fontWeight: 800, color: '#e6f0ff' }}>0</span>
+                    <span style={{ fontSize: 16, fontWeight: 600, color: 'rgba(230,240,255,0.65)' }}>€</span>
+                  </div>
+                  <div style={{ fontSize: 10, color: 'rgba(230,240,255,0.45)' }}>/mois</div>
+                </div>
+              </div>
+              <ul style={{ padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {FREE_FEATURES.map((f) => <FeatureItem key={f.label} label={f.label} state={f.state} />)}
+              </ul>
+            </div>
+
+            {/* Card Avancé (le plus complet) */}
+            <div className="desktop-advanced-card" style={{
+              background: 'linear-gradient(155deg, rgba(124,58,237,0.12) 0%, rgba(15,12,30,0.85) 35%, rgba(212,160,23,0.12) 100%)',
+              borderRadius: 14,
+              padding: '1.25rem 1.25rem 1.1rem',
+              position: 'relative',
+              boxShadow: '0 8px 32px rgba(124,58,237,0.18)',
+            }}>
+              {/* Border gradient overlay */}
+              <div style={{
+                position: 'absolute', inset: 0, borderRadius: 14,
+                padding: 1.5,
+                background: 'linear-gradient(135deg, rgba(124,58,237,0.6), rgba(212,160,23,0.6), rgba(124,58,237,0.6))',
+                WebkitMask: 'linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)',
+                WebkitMaskComposite: 'xor', maskComposite: 'exclude',
+                pointerEvents: 'none',
+              }} />
+              {/* Badge "Le plus complet" centre haut */}
+              <div style={{
+                position: 'absolute', top: -10, left: '50%', transform: 'translateX(-50%)',
+                background: 'linear-gradient(135deg, #7c3aed, #d4a017, #fbbf24)',
+                backgroundSize: '200% 100%',
+                animation: 'shimmer-gold 3s ease-in-out infinite',
+                color: '#fff', fontSize: 9, fontWeight: 700,
+                padding: '0.25rem 0.75rem', borderRadius: 999,
+                letterSpacing: '0.08em', textTransform: 'uppercase',
+                boxShadow: '0 4px 16px rgba(124,58,237,0.4)',
+                whiteSpace: 'nowrap', zIndex: 2,
+              }}>
+                ⭐ Le plus complet
+              </div>
+
+              <div style={{ position: 'relative', zIndex: 1 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 12, marginTop: 6 }}>
+                  <div>
+                    <div style={{
+                      display: 'inline-flex', alignItems: 'center',
+                      padding: '0.2rem 0.55rem', borderRadius: 999,
+                      background: 'rgba(212,160,23,0.12)', border: '1px solid rgba(212,160,23,0.3)',
+                      fontSize: 9, fontWeight: 600, color: '#fbbf24',
+                      textTransform: 'uppercase', letterSpacing: '0.08em',
+                      marginBottom: 8,
+                    }}>✨ Recommandé</div>
+                    <h2 className="desktop-gold-shimmer" style={{ fontSize: 20, fontWeight: 800, margin: 0 }}>Avancé</h2>
+                    <p style={{ fontSize: 11, color: 'rgba(230,240,255,0.55)', margin: '2px 0 0' }}>
+                      Pour exploiter Sylea à 100%
+                    </p>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 3, justifyContent: 'flex-end' }}>
+                      <span style={{
+                        fontSize: 28, fontWeight: 800,
+                        background: 'linear-gradient(135deg, #fbbf24, #d4a017)',
+                        WebkitBackgroundClip: 'text', backgroundClip: 'text',
+                        WebkitTextFillColor: 'transparent',
+                      }}>19,99</span>
+                      <span style={{ fontSize: 16, fontWeight: 600, color: '#d4a017' }}>€</span>
+                    </div>
+                    <div style={{ fontSize: 10, color: 'rgba(230,240,255,0.45)' }}>/mois</div>
+                  </div>
+                </div>
+                <p style={{ fontSize: 10.5, color: 'rgba(230,240,255,0.55)', margin: '0 0 12px' }}>
+                  Soit <strong style={{ color: '#d4a017' }}>moins d'1 café par semaine</strong>.
+                </p>
+                <ul style={{ padding: 0, margin: '0 0 14px', display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {ADVANCED_FEATURES.map((f) => <FeatureItem key={f.label} label={f.label} state={f.state} />)}
+                </ul>
+                <button
+                  onClick={launchStripeUpgrade}
+                  disabled={upgradeLoading}
+                  className="desktop-advanced-cta"
+                  style={{
+                    width: '100%', padding: '0.85rem 1rem',
+                    background: 'linear-gradient(135deg, #7c3aed 0%, #a855f7 30%, #d4a017 70%, #fbbf24 100%)',
+                    backgroundSize: '200% 100%',
+                    border: 'none', borderRadius: 10,
+                    color: '#fff', fontWeight: 700, fontSize: 13,
+                    cursor: upgradeLoading ? 'wait' : 'pointer',
+                    letterSpacing: '0.02em',
+                    transition: 'transform 0.15s, background-position 0.3s',
+                    opacity: upgradeLoading ? 0.7 : 1,
+                  }}
+                  onMouseEnter={e => { if (!upgradeLoading) { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.backgroundPosition = '100% 0' } }}
+                  onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.backgroundPosition = '0% 0' }}
+                >
+                  {upgradeLoading ? '⏳ Ouverture du paiement…' : '🚀 Passer à Avancé'}
+                </button>
+                <p style={{ fontSize: 10, color: 'rgba(230,240,255,0.55)', textAlign: 'center', margin: '8px 0 0' }}>
+                  ✓ Sans engagement &nbsp;·&nbsp; ✓ Annulable en 1 clic
+                </p>
+                {upgradeError && (
+                  <div style={{
+                    marginTop: 10, padding: '8px 10px',
+                    background: 'rgba(239,68,68,0.08)',
+                    border: '1px solid rgba(239,68,68,0.25)',
+                    borderRadius: 6, fontSize: 11, color: '#fca5a5',
+                  }}>✗ {upgradeError}</div>
+                )}
+              </div>
+            </div>
+
+            {/* Trust block (3 colonnes) */}
+            <div style={{
+              display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10,
+              marginTop: '1.2rem', padding: '1rem',
+              background: 'rgba(255,255,255,0.02)',
+              border: '1px solid rgba(255,255,255,0.05)',
+              borderRadius: 12,
+            }}>
+              {[
+                { icon: '🔒', title: 'Données chiffrées', desc: 'Tes infos restent sur ton compte.' },
+                { icon: '⚡', title: 'Annulation immédiate', desc: 'Pas d\'engagement, pas de question.' },
+                { icon: '💳', title: 'Paiement sécurisé', desc: 'Géré par Stripe.' },
+              ].map((b) => (
+                <div key={b.title} style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: 18, marginBottom: 3 }}>{b.icon}</div>
+                  <div style={{ fontSize: 10.5, fontWeight: 700, color: '#e6f0ff', marginBottom: 2 }}>
+                    {b.title}
+                  </div>
+                  <div style={{ fontSize: 9.5, color: 'rgba(230,240,255,0.55)', lineHeight: 1.4 }}>
+                    {b.desc}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Se deconnecter (discret en bas) */}
+            <div style={{ textAlign: 'center', marginTop: '1.2rem' }}>
+              <button
+                onClick={() => {
+                  setToken(null)
+                  localStorage.removeItem('sylea_desktop_token')
+                  setUserPlan(null)
+                }}
+                style={{
+                  padding: '0.4rem 0.8rem', borderRadius: 6,
+                  background: 'transparent',
+                  border: '1px solid rgba(255,255,255,0.08)',
+                  color: 'rgba(230,240,255,0.5)',
+                  fontWeight: 500, fontSize: 10.5, letterSpacing: '0.05em',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = 'rgba(230,240,255,0.8)' }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(230,240,255,0.5)' }}
+              >
+                Se déconnecter
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   if (!token) {
     return (
-      <div style={{
-        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-        minHeight: '100vh', padding: '2rem',
-      }}>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+        <DesktopTitlebar accent={SY.cyanSoft} />
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', padding: '2rem',
+          overflow: 'auto',
+        }}>
         {/* Logo officiel + wordmark — 3D hover (Sprint 2.10) */}
         <SyleaWordmark logoSize={48} fontSize={20} gap={14} animated hover3d />
 
@@ -1139,16 +1731,184 @@ function App() {
             cursor: 'pointer',
             boxShadow: `0 0 0 1px rgba(0,200,255,0.3), 0 6px 20px rgba(0,200,255,0.18)`,
             fontFamily: SY.mono,
+            border: 'none',
           }}>
             ▸ Connexion
+          </button>
+
+          {/* Divider OU */}
+          <div style={{
+            margin: '18px 0 14px', display: 'flex', alignItems: 'center', gap: 10,
+            color: SY.textDim, fontSize: 10, fontFamily: SY.mono, letterSpacing: '0.15em',
+          }}>
+            <div style={{ flex: 1, height: 1, background: SY.border }} />
+            <span>OU</span>
+            <div style={{ flex: 1, height: 1, background: SY.border }} />
+          </div>
+
+          {/* Bouton Continuer avec Google — popup Tauri 100% in-app.
+              Pas de navigateur systeme qui s'ouvre. La popup est une mini
+              fenetre Tauri (WebView2 sous Windows) qui charge directement
+              la page Google OAuth.
+
+              Trade-off accepte : la 1ere fois, l'user doit taper son email
+              (la WebView n'a pas les cookies de Chrome). Mais les fois
+              suivantes, Google se souvient de lui (cookies sauves dans le
+              UserDataFolder Tauri qui persiste).
+
+              Flow :
+                1. Demande l'URL Google OAuth au backend (state=desktop_native)
+                2. invoke('open_google_oauth_popup', { oauthUrl })
+                   → Rust ouvre une fenetre WebView 500x700 sur cette URL
+                3. User se connecte a Google DANS la popup
+                4. Google redirige vers /auth/callback?code=... — Rust intercepte
+                   AVANT chargement de la page, extrait le code, ferme la popup
+                5. Le code est emit en event 'google-oauth:code'
+                6. On l'echange contre un JWT via POST /api/auth/oauth/google
+                7. setToken(jwt) → user connecte. 100% in-app, jamais sorti
+                   de Sylea. */}
+          <button
+            onClick={async () => {
+              setError('')
+              const webBase = API_BASE.includes('localhost')
+                ? 'http://localhost:5173'
+                : 'https://sylea.ai'
+              const redirectUri = `${webBase}/auth/callback`
+              let codeUnsub: (() => void) | undefined
+              let errorUnsub: (() => void) | undefined
+              let cancelUnsub: (() => void) | undefined
+              const cleanup = () => {
+                try { codeUnsub?.() } catch {}
+                try { errorUnsub?.() } catch {}
+                try { cancelUnsub?.() } catch {}
+              }
+              try {
+                // 1. Demande l'URL Google OAuth au backend (state=desktop_native
+                //    indique au backend que c'est le flow popup — pas utilise
+                //    pour la logique mais pratique pour les analytics).
+                const urlRes = await apiFetch(
+                  API_BASE,
+                  `/api/auth/oauth/google/url?redirect_uri=${encodeURIComponent(redirectUri)}&state=desktop_native`,
+                  {},
+                  { withAuth: false },
+                )
+                if (!urlRes.ok) throw new Error("Backend n'a pas retourne l'URL Google")
+                const { url: oauthUrl } = await urlRes.json()
+
+                // 2. Race promise : code (succes) | error (Google) | cancelled (close popup)
+                const codePromise = new Promise<string>((resolve, reject) => {
+                  const timeout = setTimeout(() => {
+                    cleanup()
+                    reject(new Error('Timeout (3 minutes)'))
+                  }, 180_000)
+
+                  listen<string>('google-oauth:code', (event) => {
+                    clearTimeout(timeout); cleanup()
+                    console.log('[oauth-button] code received')
+                    resolve(event.payload)
+                  }).then((fn) => { codeUnsub = fn }).catch(() => {})
+
+                  listen<string>('google-oauth:error', (event) => {
+                    clearTimeout(timeout); cleanup()
+                    reject(new Error(`Google : ${event.payload}`))
+                  }).then((fn) => { errorUnsub = fn }).catch(() => {})
+
+                  listen('google-oauth:cancelled', () => {
+                    clearTimeout(timeout); cleanup()
+                    reject(new Error('cancelled'))
+                  }).then((fn) => { cancelUnsub = fn }).catch(() => {})
+                })
+
+                // 3. Ouvre la popup Tauri
+                await invoke('open_google_oauth_popup', { oauthUrl })
+
+                // 4. Attend que l'user se connecte (ou annule)
+                const code = await codePromise
+
+                // 5. Echange le code contre un JWT via le backend.
+                const jwtRes = await apiFetch(
+                  API_BASE,
+                  '/api/auth/oauth/google',
+                  {
+                    method: 'POST',
+                    body: JSON.stringify({ code, redirect_uri: redirectUri }),
+                  },
+                  { withAuth: false },
+                )
+
+                // Cas special : 409 USE_PASSWORD = compte existe deja en
+                // email/mdp. Politique "1 compte = 1 methode" — on refuse de
+                // lier Google et on guide l'user vers le formulaire.
+                if (jwtRes.status === 409) {
+                  const errData = await jwtRes.json().catch(() => ({}))
+                  const detail = errData?.detail || {}
+                  if (detail.code === 'USE_PASSWORD') {
+                    throw new Error('USE_PASSWORD')
+                  }
+                }
+
+                if (!jwtRes.ok) {
+                  const errData = await jwtRes.json().catch(() => ({}))
+                  const detail = errData?.detail
+                  const msg = typeof detail === 'string'
+                    ? detail
+                    : (detail?.message || 'Echange du code Google a echoue')
+                  throw new Error(msg)
+                }
+                const { access_token } = await jwtRes.json()
+
+                // 6. Connecte l'user, comme apres un login email/mdp
+                localStorage.setItem('sylea_desktop_token', access_token)
+                setToken(access_token)
+              } catch (e) {
+                cleanup()
+                const msg = e instanceof Error ? e.message : 'erreur'
+                if (msg === 'cancelled') {
+                  // L'user a juste ferme la popup, pas d'erreur a montrer
+                  console.log('[oauth-button] cancelled by user')
+                } else if (msg === 'USE_PASSWORD') {
+                  // Compte existe en email/mdp — on guide vers le formulaire
+                  setError(
+                    'Ce compte se connecte avec email/mot de passe. Utilise le formulaire ci-dessus.',
+                  )
+                } else {
+                  console.error('[oauth-button] failed:', msg)
+                  setError(`Connexion Google : ${msg}`)
+                }
+              }
+            }}
+            style={{
+              width: '100%', padding: '10px 14px', borderRadius: 8,
+              background: '#fff',
+              color: '#1f2937',
+              fontWeight: 600, fontSize: 13, letterSpacing: '0.05em',
+              cursor: 'pointer',
+              border: 'none',
+              fontFamily: SY.mono,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+              transition: 'transform 0.15s, box-shadow 0.15s',
+              boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-1px)' }}
+            onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)' }}
+            title="Ouvre le navigateur, fais ton OAuth Google, et tu reviens automatiquement loggé sur le desktop."
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24">
+              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4" />
+              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
+              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+            </svg>
+            Continuer avec Google
           </button>
 
           <div style={{
             marginTop: 16, fontSize: 10, fontFamily: SY.mono,
             color: SY.textDim, textAlign: 'center', letterSpacing: '0.1em',
           }}>
-            Secure · End-to-end · <span style={{ color: SY.cyan }}>localhost:8000</span>
+            Secure · End-to-end · <span style={{ color: SY.cyan }}>{API_BASE.replace(/^https?:\/\//, '')}</span>
           </div>
+        </div>
         </div>
       </div>
     )

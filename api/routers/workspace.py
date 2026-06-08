@@ -17,7 +17,9 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
+from api.database import get_session_factory
 from api.dependencies import get_db, get_optional_user
 from sylea.core.storage.database import DatabaseManager
 
@@ -373,15 +375,25 @@ async def list_projects(
 ):
     """List all projects for the current user."""
     _ensure_workspace_tables(db)
-    if user_id:
-        rows = db.conn.execute(
-            "SELECT * FROM workspace_projects WHERE auth_user_id = ? ORDER BY updated_at DESC",
-            (user_id,),
-        ).fetchall()
-    else:
-        rows = db.conn.execute(
-            "SELECT * FROM workspace_projects ORDER BY updated_at DESC"
-        ).fetchall()
+    factory = get_session_factory()
+    async with factory() as session:
+        if user_id:
+            result = await session.execute(
+                text(
+                    "SELECT id, auth_user_id, name, description, category, created_at, updated_at "
+                    "FROM workspace_projects WHERE auth_user_id = :uid "
+                    "ORDER BY updated_at DESC"
+                ),
+                {"uid": user_id},
+            )
+        else:
+            result = await session.execute(
+                text(
+                    "SELECT id, auth_user_id, name, description, category, created_at, updated_at "
+                    "FROM workspace_projects ORDER BY updated_at DESC"
+                )
+            )
+        rows = result.mappings().all()
     return [
         ProjectOut(
             id=r["id"], name=r["name"], description=r["description"],
@@ -401,12 +413,29 @@ async def create_project(
     _ensure_workspace_tables(db)
     project_id = _gen_id()
     now = _now()
-    db.conn.execute(
-        """INSERT INTO workspace_projects (id, auth_user_id, name, description, category, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (project_id, user_id or "", data.name, data.description, data.category, now, now),
-    )
-    db.conn.commit()
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(
+                text(
+                    "INSERT INTO workspace_projects "
+                    "(id, auth_user_id, name, description, category, created_at, updated_at) "
+                    "VALUES (:id, :uid, :name, :description, :category, :created_at, :updated_at)"
+                ),
+                {
+                    "id": project_id,
+                    "uid": user_id or "",
+                    "name": data.name,
+                    "description": data.description,
+                    "category": data.category,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
     return ProjectOut(
         id=project_id, name=data.name, description=data.description,
         category=data.category, created_at=now, updated_at=now,
@@ -421,22 +450,37 @@ async def get_project(
 ):
     """Get project detail with its documents."""
     _ensure_workspace_tables(db)
-    if user_id:
-        row = db.conn.execute(
-            "SELECT * FROM workspace_projects WHERE id = ? AND auth_user_id = ?",
-            (project_id, user_id),
-        ).fetchone()
-    else:
-        row = db.conn.execute(
-            "SELECT * FROM workspace_projects WHERE id = ?", (project_id,)
-        ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Projet non trouve")
+    factory = get_session_factory()
+    async with factory() as session:
+        if user_id:
+            result = await session.execute(
+                text(
+                    "SELECT id, auth_user_id, name, description, category, created_at, updated_at "
+                    "FROM workspace_projects WHERE id = :pid AND auth_user_id = :uid"
+                ),
+                {"pid": project_id, "uid": user_id},
+            )
+        else:
+            result = await session.execute(
+                text(
+                    "SELECT id, auth_user_id, name, description, category, created_at, updated_at "
+                    "FROM workspace_projects WHERE id = :pid"
+                ),
+                {"pid": project_id},
+            )
+        row = result.mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Projet non trouve")
 
-    docs = db.conn.execute(
-        "SELECT * FROM workspace_documents WHERE project_id = ? ORDER BY updated_at DESC",
-        (project_id,),
-    ).fetchall()
+        docs_result = await session.execute(
+            text(
+                "SELECT id, project_id, auth_user_id, title, doc_type, content_json, filepath, "
+                "filesize, tags, is_template, created_at, updated_at "
+                "FROM workspace_documents WHERE project_id = :pid ORDER BY updated_at DESC"
+            ),
+            {"pid": project_id},
+        )
+        docs = docs_result.mappings().all()
 
     return ProjectDetailOut(
         id=row["id"], name=row["name"], description=row["description"],
@@ -462,23 +506,37 @@ async def delete_project(
 ):
     """Delete a project and all its documents."""
     _ensure_workspace_tables(db)
-    if user_id:
-        db.conn.execute(
-            "DELETE FROM workspace_documents WHERE project_id = ? AND auth_user_id = ?",
-            (project_id, user_id),
-        )
-        db.conn.execute(
-            "DELETE FROM workspace_projects WHERE id = ? AND auth_user_id = ?",
-            (project_id, user_id),
-        )
-    else:
-        db.conn.execute(
-            "DELETE FROM workspace_documents WHERE project_id = ?", (project_id,)
-        )
-        db.conn.execute(
-            "DELETE FROM workspace_projects WHERE id = ?", (project_id,)
-        )
-    db.conn.commit()
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            if user_id:
+                await session.execute(
+                    text(
+                        "DELETE FROM workspace_documents "
+                        "WHERE project_id = :pid AND auth_user_id = :uid"
+                    ),
+                    {"pid": project_id, "uid": user_id},
+                )
+                await session.execute(
+                    text(
+                        "DELETE FROM workspace_projects "
+                        "WHERE id = :pid AND auth_user_id = :uid"
+                    ),
+                    {"pid": project_id, "uid": user_id},
+                )
+            else:
+                await session.execute(
+                    text("DELETE FROM workspace_documents WHERE project_id = :pid"),
+                    {"pid": project_id},
+                )
+                await session.execute(
+                    text("DELETE FROM workspace_projects WHERE id = :pid"),
+                    {"pid": project_id},
+                )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
     return {"success": True, "message": "Projet supprime"}
 
 
@@ -495,19 +553,41 @@ async def add_document_to_project(
     _ensure_workspace_tables(db)
     doc_id = _gen_id()
     now = _now()
-    db.conn.execute(
-        """INSERT INTO workspace_documents
-           (id, project_id, auth_user_id, title, doc_type, content_json, filepath, filesize, tags, is_template, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (doc_id, project_id, user_id or "", data.title, data.doc_type,
-         data.content_json, data.filepath, data.filesize, data.tags,
-         1 if data.is_template else 0, now, now),
-    )
-    # Update project's updated_at
-    db.conn.execute(
-        "UPDATE workspace_projects SET updated_at = ? WHERE id = ?", (now, project_id)
-    )
-    db.conn.commit()
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(
+                text(
+                    "INSERT INTO workspace_documents "
+                    "(id, project_id, auth_user_id, title, doc_type, content_json, filepath, "
+                    "filesize, tags, is_template, created_at, updated_at) "
+                    "VALUES (:id, :pid, :uid, :title, :doc_type, :content_json, :filepath, "
+                    ":filesize, :tags, :is_template, :created_at, :updated_at)"
+                ),
+                {
+                    "id": doc_id,
+                    "pid": project_id,
+                    "uid": user_id or "",
+                    "title": data.title,
+                    "doc_type": data.doc_type,
+                    "content_json": data.content_json,
+                    "filepath": data.filepath,
+                    "filesize": data.filesize,
+                    "tags": data.tags,
+                    "is_template": 1 if data.is_template else 0,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            # Update project's updated_at
+            await session.execute(
+                text("UPDATE workspace_projects SET updated_at = :now WHERE id = :pid"),
+                {"now": now, "pid": project_id},
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
     return DocumentOut(
         id=doc_id, project_id=project_id, title=data.title, doc_type=data.doc_type,
         content_json=data.content_json, filepath=data.filepath, filesize=data.filesize,
@@ -522,15 +602,27 @@ async def list_all_documents(
 ):
     """List all documents across all projects for the current user."""
     _ensure_workspace_tables(db)
-    if user_id:
-        rows = db.conn.execute(
-            "SELECT * FROM workspace_documents WHERE auth_user_id = ? AND is_template = 0 ORDER BY updated_at DESC",
-            (user_id,),
-        ).fetchall()
-    else:
-        rows = db.conn.execute(
-            "SELECT * FROM workspace_documents WHERE is_template = 0 ORDER BY updated_at DESC"
-        ).fetchall()
+    factory = get_session_factory()
+    async with factory() as session:
+        if user_id:
+            result = await session.execute(
+                text(
+                    "SELECT id, project_id, auth_user_id, title, doc_type, content_json, "
+                    "filepath, filesize, tags, is_template, created_at, updated_at "
+                    "FROM workspace_documents WHERE auth_user_id = :uid AND is_template = 0 "
+                    "ORDER BY updated_at DESC"
+                ),
+                {"uid": user_id},
+            )
+        else:
+            result = await session.execute(
+                text(
+                    "SELECT id, project_id, auth_user_id, title, doc_type, content_json, "
+                    "filepath, filesize, tags, is_template, created_at, updated_at "
+                    "FROM workspace_documents WHERE is_template = 0 ORDER BY updated_at DESC"
+                )
+            )
+        rows = result.mappings().all()
     return [
         DocumentOut(
             id=r["id"], project_id=r["project_id"], title=r["title"],
@@ -551,15 +643,27 @@ async def get_document(
 ):
     """Get a single document by ID."""
     _ensure_workspace_tables(db)
-    if user_id:
-        row = db.conn.execute(
-            "SELECT * FROM workspace_documents WHERE id = ? AND auth_user_id = ?",
-            (doc_id, user_id),
-        ).fetchone()
-    else:
-        row = db.conn.execute(
-            "SELECT * FROM workspace_documents WHERE id = ?", (doc_id,)
-        ).fetchone()
+    factory = get_session_factory()
+    async with factory() as session:
+        if user_id:
+            result = await session.execute(
+                text(
+                    "SELECT id, project_id, auth_user_id, title, doc_type, content_json, "
+                    "filepath, filesize, tags, is_template, created_at, updated_at "
+                    "FROM workspace_documents WHERE id = :did AND auth_user_id = :uid"
+                ),
+                {"did": doc_id, "uid": user_id},
+            )
+        else:
+            result = await session.execute(
+                text(
+                    "SELECT id, project_id, auth_user_id, title, doc_type, content_json, "
+                    "filepath, filesize, tags, is_template, created_at, updated_at "
+                    "FROM workspace_documents WHERE id = :did"
+                ),
+                {"did": doc_id},
+            )
+        row = result.mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Document non trouve")
     return DocumentOut(
@@ -579,16 +683,26 @@ async def delete_document(
 ):
     """Delete a document."""
     _ensure_workspace_tables(db)
-    if user_id:
-        db.conn.execute(
-            "DELETE FROM workspace_documents WHERE id = ? AND auth_user_id = ?",
-            (doc_id, user_id),
-        )
-    else:
-        db.conn.execute(
-            "DELETE FROM workspace_documents WHERE id = ?", (doc_id,)
-        )
-    db.conn.commit()
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            if user_id:
+                await session.execute(
+                    text(
+                        "DELETE FROM workspace_documents "
+                        "WHERE id = :did AND auth_user_id = :uid"
+                    ),
+                    {"did": doc_id, "uid": user_id},
+                )
+            else:
+                await session.execute(
+                    text("DELETE FROM workspace_documents WHERE id = :did"),
+                    {"did": doc_id},
+                )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
     return {"success": True, "message": "Document supprime"}
 
 
@@ -600,30 +714,64 @@ async def duplicate_document(
 ):
     """Duplicate a document."""
     _ensure_workspace_tables(db)
-    if user_id:
-        row = db.conn.execute(
-            "SELECT * FROM workspace_documents WHERE id = ? AND auth_user_id = ?",
-            (doc_id, user_id),
-        ).fetchone()
-    else:
-        row = db.conn.execute(
-            "SELECT * FROM workspace_documents WHERE id = ?", (doc_id,)
-        ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Document non trouve")
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            if user_id:
+                result = await session.execute(
+                    text(
+                        "SELECT id, project_id, auth_user_id, title, doc_type, content_json, "
+                        "filepath, filesize, tags, is_template, created_at, updated_at "
+                        "FROM workspace_documents WHERE id = :did AND auth_user_id = :uid"
+                    ),
+                    {"did": doc_id, "uid": user_id},
+                )
+            else:
+                result = await session.execute(
+                    text(
+                        "SELECT id, project_id, auth_user_id, title, doc_type, content_json, "
+                        "filepath, filesize, tags, is_template, created_at, updated_at "
+                        "FROM workspace_documents WHERE id = :did"
+                    ),
+                    {"did": doc_id},
+                )
+            row = result.mappings().first()
+            if not row:
+                raise HTTPException(status_code=404, detail="Document non trouve")
 
-    new_id = _gen_id()
-    now = _now()
-    new_title = row["title"] + " (copie)"
-    db.conn.execute(
-        """INSERT INTO workspace_documents
-           (id, project_id, auth_user_id, title, doc_type, content_json, filepath, filesize, tags, is_template, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (new_id, row["project_id"], user_id or row["auth_user_id"], new_title,
-         row["doc_type"], row["content_json"], "", row["filesize"], row["tags"],
-         row["is_template"], now, now),
-    )
-    db.conn.commit()
+            new_id = _gen_id()
+            now = _now()
+            new_title = row["title"] + " (copie)"
+            await session.execute(
+                text(
+                    "INSERT INTO workspace_documents "
+                    "(id, project_id, auth_user_id, title, doc_type, content_json, filepath, "
+                    "filesize, tags, is_template, created_at, updated_at) "
+                    "VALUES (:id, :pid, :uid, :title, :doc_type, :content_json, :filepath, "
+                    ":filesize, :tags, :is_template, :created_at, :updated_at)"
+                ),
+                {
+                    "id": new_id,
+                    "pid": row["project_id"],
+                    "uid": user_id or row["auth_user_id"],
+                    "title": new_title,
+                    "doc_type": row["doc_type"],
+                    "content_json": row["content_json"],
+                    "filepath": "",
+                    "filesize": row["filesize"],
+                    "tags": row["tags"],
+                    "is_template": row["is_template"],
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            await session.commit()
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
     return DocumentOut(
         id=new_id, project_id=row["project_id"], title=new_title,
         doc_type=row["doc_type"], content_json=row["content_json"],
@@ -641,15 +789,27 @@ async def export_document(
 ):
     """Export a document to a specific format (pdf/docx/xlsx/pptx)."""
     _ensure_workspace_tables(db)
-    if user_id:
-        row = db.conn.execute(
-            "SELECT * FROM workspace_documents WHERE id = ? AND auth_user_id = ?",
-            (doc_id, user_id),
-        ).fetchone()
-    else:
-        row = db.conn.execute(
-            "SELECT * FROM workspace_documents WHERE id = ?", (doc_id,)
-        ).fetchone()
+    factory = get_session_factory()
+    async with factory() as session:
+        if user_id:
+            result = await session.execute(
+                text(
+                    "SELECT id, project_id, auth_user_id, title, doc_type, content_json, "
+                    "filepath, filesize, tags, is_template, created_at, updated_at "
+                    "FROM workspace_documents WHERE id = :did AND auth_user_id = :uid"
+                ),
+                {"did": doc_id, "uid": user_id},
+            )
+        else:
+            result = await session.execute(
+                text(
+                    "SELECT id, project_id, auth_user_id, title, doc_type, content_json, "
+                    "filepath, filesize, tags, is_template, created_at, updated_at "
+                    "FROM workspace_documents WHERE id = :did"
+                ),
+                {"did": doc_id},
+            )
+        row = result.mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Document non trouve")
 
@@ -691,15 +851,27 @@ async def list_templates(
 ):
     """List all template documents."""
     _ensure_workspace_tables(db)
-    if user_id:
-        rows = db.conn.execute(
-            "SELECT * FROM workspace_documents WHERE auth_user_id = ? AND is_template = 1 ORDER BY updated_at DESC",
-            (user_id,),
-        ).fetchall()
-    else:
-        rows = db.conn.execute(
-            "SELECT * FROM workspace_documents WHERE is_template = 1 ORDER BY updated_at DESC"
-        ).fetchall()
+    factory = get_session_factory()
+    async with factory() as session:
+        if user_id:
+            result = await session.execute(
+                text(
+                    "SELECT id, project_id, auth_user_id, title, doc_type, content_json, "
+                    "filepath, filesize, tags, is_template, created_at, updated_at "
+                    "FROM workspace_documents WHERE auth_user_id = :uid AND is_template = 1 "
+                    "ORDER BY updated_at DESC"
+                ),
+                {"uid": user_id},
+            )
+        else:
+            result = await session.execute(
+                text(
+                    "SELECT id, project_id, auth_user_id, title, doc_type, content_json, "
+                    "filepath, filesize, tags, is_template, created_at, updated_at "
+                    "FROM workspace_documents WHERE is_template = 1 ORDER BY updated_at DESC"
+                )
+            )
+        rows = result.mappings().all()
     return [
         DocumentOut(
             id=r["id"], project_id=r["project_id"], title=r["title"],
@@ -719,29 +891,63 @@ async def save_as_template(
 ):
     """Save an existing document as a template."""
     _ensure_workspace_tables(db)
-    if user_id:
-        row = db.conn.execute(
-            "SELECT * FROM workspace_documents WHERE id = ? AND auth_user_id = ?",
-            (doc_id, user_id),
-        ).fetchone()
-    else:
-        row = db.conn.execute(
-            "SELECT * FROM workspace_documents WHERE id = ?", (doc_id,)
-        ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Document non trouve")
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            if user_id:
+                result = await session.execute(
+                    text(
+                        "SELECT id, project_id, auth_user_id, title, doc_type, content_json, "
+                        "filepath, filesize, tags, is_template, created_at, updated_at "
+                        "FROM workspace_documents WHERE id = :did AND auth_user_id = :uid"
+                    ),
+                    {"did": doc_id, "uid": user_id},
+                )
+            else:
+                result = await session.execute(
+                    text(
+                        "SELECT id, project_id, auth_user_id, title, doc_type, content_json, "
+                        "filepath, filesize, tags, is_template, created_at, updated_at "
+                        "FROM workspace_documents WHERE id = :did"
+                    ),
+                    {"did": doc_id},
+                )
+            row = result.mappings().first()
+            if not row:
+                raise HTTPException(status_code=404, detail="Document non trouve")
 
-    new_id = _gen_id()
-    now = _now()
-    new_title = row["title"] + " (template)"
-    db.conn.execute(
-        """INSERT INTO workspace_documents
-           (id, project_id, auth_user_id, title, doc_type, content_json, filepath, filesize, tags, is_template, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
-        (new_id, row["project_id"], user_id or row["auth_user_id"], new_title,
-         row["doc_type"], row["content_json"], "", row["filesize"], row["tags"], now, now),
-    )
-    db.conn.commit()
+            new_id = _gen_id()
+            now = _now()
+            new_title = row["title"] + " (template)"
+            await session.execute(
+                text(
+                    "INSERT INTO workspace_documents "
+                    "(id, project_id, auth_user_id, title, doc_type, content_json, filepath, "
+                    "filesize, tags, is_template, created_at, updated_at) "
+                    "VALUES (:id, :pid, :uid, :title, :doc_type, :content_json, :filepath, "
+                    ":filesize, :tags, 1, :created_at, :updated_at)"
+                ),
+                {
+                    "id": new_id,
+                    "pid": row["project_id"],
+                    "uid": user_id or row["auth_user_id"],
+                    "title": new_title,
+                    "doc_type": row["doc_type"],
+                    "content_json": row["content_json"],
+                    "filepath": "",
+                    "filesize": row["filesize"],
+                    "tags": row["tags"],
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            await session.commit()
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
     return DocumentOut(
         id=new_id, project_id=row["project_id"], title=new_title,
         doc_type=row["doc_type"], content_json=row["content_json"],
@@ -759,15 +965,25 @@ async def list_knowledge(
 ):
     """List all knowledge base entries."""
     _ensure_workspace_tables(db)
-    if user_id:
-        rows = db.conn.execute(
-            "SELECT * FROM workspace_knowledge WHERE auth_user_id = ? ORDER BY created_at DESC",
-            (user_id,),
-        ).fetchall()
-    else:
-        rows = db.conn.execute(
-            "SELECT * FROM workspace_knowledge ORDER BY created_at DESC"
-        ).fetchall()
+    factory = get_session_factory()
+    async with factory() as session:
+        if user_id:
+            result = await session.execute(
+                text(
+                    "SELECT id, auth_user_id, category, title, content, source, created_at "
+                    "FROM workspace_knowledge WHERE auth_user_id = :uid "
+                    "ORDER BY created_at DESC"
+                ),
+                {"uid": user_id},
+            )
+        else:
+            result = await session.execute(
+                text(
+                    "SELECT id, auth_user_id, category, title, content, source, created_at "
+                    "FROM workspace_knowledge ORDER BY created_at DESC"
+                )
+            )
+        rows = result.mappings().all()
     return [
         KnowledgeOut(
             id=r["id"], category=r["category"], title=r["title"],
@@ -787,12 +1003,29 @@ async def add_knowledge(
     _ensure_workspace_tables(db)
     entry_id = _gen_id()
     now = _now()
-    db.conn.execute(
-        """INSERT INTO workspace_knowledge (id, auth_user_id, category, title, content, source, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (entry_id, user_id or "", data.category, data.title, data.content, data.source, now),
-    )
-    db.conn.commit()
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await session.execute(
+                text(
+                    "INSERT INTO workspace_knowledge "
+                    "(id, auth_user_id, category, title, content, source, created_at) "
+                    "VALUES (:id, :uid, :category, :title, :content, :source, :now)"
+                ),
+                {
+                    "id": entry_id,
+                    "uid": user_id or "",
+                    "category": data.category,
+                    "title": data.title,
+                    "content": data.content,
+                    "source": data.source,
+                    "now": now,
+                },
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
     return KnowledgeOut(
         id=entry_id, category=data.category, title=data.title,
         content=data.content, source=data.source, created_at=now,
@@ -807,16 +1040,26 @@ async def delete_knowledge(
 ):
     """Delete a knowledge base entry."""
     _ensure_workspace_tables(db)
-    if user_id:
-        db.conn.execute(
-            "DELETE FROM workspace_knowledge WHERE id = ? AND auth_user_id = ?",
-            (entry_id, user_id),
-        )
-    else:
-        db.conn.execute(
-            "DELETE FROM workspace_knowledge WHERE id = ?", (entry_id,)
-        )
-    db.conn.commit()
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            if user_id:
+                await session.execute(
+                    text(
+                        "DELETE FROM workspace_knowledge "
+                        "WHERE id = :eid AND auth_user_id = :uid"
+                    ),
+                    {"eid": entry_id, "uid": user_id},
+                )
+            else:
+                await session.execute(
+                    text("DELETE FROM workspace_knowledge WHERE id = :eid"),
+                    {"eid": entry_id},
+                )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
     return {"success": True, "message": "Entree supprimee"}
 
 
@@ -829,20 +1072,30 @@ async def search_knowledge(
     """Search knowledge base entries by title and content (LIKE search)."""
     _ensure_workspace_tables(db)
     pattern = f"%{q}%"
-    if user_id:
-        rows = db.conn.execute(
-            """SELECT * FROM workspace_knowledge
-               WHERE auth_user_id = ? AND (title LIKE ? OR content LIKE ? OR category LIKE ?)
-               ORDER BY created_at DESC""",
-            (user_id, pattern, pattern, pattern),
-        ).fetchall()
-    else:
-        rows = db.conn.execute(
-            """SELECT * FROM workspace_knowledge
-               WHERE title LIKE ? OR content LIKE ? OR category LIKE ?
-               ORDER BY created_at DESC""",
-            (pattern, pattern, pattern),
-        ).fetchall()
+    factory = get_session_factory()
+    async with factory() as session:
+        if user_id:
+            result = await session.execute(
+                text(
+                    "SELECT id, auth_user_id, category, title, content, source, created_at "
+                    "FROM workspace_knowledge "
+                    "WHERE auth_user_id = :uid "
+                    "AND (title LIKE :pattern OR content LIKE :pattern OR category LIKE :pattern) "
+                    "ORDER BY created_at DESC"
+                ),
+                {"uid": user_id, "pattern": pattern},
+            )
+        else:
+            result = await session.execute(
+                text(
+                    "SELECT id, auth_user_id, category, title, content, source, created_at "
+                    "FROM workspace_knowledge "
+                    "WHERE title LIKE :pattern OR content LIKE :pattern OR category LIKE :pattern "
+                    "ORDER BY created_at DESC"
+                ),
+                {"pattern": pattern},
+            )
+        rows = result.mappings().all()
     return [
         KnowledgeOut(
             id=r["id"], category=r["category"], title=r["title"],
@@ -908,14 +1161,6 @@ async def share_project(
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentification requise pour partager un projet")
 
-    # Verify the project exists and belongs to the current user
-    project = db.conn.execute(
-        "SELECT * FROM workspace_projects WHERE id = ? AND auth_user_id = ?",
-        (project_id, user_id),
-    ).fetchone()
-    if not project:
-        raise HTTPException(status_code=404, detail="Projet non trouve ou acces refuse")
-
     if data.shared_with_user_id == user_id:
         raise HTTPException(status_code=400, detail="Impossible de partager un projet avec soi-meme")
 
@@ -924,17 +1169,39 @@ async def share_project(
 
     share_id = _gen_id()
     now = _now()
-
-    try:
-        db.conn.execute(
-            """INSERT INTO workspace_shares (id, project_id, owner_user_id, shared_with_user_id, permission, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (share_id, project_id, user_id, data.shared_with_user_id, data.permission, now),
+    factory = get_session_factory()
+    async with factory() as session:
+        # Verify the project exists and belongs to the current user
+        proj_result = await session.execute(
+            text(
+                "SELECT 1 FROM workspace_projects WHERE id = :pid AND auth_user_id = :uid"
+            ),
+            {"pid": project_id, "uid": user_id},
         )
-        db.conn.commit()
-    except Exception:
-        # UNIQUE constraint -- already shared
-        raise HTTPException(status_code=409, detail="Projet deja partage avec cet utilisateur")
+        if not proj_result.first():
+            raise HTTPException(status_code=404, detail="Projet non trouve ou acces refuse")
+
+        try:
+            await session.execute(
+                text(
+                    "INSERT INTO workspace_shares "
+                    "(id, project_id, owner_user_id, shared_with_user_id, permission, created_at) "
+                    "VALUES (:id, :pid, :owner, :sid, :perm, :now)"
+                ),
+                {
+                    "id": share_id,
+                    "pid": project_id,
+                    "owner": user_id,
+                    "sid": data.shared_with_user_id,
+                    "perm": data.permission,
+                    "now": now,
+                },
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            # UNIQUE constraint -- already shared
+            raise HTTPException(status_code=409, detail="Projet deja partage avec cet utilisateur")
 
     return ShareOut(
         id=share_id,
@@ -958,15 +1225,20 @@ async def get_shared_projects(
     if not user_id:
         return []
 
-    rows = db.conn.execute(
-        """SELECT s.id as share_id, s.project_id, s.owner_user_id, s.permission, s.created_at,
-                  p.name, p.description, p.category
-           FROM workspace_shares s
-           JOIN workspace_projects p ON p.id = s.project_id
-           WHERE s.shared_with_user_id = ?
-           ORDER BY s.created_at DESC""",
-        (user_id,),
-    ).fetchall()
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                "SELECT s.id AS share_id, s.project_id, s.owner_user_id, s.permission, "
+                "s.created_at, p.name, p.description, p.category "
+                "FROM workspace_shares s "
+                "JOIN workspace_projects p ON p.id = s.project_id "
+                "WHERE s.shared_with_user_id = :uid "
+                "ORDER BY s.created_at DESC"
+            ),
+            {"uid": user_id},
+        )
+        rows = result.mappings().all()
 
     return [
         SharedProjectOut(
@@ -995,18 +1267,26 @@ async def list_project_shares(
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentification requise")
 
-    # Verify ownership
-    project = db.conn.execute(
-        "SELECT * FROM workspace_projects WHERE id = ? AND auth_user_id = ?",
-        (project_id, user_id),
-    ).fetchone()
-    if not project:
-        raise HTTPException(status_code=404, detail="Projet non trouve ou acces refuse")
+    factory = get_session_factory()
+    async with factory() as session:
+        # Verify ownership
+        proj_result = await session.execute(
+            text(
+                "SELECT 1 FROM workspace_projects WHERE id = :pid AND auth_user_id = :uid"
+            ),
+            {"pid": project_id, "uid": user_id},
+        )
+        if not proj_result.first():
+            raise HTTPException(status_code=404, detail="Projet non trouve ou acces refuse")
 
-    rows = db.conn.execute(
-        "SELECT * FROM workspace_shares WHERE project_id = ? ORDER BY created_at DESC",
-        (project_id,),
-    ).fetchall()
+        result = await session.execute(
+            text(
+                "SELECT id, project_id, owner_user_id, shared_with_user_id, permission, created_at "
+                "FROM workspace_shares WHERE project_id = :pid ORDER BY created_at DESC"
+            ),
+            {"pid": project_id},
+        )
+        rows = result.mappings().all()
 
     return [
         ShareOut(
@@ -1035,21 +1315,34 @@ async def unshare_project(
     if not user_id:
         raise HTTPException(status_code=401, detail="Authentification requise")
 
-    # Verify ownership
-    project = db.conn.execute(
-        "SELECT * FROM workspace_projects WHERE id = ? AND auth_user_id = ?",
-        (project_id, user_id),
-    ).fetchone()
-    if not project:
-        raise HTTPException(status_code=404, detail="Projet non trouve ou acces refuse")
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            # Verify ownership
+            proj_result = await session.execute(
+                text(
+                    "SELECT 1 FROM workspace_projects WHERE id = :pid AND auth_user_id = :uid"
+                ),
+                {"pid": project_id, "uid": user_id},
+            )
+            if not proj_result.first():
+                raise HTTPException(status_code=404, detail="Projet non trouve ou acces refuse")
 
-    result = db.conn.execute(
-        "DELETE FROM workspace_shares WHERE id = ? AND project_id = ?",
-        (share_id, project_id),
-    )
-    db.conn.commit()
+            del_result = await session.execute(
+                text(
+                    "DELETE FROM workspace_shares WHERE id = :sid AND project_id = :pid"
+                ),
+                {"sid": share_id, "pid": project_id},
+            )
+            await session.commit()
 
-    if result.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Partage non trouve")
+            if del_result.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Partage non trouve")
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception:
+            await session.rollback()
+            raise
 
     return {"success": True, "message": "Partage supprime"}

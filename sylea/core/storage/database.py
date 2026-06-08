@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     action_agent_json   TEXT,
     temps_gagne_avant   REAL DEFAULT 0.0,
     temps_gagne_apres   REAL DEFAULT 0.0,
+    rappels_json        TEXT DEFAULT NULL,
     cree_le             TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES profil_utilisateur(id)
 );
@@ -124,7 +125,15 @@ CREATE TABLE IF NOT EXISTS users (
     hashed_password     TEXT,
     provider            TEXT DEFAULT 'local',
     provider_id         TEXT,
-    created_at          TEXT NOT NULL
+    created_at          TEXT NOT NULL,
+    -- Tracking de PRESENCE (touche par tous les GET authentifies)
+    -- Distinct de last_engaged_at qui ne bouge que sur les actions mutatives.
+    -- Voir api/presence_middleware.py pour la logique de touch + debounce.
+    last_seen_at        TEXT DEFAULT NULL,
+    -- Tracking d'ENGAGEMENT (POST/PUT/PATCH/DELETE auth)
+    -- Utilise par l'agent companion pour distinguer "user juste connecte" de
+    -- "user qui fait vraiment quelque chose".
+    last_engaged_at     TEXT DEFAULT NULL
 );
 """
 
@@ -148,6 +157,28 @@ CREATE TABLE IF NOT EXISTS agent_collected_info (
     field TEXT NOT NULL,
     value TEXT NOT NULL,
     collected_at TEXT NOT NULL
+);
+"""
+
+# Propositions emises par l'Agent 1 ou 2 lors d'une conversation, en attente
+# de confirmation/refus utilisateur. Quand l'agent detecte un event/decision
+# important (heritage, promotion, gain/perte majeure, etc.), il propose
+# d'enregistrer un impact stats au lieu de le faire silencieusement.
+_CREATE_AGENT_PROPOSALS = """
+CREATE TABLE IF NOT EXISTS agent_proposals (
+    id TEXT PRIMARY KEY,
+    auth_user_id TEXT NOT NULL,
+    agent_label TEXT NOT NULL,      -- 'agent1' ou 'agent2'
+    type TEXT NOT NULL,             -- 'evenement' | 'decision_majeure' | 'info_profil_critique'
+    description TEXT NOT NULL,
+    impact_jours REAL DEFAULT 0,    -- positif = gain de temps, negatif = perte
+    resume TEXT DEFAULT '',
+    rationale TEXT DEFAULT '',
+    target_so_hint TEXT DEFAULT '', -- nom du SO suggere par l'IA
+    statut TEXT DEFAULT 'pending',  -- 'pending' | 'confirmed' | 'rejected'
+    created_at TEXT NOT NULL,
+    responded_at TEXT,
+    decision_id TEXT                -- FK vers decisions si confirmed
 );
 """
 
@@ -234,20 +265,58 @@ CREATE TABLE IF NOT EXISTS user_tool_preferences (
 
 
 class DatabaseManager:
-    """Gestionnaire de connexion et de schéma SQLite."""
+    """Gestionnaire de connexion et de schema portable (SQLite + PostgreSQL).
+
+    Migration 2026-05-15 : bascule automatique selon `DATABASE_URL` env var.
+    - DATABASE_URL absent ou sqlite://... → sqlite3.Connection natif (perf max)
+    - DATABASE_URL = postgresql://... → RawDBProxy wrap SQLAlchemy (compat PG)
+    """
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self._path = db_path or get_database_path()
-        self._conn: Optional[sqlite3.Connection] = None
+        self._conn = None  # sqlite3.Connection ou RawDBProxy
 
     # ── Connexion ────────────────────────────────────────────────────────────
 
     def connect(self) -> None:
-        """Ouvre la connexion et crée le schéma si nécessaire."""
-        self._conn = sqlite3.connect(str(self._path))
+        """Ouvre la connexion et cree le schema si necessaire.
+
+        Detection automatique du backend via DATABASE_URL :
+        - SQLite : optimisations PRAGMAs + sqlite3 natif (perf)
+        - PostgreSQL : RawDBProxy via SQLAlchemy sync engine
+        """
+        import os
+        database_url = os.environ.get("DATABASE_URL", "").strip()
+
+        if database_url and database_url.startswith(
+            ("postgresql://", "postgresql+", "postgres://"),
+        ):
+            # Mode PostgreSQL : RawDBProxy
+            from sylea.core.storage.db_adapter import RawDBProxy
+            self._conn = RawDBProxy.from_url(database_url)
+            # Pas d'initialisation de schema en PG : Alembic gere
+            return
+
+        # Mode SQLite (defaut) : sqlite3 natif avec optimisations PRAGMAs
+        # - WAL : 1 writer + N readers
+        # - busy_timeout 5s : evite SQLITE_BUSY
+        # - synchronous=NORMAL : perf 2-3x meilleure
+        # - cache_size 64MB
+        # - temp_store=MEMORY
+        # - check_same_thread=False : partage multi-thread
+        self._conn = sqlite3.connect(
+            str(self._path),
+            timeout=10.0,
+            check_same_thread=False,
+        )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL;")
+        self._conn.execute("PRAGMA busy_timeout=5000;")
+        self._conn.execute("PRAGMA synchronous=NORMAL;")
+        self._conn.execute("PRAGMA cache_size=-65536;")
+        self._conn.execute("PRAGMA temp_store=MEMORY;")
         self._conn.execute("PRAGMA foreign_keys=ON;")
+        self._conn.execute("PRAGMA mmap_size=268435456;")
         self._initialiser_schema()
 
     def disconnect(self) -> None:
@@ -284,7 +353,37 @@ class DatabaseManager:
             self._conn.execute(_CREATE_USERS)
             self._conn.execute(_CREATE_AGENT_MESSAGES)
             self._conn.execute(_CREATE_AGENT_COLLECTED_INFO)
+            self._conn.execute(_CREATE_AGENT_PROPOSALS)
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_agent_proposals_user "
+                "ON agent_proposals(auth_user_id, statut)"
+            )
             self._conn.execute(_CREATE_AGENT2_MESSAGES)
+            # ── Indexes critiques pour scale concurrent reads ──────────
+            # Sans ces indexes, chaque query par user fait un FULL TABLE SCAN
+            # ce qui devient ingérable à partir de ~10k rows.
+            _CRITICAL_INDEXES = [
+                # Isolation per-user : tous les SELECT/UPDATE par user_id
+                "CREATE INDEX IF NOT EXISTS idx_profil_auth_user ON profil_utilisateur(auth_user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_decisions_user ON decisions(user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_decisions_user_cree ON decisions(user_id, cree_le DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_decisions_so ON decisions(sous_objectif_id)",
+                "CREATE INDEX IF NOT EXISTS idx_bilans_user ON bilans_quotidiens(user_id, date DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_so_user ON sous_objectifs(user_id, ordre)",
+                "CREATE INDEX IF NOT EXISTS idx_taches_user ON taches_quotidiennes(user_id, date DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+                # Agent messages : queries par auth_user_id + created_at (quota daily)
+                "CREATE INDEX IF NOT EXISTS idx_agent_msg_user_created ON agent_messages(auth_user_id, created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_agent_msg_user_role ON agent_messages(auth_user_id, role)",
+                "CREATE INDEX IF NOT EXISTS idx_agent2_msg_user_created ON agent2_messages(auth_user_id, created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_agent2_msg_user_role ON agent2_messages(auth_user_id, role)",
+                "CREATE INDEX IF NOT EXISTS idx_collected_info_user ON agent_collected_info(user_id, collected_at DESC)",
+            ]
+            for stmt in _CRITICAL_INDEXES:
+                try:
+                    self._conn.execute(stmt)
+                except Exception:
+                    pass  # table peut-etre absente, best-effort
             self._conn.execute(_CREATE_AGENT_REMINDERS)
             self._conn.execute(_CREATE_AGENT3_MESSAGES)
             self._conn.execute(_CREATE_USER_EMAIL_SETTINGS)
@@ -366,6 +465,14 @@ class DatabaseManager:
                     self._conn.execute(col_temps_dec)
                 except Exception:
                     pass  # Colonne deja existante
+            # Migration : ajouter rappels_json dans decisions (detail des rappels
+            # pour les decisions issues du mode TRACKING — dilemmes valides/abandonnes)
+            try:
+                self._conn.execute(
+                    "ALTER TABLE decisions ADD COLUMN rappels_json TEXT DEFAULT NULL"
+                )
+            except Exception:
+                pass  # Colonne deja existante
             # Legacy migrations for competences/diplomes/langues (now in CREATE TABLE)
             for col_sql2 in [
                 "ALTER TABLE profil_utilisateur ADD COLUMN competences TEXT DEFAULT ''",
@@ -376,3 +483,23 @@ class DatabaseManager:
                     self._conn.execute(col_sql2)
                 except Exception:
                     pass
+            # Migration 2026-05-31 : tracking presence/engagement utilisateur
+            # (fix bug "Yo Lucas 7 jours sans nouvelles" alors que user connecte)
+            # Voir api/presence_middleware.py pour la logique de remplissage.
+            for col_presence in [
+                "ALTER TABLE users ADD COLUMN last_seen_at TEXT DEFAULT NULL",
+                "ALTER TABLE users ADD COLUMN last_engaged_at TEXT DEFAULT NULL",
+            ]:
+                try:
+                    self._conn.execute(col_presence)
+                except Exception:
+                    pass  # Colonne deja existante
+            # Migration 2026-06 : revocation JWT. tokens_invalidated_before =
+            # timestamp ISO ; tout token dont iat < cette valeur est rejete a
+            # l'auth (cf api/dependencies.py). Pose par POST /api/auth/logout.
+            try:
+                self._conn.execute(
+                    "ALTER TABLE users ADD COLUMN tokens_invalidated_before TEXT DEFAULT NULL"
+                )
+            except Exception:
+                pass  # Colonne deja existante

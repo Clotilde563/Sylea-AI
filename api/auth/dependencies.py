@@ -1,7 +1,5 @@
 """Auth dependency for FastAPI routes."""
 
-import sqlite3
-
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 

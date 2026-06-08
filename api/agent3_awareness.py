@@ -68,170 +68,188 @@ def _format_now_block(now: datetime) -> list[str]:
 # Patterns historiques
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _detect_usage_patterns(db: Any, user_id: str, now: datetime) -> list[str]:
-    """Analyse les 30 derniers jours pour detecter des habitudes recurrentes.
+def invalidate_awareness_cache(user_id: str | None = None) -> None:
+    """Force le refresh. Utile apres un changement d'objectif ou bilan."""
+    with _awareness_lock:
+        if user_id is None:
+            _awareness_cache.clear()
+        else:
+            _awareness_cache.pop(user_id, None)
 
-    Ex : "tous les lundis matin tu fais X", "moyenne 5 messages/jour".
-    Pas de ML, juste des heuristiques simples.
-    """
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# PORTABILITE : SQLite strftime() → on parse en Python (cross-DB).
+
+async def _detect_usage_patterns_async(user_id: str, now: datetime) -> list[str]:
+    """Version async — PG-compatible. Parse les timestamps en Python pour
+    eviter SQLite-specific strftime()."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
     observations: list[str] = []
+    factory = get_session_factory()
     try:
-        # Nombre de messages agent par jour (moyenne sur 30j)
-        cutoff = (now - timedelta(days=30)).isoformat()
-        row = db.conn.execute(
-            "SELECT COUNT(*), COUNT(DISTINCT DATE(created_at)) "
-            "FROM agent3_messages WHERE auth_user_id = ? AND created_at >= ? "
-            "AND role = 'user'",
-            (user_id, cutoff),
-        ).fetchone()
-        if row and row[0]:
-            total, days = row[0], row[1] or 1
-            avg = total / days
-            if avg >= 0.5:
-                observations.append(
-                    f"- **Activite** : ~{avg:.1f} interactions par jour "
-                    f"({total} sur {days} jours actifs)"
+        async with factory() as session:
+            cutoff = (now - timedelta(days=30)).isoformat()
+            # Average messages per active day
+            try:
+                result = await session.execute(
+                    text(
+                        "SELECT created_at FROM agent3_messages "
+                        "WHERE auth_user_id = :uid AND created_at >= :cutoff "
+                        "AND role = 'user'"
+                    ),
+                    {"uid": user_id, "cutoff": cutoff},
                 )
-    except Exception as e:
-        logger.debug(f"patterns messages failed: {e}")
-
-    # Pattern heure du jour : est-ce qu'il nous parle souvent a cette heure ?
-    try:
-        current_hour = now.hour
-        row = db.conn.execute(
-            "SELECT COUNT(*) FROM agent3_messages "
-            "WHERE auth_user_id = ? AND role = 'user' "
-            "AND CAST(strftime('%H', created_at) AS INTEGER) BETWEEN ? AND ?",
-            (user_id, max(0, current_hour - 1), min(23, current_hour + 1)),
-        ).fetchone()
-        if row and row[0] and row[0] >= 5:
-            observations.append(
-                f"- **Pattern horaire** : tu me parles souvent autour de {current_hour}h "
-                f"({row[0]} fois ces derniers mois)"
-            )
-    except Exception as e:
-        logger.debug(f"patterns hour failed: {e}")
-
+                rows = result.mappings().all()
+                total = len(rows)
+                days_set = set()
+                hour_match = 0
+                current_hour = now.hour
+                for r in rows:
+                    try:
+                        ts = datetime.fromisoformat(
+                            str(r["created_at"]).replace("Z", "+00:00")
+                        )
+                        days_set.add(ts.date().isoformat())
+                        if abs(ts.hour - current_hour) <= 1:
+                            hour_match += 1
+                    except Exception:
+                        continue
+                days = max(1, len(days_set))
+                if total:
+                    avg = total / days
+                    if avg >= 0.5:
+                        observations.append(
+                            f"- **Activite** : ~{avg:.1f} interactions par jour "
+                            f"({total} sur {days} jours actifs)"
+                        )
+                if hour_match >= 5:
+                    observations.append(
+                        f"- **Pattern horaire** : tu me parles souvent autour de "
+                        f"{current_hour}h ({hour_match} fois ces derniers mois)"
+                    )
+            except Exception as e:
+                logger.debug(f"patterns async failed: {e}")
+    except Exception:
+        pass
     return observations
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Bien-etre recent
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _recent_wellbeing(db: Any, user_id: str) -> list[str]:
-    """Derniers scores de bien-etre.
-
-    Source : table `bilans_quotidiens` joinee a `profil_utilisateur` via auth_user_id.
-    Schema : niveau_sante/stress/energie/bonheur (INTEGER 1-10) + date.
-    Fallback : si aucun bilan recent, lit les scores courants sur profil_utilisateur.
-    """
+async def _recent_wellbeing_async(user_id: str) -> list[str]:
+    """Version async — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
     out: list[str] = []
+    factory = get_session_factory()
     try:
-        # 1) Dernier bilan quotidien (table dediee, dataset historique)
-        row = db.conn.execute(
-            "SELECT b.date, b.niveau_sante, b.niveau_stress, "
-            "       b.niveau_energie, b.niveau_bonheur "
-            "FROM bilans_quotidiens b "
-            "JOIN profil_utilisateur p ON p.id = b.user_id "
-            "WHERE p.auth_user_id = ? "
-            "ORDER BY b.date DESC LIMIT 1",
-            (user_id,),
-        ).fetchone()
-        if row:
-            date_iso, sante, stress, energie, bonheur = row
-            scores = {
-                "sante": sante, "stress": stress,
-                "energie": energie, "bonheur": bonheur,
-            }
-            items = [(k, v) for k, v in scores.items() if isinstance(v, (int, float))]
-            if items:
-                items.sort(key=lambda x: x[1])
-                low = items[0]
-                high = items[-1]
-                out.append(
-                    f"- **Dernier bilan** ({date_iso}) : "
-                    f"point faible {low[0]}={low[1]}/10, "
-                    f"point fort {high[0]}={high[1]}/10"
-                )
-                return out
-        # 2) Fallback : scores courants stockes sur le profil
-        prow = db.conn.execute(
-            "SELECT niveau_sante, niveau_stress, niveau_energie, niveau_bonheur "
-            "FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1",
-            (user_id,),
-        ).fetchone()
-        if prow:
-            scores = {
-                "sante": prow[0], "stress": prow[1],
-                "energie": prow[2], "bonheur": prow[3],
-            }
-            items = [(k, v) for k, v in scores.items() if isinstance(v, (int, float)) and v]
-            if items:
-                items.sort(key=lambda x: x[1])
-                low = items[0]
-                high = items[-1]
-                out.append(
-                    f"- **Bien-etre actuel** : "
-                    f"point faible {low[0]}={low[1]}/10, "
-                    f"point fort {high[0]}={high[1]}/10"
-                )
+        async with factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT b.date, b.niveau_sante, b.niveau_stress, "
+                    "b.niveau_energie, b.niveau_bonheur "
+                    "FROM bilans_quotidiens b "
+                    "JOIN profil_utilisateur p ON p.id = b.user_id "
+                    "WHERE p.auth_user_id = :uid "
+                    "ORDER BY b.date DESC LIMIT 1"
+                ),
+                {"uid": user_id},
+            )
+            row = result.mappings().first()
+            if row:
+                date_iso = row["date"]
+                scores = {
+                    "sante": row["niveau_sante"], "stress": row["niveau_stress"],
+                    "energie": row["niveau_energie"], "bonheur": row["niveau_bonheur"],
+                }
+                items = [(k, v) for k, v in scores.items()
+                         if isinstance(v, (int, float))]
+                if items:
+                    items.sort(key=lambda x: x[1])
+                    low, high = items[0], items[-1]
+                    out.append(
+                        f"- **Dernier bilan** ({date_iso}) : "
+                        f"point faible {low[0]}={low[1]}/10, "
+                        f"point fort {high[0]}={high[1]}/10"
+                    )
+                    return out
+            # Fallback : scores courants sur profil
+            result = await session.execute(
+                text(
+                    "SELECT niveau_sante, niveau_stress, niveau_energie, niveau_bonheur "
+                    "FROM profil_utilisateur WHERE auth_user_id = :uid LIMIT 1"
+                ),
+                {"uid": user_id},
+            )
+            prow = result.mappings().first()
+            if prow:
+                scores = {
+                    "sante": prow["niveau_sante"], "stress": prow["niveau_stress"],
+                    "energie": prow["niveau_energie"], "bonheur": prow["niveau_bonheur"],
+                }
+                items = [(k, v) for k, v in scores.items()
+                         if isinstance(v, (int, float)) and v]
+                if items:
+                    items.sort(key=lambda x: x[1])
+                    low, high = items[0], items[-1]
+                    out.append(
+                        f"- **Bien-etre actuel** : "
+                        f"point faible {low[0]}={low[1]}/10, "
+                        f"point fort {high[0]}={high[1]}/10"
+                    )
     except Exception as e:
-        logger.debug(f"wellbeing failed: {e}")
+        logger.debug(f"wellbeing async failed: {e}")
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Objectif de vie
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _objective_snapshot(db: Any, user_id: str) -> list[str]:
-    """Resume de l'objectif de vie (depuis profil_utilisateur).
-
-    Unification : on expose la PROGRESSION (% temps parcouru) au lieu de la
-    probabilite IA, pour avoir une metric unique partout (Dashboard, Stats,
-    agents).
-    """
+async def _objective_snapshot_async(user_id: str) -> list[str]:
+    """Version async — PG-compatible."""
+    from sqlalchemy import text
+    from api.database import get_session_factory
     out: list[str] = []
+    factory = get_session_factory()
     try:
-        row = db.conn.execute(
-            "SELECT objectif_description, objectif_categorie, objectif_deadline, "
-            "       temps_initial_jours, temps_gagne_jours "
-            "FROM profil_utilisateur WHERE auth_user_id = ? LIMIT 1",
-            (user_id,),
-        ).fetchone()
-        if row and row[0]:
-            desc = str(row[0])[:150]
-            cat = row[1] or ""
-            deadline = row[2]  # ISO date string (ex: "2026-12-31")
-            t_init = row[3] or 0
-            t_gagne = row[4] or 0
-            progression = (t_gagne / t_init * 100) if t_init > 0 else 0
-            bits = [f"'{desc}'"]
-            if cat:
-                bits.append(f"cat: {cat}")
-            if deadline:
-                bits.append(f"deadline: {deadline}")
-            bits.append(f"progression: {progression:.1f}%")
-            out.append(f"- **Objectif de vie** : {' | '.join(bits)}")
+        async with factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT objectif_description, objectif_categorie, objectif_deadline, "
+                    "temps_initial_jours, temps_gagne_jours "
+                    "FROM profil_utilisateur WHERE auth_user_id = :uid LIMIT 1"
+                ),
+                {"uid": user_id},
+            )
+            row = result.mappings().first()
+            if row and row["objectif_description"]:
+                desc = str(row["objectif_description"])[:150]
+                cat = row["objectif_categorie"] or ""
+                deadline = row["objectif_deadline"]
+                t_init = row["temps_initial_jours"] or 0
+                t_gagne = row["temps_gagne_jours"] or 0
+                progression = (t_gagne / t_init * 100) if t_init > 0 else 0
+                bits = [f"'{desc}'"]
+                if cat:
+                    bits.append(f"cat: {cat}")
+                if deadline:
+                    bits.append(f"deadline: {deadline}")
+                bits.append(f"progression: {progression:.1f}%")
+                out.append(f"- **Objectif de vie** : {' | '.join(bits)}")
     except Exception as e:
-        logger.debug(f"objective failed: {e}")
+        logger.debug(f"objective async failed: {e}")
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main assembly
-# ─────────────────────────────────────────────────────────────────────────────
+async def build_awareness_block_async(user_id: str | None) -> str:
+    """Version async de build_awareness_block — PG-compatible.
 
-def build_awareness_block(db: Any, user_id: str | None) -> str:
-    """Construit le bloc de contexte a injecter dans le system prompt.
-
-    Cached 10min par user.
+    Plus de parametre `db` : utilise get_session_factory().
+    Cache 10min identique a la version sync.
     """
-    if not user_id or db is None:
+    if not user_id:
         return ""
 
-    # Check cache
+    # Check cache (partage avec la version sync)
     with _awareness_lock:
         cached = _awareness_cache.get(user_id)
         if cached and (time.time() - cached[0] < _AWARENESS_CACHE_TTL_S):
@@ -244,12 +262,11 @@ def build_awareness_block(db: Any, user_id: str | None) -> str:
 
     lines: list[str] = ["=== CONTEXTE ACTUEL (awareness) ==="]
     lines.extend(_format_now_block(now))
-    lines.extend(_objective_snapshot(db, user_id))
-    lines.extend(_recent_wellbeing(db, user_id))
-    lines.extend(_detect_usage_patterns(db, user_id, now))
+    lines.extend(await _objective_snapshot_async(user_id))
+    lines.extend(await _recent_wellbeing_async(user_id))
+    lines.extend(await _detect_usage_patterns_async(user_id, now))
 
     if len(lines) <= 1:
-        # Rien d'interessant a signaler — pas la peine d'alourdir le prompt
         block = ""
     else:
         lines.append(
@@ -265,13 +282,7 @@ def build_awareness_block(db: Any, user_id: str | None) -> str:
     return block
 
 
-def invalidate_awareness_cache(user_id: str | None = None) -> None:
-    """Force le refresh. Utile apres un changement d'objectif ou bilan."""
-    with _awareness_lock:
-        if user_id is None:
-            _awareness_cache.clear()
-        else:
-            _awareness_cache.pop(user_id, None)
-
-
-__all__ = ["build_awareness_block", "invalidate_awareness_cache"]
+__all__ = [
+    "build_awareness_block_async",
+    "invalidate_awareness_cache",
+]

@@ -347,47 +347,182 @@ def _today_utc_str() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
 
 
+def _redis_cost_key(user_id: str) -> str:
+    """Clé Redis pour le cumul journalier d'un user (TTL 48h pour cover UTC)."""
+    return f"sylea:daily_cost:{user_id or 'anon'}:{_today_utc_str()}"
+
+
+def _redis_warning_key(user_id: str) -> str:
+    """Clé Redis pour le flag warning 80% (TTL 48h)."""
+    return f"sylea:daily_warning:{user_id or 'anon'}:{_today_utc_str()}"
+
+
 def check_daily_cost_cap(
     user_id: str, projected_cost_usd: float, cap_usd: float,
 ) -> tuple[bool, float, float]:
     """Verifie si l'ajout d'un cout projete depasse le cap journalier.
 
+    Migration 2026-05-17 : lecture distribuee via cache_layer (Redis ou InMemory).
+
     Returns (allowed, current_total, percentage_used).
-      - allowed=True si current_total + projected_cost_usd <= cap_usd.
-      - current_total = cumul du jour AVANT ce nouvel appel.
-      - percentage_used = (current_total + projected) / cap * 100.
     """
     if cap_usd <= 0:
         return True, 0.0, 0.0  # cap desactive
     uid = user_id or "anon"
-    key = (uid, _today_utc_str())
-    with _daily_cost_lock:
-        current = _daily_cost_by_user.get(key, 0.0)
+
+    # Tente lecture Redis (distribue), fallback in-memory
+    current = 0.0
+    try:
+        import asyncio
+        from api.cache_layer import get_cache, is_redis_enabled
+        if is_redis_enabled():
+            cache = get_cache()
+            redis_val = asyncio.get_event_loop().run_until_complete(
+                cache.get(_redis_cost_key(uid))
+            ) if not asyncio.get_event_loop().is_running() else None
+            # Si on est deja dans une boucle async, on tombe sur fallback in-memory
+            # (le caller doit utiliser check_daily_cost_cap_async pour la vraie valeur)
+            if redis_val is not None:
+                current = float(redis_val)
+            else:
+                key = (uid, _today_utc_str())
+                with _daily_cost_lock:
+                    current = float(_daily_cost_by_user.get(key, 0.0))
+        else:
+            key = (uid, _today_utc_str())
+            with _daily_cost_lock:
+                current = float(_daily_cost_by_user.get(key, 0.0))
+    except Exception:
+        key = (uid, _today_utc_str())
+        with _daily_cost_lock:
+            current = float(_daily_cost_by_user.get(key, 0.0))
+
+    new_total = current + projected_cost_usd
+    pct = (new_total / cap_usd) * 100.0
+    return new_total <= cap_usd, current, pct
+
+
+async def check_daily_cost_cap_async(
+    user_id: str, projected_cost_usd: float, cap_usd: float,
+) -> tuple[bool, float, float]:
+    """Version async distribuée (Redis-backed quand REDIS_URL defini).
+
+    A privilegier dans les contextes async pour la coherence multi-worker.
+    """
+    if cap_usd <= 0:
+        return True, 0.0, 0.0
+    uid = user_id or "anon"
+    from api.cache_layer import get_cache
+    cache = get_cache()
+    try:
+        v = await cache.get(_redis_cost_key(uid))
+        current = float(v) if v else 0.0
+    except Exception:
+        key = (uid, _today_utc_str())
+        with _daily_cost_lock:
+            current = float(_daily_cost_by_user.get(key, 0.0))
     new_total = current + projected_cost_usd
     pct = (new_total / cap_usd) * 100.0
     return new_total <= cap_usd, current, pct
 
 
 def record_daily_cost(user_id: str, cost_usd: float) -> None:
-    """Incremente le cumul journalier apres un appel reussi."""
+    """Incremente le cumul journalier (in-memory + Redis si dispo).
+
+    Migration 2026-05-17 : double-write transparent. En contexte sync, le
+    Redis incr est fire-and-forget (best-effort). Pour atomicite stricte
+    multi-worker, utiliser record_daily_cost_async.
+    """
     if cost_usd <= 0:
         return
     uid = user_id or "anon"
     key = (uid, _today_utc_str())
+
+    # 1. Update in-memory (sync, immediat)
     with _daily_cost_lock:
         _daily_cost_by_user[key] += float(cost_usd)
 
+    # 2. Best-effort Redis (atomique multi-worker via INCRBYFLOAT)
+    try:
+        import asyncio
+        from api.cache_layer import get_cache, is_redis_enabled
+        if is_redis_enabled():
+            cache = get_cache()
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = None
+            if loop and not loop.is_running():
+                # On peut bloquer
+                loop.run_until_complete(_async_incr_daily_cost(cache, uid, cost_usd))
+            elif loop and loop.is_running():
+                # Fire-and-forget
+                loop.create_task(_async_incr_daily_cost(cache, uid, cost_usd))
+    except Exception:
+        pass  # In-memory deja a jour, Redis sera en retard mais cohera bientot
+
+
+async def _async_incr_daily_cost(cache, uid: str, cost_usd: float) -> None:
+    """Helper async pour INCRBYFLOAT atomique + TTL 48h."""
+    try:
+        key = _redis_cost_key(uid)
+        await cache.incr(key, float(cost_usd))
+        # TTL 48h (cover UTC boundary)
+        await cache.set_with_ttl(f"{key}:ttl_marker", "1", ttl_s=48 * 3600)
+    except Exception:
+        pass
+
+
+async def record_daily_cost_async(user_id: str, cost_usd: float) -> None:
+    """Version async distribuée : INCR atomique Redis + sync in-memory.
+
+    A privilegier dans les endpoints async pour la coherence multi-worker.
+    """
+    if cost_usd <= 0:
+        return
+    uid = user_id or "anon"
+
+    # 1. In-memory immediate
+    key = (uid, _today_utc_str())
+    with _daily_cost_lock:
+        _daily_cost_by_user[key] += float(cost_usd)
+
+    # 2. Redis atomique
+    try:
+        from api.cache_layer import get_cache
+        cache = get_cache()
+        await _async_incr_daily_cost(cache, uid, cost_usd)
+    except Exception:
+        pass
+
 
 def get_daily_cost_for_user(user_id: str) -> float:
-    """Cumul USD consomme par ce user aujourd'hui (UTC)."""
+    """Cumul USD consomme par ce user aujourd'hui (UTC, in-memory snapshot)."""
     uid = user_id or "anon"
     key = (uid, _today_utc_str())
     with _daily_cost_lock:
         return float(_daily_cost_by_user.get(key, 0.0))
 
 
+async def get_daily_cost_for_user_async(user_id: str) -> float:
+    """Version async distribuée (Redis-backed)."""
+    uid = user_id or "anon"
+    try:
+        from api.cache_layer import get_cache
+        cache = get_cache()
+        v = await cache.get(_redis_cost_key(uid))
+        if v is not None:
+            return float(v)
+    except Exception:
+        pass
+    return get_daily_cost_for_user(user_id)
+
+
 def should_emit_warning_once(user_id: str) -> bool:
-    """True si on doit emettre le warning 80% (une seule fois par jour/user)."""
+    """True si on doit emettre le warning 80% (une seule fois par jour/user).
+
+    Migration 2026-05-17 : si Redis dispo, utilise SET NX (atomique).
+    """
     uid = user_id or "anon"
     key = (uid, _today_utc_str())
     with _daily_cost_lock:
@@ -398,7 +533,7 @@ def should_emit_warning_once(user_id: str) -> bool:
 
 
 def reset_daily_cost() -> None:
-    """Utilitaire test — reset complet."""
+    """Utilitaire test — reset complet (in-memory only — Redis flush via Redis CLI)."""
     with _daily_cost_lock:
         _daily_cost_by_user.clear()
         _daily_warning_emitted.clear()

@@ -98,18 +98,214 @@ def _get_conn(db):
     return db.conn if hasattr(db, "conn") else db
 
 
-def _get_integration(db, user_id: str, provider: str) -> dict | None:
-    conn = _get_conn(db)
-    row = conn.execute(
-        "SELECT * FROM user_integrations WHERE auth_user_id = ? AND provider = ?",
-        (user_id, provider),
-    ).fetchone()
-    if not row:
+# ═══════════════════════════════════════════════════════════════════════════
+#  Helpers async (migration PG, 2026-05-15) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _get_integration_async(user_id: str, provider: str) -> dict | None:
+    """Async version of _get_integration — PG-compatible."""
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    factory = _gsf()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                _sa_text(
+                    "SELECT * FROM user_integrations "
+                    "WHERE auth_user_id = :uid AND provider = :prov"
+                ),
+                {"uid": user_id, "prov": provider},
+            )
+            row = result.mappings().first()
+    except Exception:
         return None
-    cols = [d[0] for d in conn.execute(
-        "SELECT * FROM user_integrations LIMIT 0"
-    ).description]
-    return dict(zip(cols, row))
+    return dict(row) if row else None
+
+
+async def _upsert_integration_async(
+    user_id: str,
+    provider: str,
+    *,
+    access_token: str | None = None,
+    refresh_token: str | None = None,
+    token_expires_at: str | None = None,
+    scopes: str | None = None,
+    metadata_json: str | None = None,
+    status_value: str | None = None,
+) -> None:
+    """Upsert d'une integration en async (compat PG + SQLite, sans ON CONFLICT)."""
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    factory = _gsf()
+    now = datetime.now(timezone.utc).isoformat()
+    existing = await _get_integration_async(user_id, provider)
+    async with factory() as session:
+        try:
+            if existing:
+                # Build dynamic SET clause
+                sets = ["updated_at = :now"]
+                params: dict = {"uid": user_id, "prov": provider, "now": now}
+                if access_token is not None:
+                    sets.append("access_token = :acc")
+                    params["acc"] = access_token
+                if refresh_token is not None:
+                    sets.append("refresh_token = :ref")
+                    params["ref"] = refresh_token
+                if token_expires_at is not None:
+                    sets.append("token_expires_at = :exp")
+                    params["exp"] = token_expires_at
+                if scopes is not None:
+                    sets.append("scopes = :sc")
+                    params["sc"] = scopes
+                if metadata_json is not None:
+                    sets.append("metadata_json = :meta")
+                    params["meta"] = metadata_json
+                if status_value is not None:
+                    sets.append("status = :st")
+                    params["st"] = status_value
+                await session.execute(
+                    _sa_text(
+                        f"UPDATE user_integrations SET {', '.join(sets)} "
+                        "WHERE auth_user_id = :uid AND provider = :prov"
+                    ),
+                    params,
+                )
+            else:
+                cols = ["id", "auth_user_id", "provider", "connected_at", "updated_at"]
+                vals = [":id", ":uid", ":prov", ":now", ":now"]
+                params = {
+                    "id": str(uuid.uuid4()), "uid": user_id,
+                    "prov": provider, "now": now,
+                }
+                if access_token is not None:
+                    cols.append("access_token")
+                    vals.append(":acc")
+                    params["acc"] = access_token
+                if refresh_token is not None:
+                    cols.append("refresh_token")
+                    vals.append(":ref")
+                    params["ref"] = refresh_token
+                if token_expires_at is not None:
+                    cols.append("token_expires_at")
+                    vals.append(":exp")
+                    params["exp"] = token_expires_at
+                if scopes is not None:
+                    cols.append("scopes")
+                    vals.append(":sc")
+                    params["sc"] = scopes
+                if metadata_json is not None:
+                    cols.append("metadata_json")
+                    vals.append(":meta")
+                    params["meta"] = metadata_json
+                if status_value is not None:
+                    cols.append("status")
+                    vals.append(":st")
+                    params["st"] = status_value
+                await session.execute(
+                    _sa_text(
+                        f"INSERT INTO user_integrations ({', '.join(cols)}) "
+                        f"VALUES ({', '.join(vals)})"
+                    ),
+                    params,
+                )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def _delete_integration_async(user_id: str, provider: str) -> None:
+    """Supprime une integration en async."""
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    factory = _gsf()
+    async with factory() as session:
+        try:
+            await session.execute(
+                _sa_text(
+                    "DELETE FROM user_integrations "
+                    "WHERE auth_user_id = :uid AND provider = :prov"
+                ),
+                {"uid": user_id, "prov": provider},
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def _log_sync_async(
+    user_id: str, provider: str, sync_type: str,
+    st: str, items: int = 0, error: str | None = None,
+) -> None:
+    """Async version of _log_sync — PG-compatible."""
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    factory = _gsf()
+    now = datetime.now(timezone.utc).isoformat()
+    async with factory() as session:
+        try:
+            await session.execute(
+                _sa_text(
+                    "INSERT INTO integration_sync_log "
+                    "(id, auth_user_id, provider, sync_type, status, "
+                    " items_synced, last_synced_at, error_message) "
+                    "VALUES (:id, :uid, :prov, :stype, :st, :n, :now, :err)"
+                ),
+                {
+                    "id": str(uuid.uuid4()), "uid": user_id,
+                    "prov": provider, "stype": sync_type, "st": st,
+                    "n": items, "now": now, "err": error,
+                },
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+
+
+async def _get_last_sync_async(user_id: str, provider: str) -> str | None:
+    """Recupere la derniere date de sync pour un provider."""
+    from sqlalchemy import text as _sa_text
+    from api.database import get_session_factory as _gsf
+    factory = _gsf()
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                _sa_text(
+                    "SELECT last_synced_at FROM integration_sync_log "
+                    "WHERE auth_user_id = :uid AND provider = :prov "
+                    "ORDER BY last_synced_at DESC LIMIT 1"
+                ),
+                {"uid": user_id, "prov": provider},
+            )
+            row = result.first()
+    except Exception:
+        return None
+    return row[0] if row else None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Wrappers sync (gardent l'API existante pour les callers non migres)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _get_integration(db, user_id: str, provider: str) -> dict | None:
+    """Sync wrapper retro-compatible — utilise async sous le capot.
+
+    La coroutine est creee dans le `_runner` pour eviter le RuntimeWarning
+    'coroutine never awaited' en cas de fallback vers ThreadPoolExecutor.
+    """
+    import asyncio as _aio
+
+    def _runner():
+        return _aio.run(_get_integration_async(user_id, provider))
+
+    try:
+        return _runner()
+    except RuntimeError:
+        # Already in event loop — delegue a un thread separe
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(_runner).result()
 
 
 def _require_integration(db, user_id: str, provider: str) -> dict:
@@ -124,21 +320,29 @@ def _require_integration(db, user_id: str, provider: str) -> dict:
 
 def _log_sync(db, user_id: str, provider: str, sync_type: str,
               st: str, items: int = 0, error: str | None = None):
-    conn = _get_conn(db)
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        "INSERT INTO integration_sync_log (id, auth_user_id, provider, sync_type, status, items_synced, last_synced_at, error_message) VALUES (?,?,?,?,?,?,?,?)",
-        (str(uuid.uuid4()), user_id, provider, sync_type, st, items, now, error),
-    )
-    conn.commit()
+    """Sync wrapper retro-compatible."""
+    import asyncio as _aio
+
+    def _runner():
+        return _aio.run(
+            _log_sync_async(user_id, provider, sync_type, st, items, error)
+        )
+
+    try:
+        _runner()
+    except RuntimeError:
+        # Already in event loop — delegue a un thread separe
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(_runner).result()
 
 
 async def _refresh_google_token(db, user_id: str, provider: str) -> str | None:
-    """Refresh an expired Google token using the refresh_token."""
+    """Refresh an expired Google token using the refresh_token (async, PG-compatible)."""
     client_id = os.environ.get("GOOGLE_CLIENT_ID")
     client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
 
-    row = _get_integration(db, user_id, provider)
+    row = await _get_integration_async(user_id, provider)
     if not row or not row.get("refresh_token"):
         return None
 
@@ -153,12 +357,9 @@ async def _refresh_google_token(db, user_id: str, provider: str) -> str | None:
             if resp.status_code == 200:
                 new_token = resp.json().get("access_token")
                 if new_token:
-                    _get_conn(db).execute(
-                        "UPDATE user_integrations SET access_token = ?, updated_at = ? "
-                        "WHERE auth_user_id = ? AND provider = ?",
-                        (new_token, datetime.now(timezone.utc).isoformat(), user_id, provider),
+                    await _upsert_integration_async(
+                        user_id, provider, access_token=new_token,
                     )
-                    _get_conn(db).commit()
                     return new_token
     except Exception:
         pass
@@ -170,23 +371,18 @@ async def _refresh_google_token(db, user_id: str, provider: str) -> str | None:
 @router.get("", response_model=list[IntegrationStatus])
 async def list_integrations(db=Depends(get_db), user=Depends(require_auth)):
     _ensure_integrations_tables(db)
-    conn = _get_conn(db)
     user_id = user["id"]
 
     results: list[IntegrationStatus] = []
     for prov in SUPPORTED_PROVIDERS:
-        integ = _get_integration(db, user_id, prov)
+        integ = await _get_integration_async(user_id, prov)
         if integ:
-            # Get last sync
-            sync_row = conn.execute(
-                "SELECT last_synced_at FROM integration_sync_log WHERE auth_user_id = ? AND provider = ? ORDER BY last_synced_at DESC LIMIT 1",
-                (user_id, prov),
-            ).fetchone()
+            last_synced = await _get_last_sync_async(user_id, prov)
             results.append(IntegrationStatus(
                 provider=prov,
                 connected=True,
                 connected_at=integ["connected_at"],
-                last_synced=sync_row[0] if sync_row else None,
+                last_synced=last_synced,
                 status="active",
             ))
         else:
@@ -231,29 +427,19 @@ async def google_oauth_connect(data: dict, db=Depends(get_db), user=Depends(requ
     if not access_token:
         raise HTTPException(status_code=401, detail="Aucun token recu de Google")
 
-    # Store tokens for all 3 Google services
+    # Store tokens for all 3 Google services (async upsert).
     _ensure_integrations_tables(db)
-    conn = _get_conn(db)
     user_id = user["id"]
-    now = datetime.now(timezone.utc).isoformat()
 
     connected = []
     for svc in ["google_calendar", "gmail", "google_drive"]:
-        existing = _get_integration(db, user_id, svc)
-        if existing:
-            conn.execute(
-                "UPDATE user_integrations SET access_token = ?, refresh_token = ?, "
-                "status = 'connected', updated_at = ? WHERE auth_user_id = ? AND provider = ?",
-                (access_token, refresh_token, now, user_id, svc),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO user_integrations (id, auth_user_id, provider, access_token, refresh_token, "
-                "status, connected_at, updated_at) VALUES (?, ?, ?, ?, ?, 'connected', ?, ?)",
-                (str(uuid.uuid4()), user_id, svc, access_token, refresh_token, now, now),
-            )
+        await _upsert_integration_async(
+            user_id, svc,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            status_value="connected",
+        )
         connected.append(svc)
-    conn.commit()
 
     return {"connected": True, "services": connected}
 
@@ -264,24 +450,11 @@ async def connect_provider(provider: str, data: ConnectIn, db=Depends(get_db), u
         raise HTTPException(status_code=400, detail=f"Provider non supporte: {provider}")
 
     _ensure_integrations_tables(db)
-    conn = _get_conn(db)
     user_id = user["id"]
-    now = datetime.now(timezone.utc).isoformat()
     token = data.access_token or data.api_key or ""
 
-    # Upsert
-    existing = _get_integration(db, user_id, provider)
-    if existing:
-        conn.execute(
-            "UPDATE user_integrations SET access_token = ?, updated_at = ? WHERE auth_user_id = ? AND provider = ?",
-            (token, now, user_id, provider),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO user_integrations (id, auth_user_id, provider, access_token, connected_at, updated_at) VALUES (?,?,?,?,?,?)",
-            (str(uuid.uuid4()), user_id, provider, token, now, now),
-        )
-    conn.commit()
+    # Upsert async
+    await _upsert_integration_async(user_id, provider, access_token=token)
     return {"connected": True, "provider": provider}
 
 
@@ -291,12 +464,7 @@ async def disconnect_provider(provider: str, db=Depends(get_db), user=Depends(re
         raise HTTPException(status_code=400, detail=f"Provider non supporte: {provider}")
 
     _ensure_integrations_tables(db)
-    conn = _get_conn(db)
-    conn.execute(
-        "DELETE FROM user_integrations WHERE auth_user_id = ? AND provider = ?",
-        (user["id"], provider),
-    )
-    conn.commit()
+    await _delete_integration_async(user["id"], provider)
     return {"disconnected": True, "provider": provider}
 
 
@@ -1192,19 +1360,10 @@ async def connect_notion(data: dict, db=Depends(get_db), user=Depends(require_au
     except httpx.HTTPError:
         raise HTTPException(status_code=502, detail="Impossible de joindre l'API Notion")
 
-    conn = _get_conn(db)
-    existing = _get_integration(db, user_id, "notion")
-    if existing:
-        conn.execute(
-            "UPDATE user_integrations SET access_token = ?, status = 'connected', updated_at = ? WHERE auth_user_id = ? AND provider = ?",
-            (token, now, user_id, "notion"),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO user_integrations (id, auth_user_id, provider, access_token, status, connected_at, updated_at) VALUES (?, ?, 'notion', ?, 'connected', ?, ?)",
-            (str(uuid.uuid4()), user_id, token, now, now),
-        )
-    conn.commit()
+    await _upsert_integration_async(
+        user_id, "notion",
+        access_token=token, status_value="connected",
+    )
     return {"connected": True, "provider": "notion"}
 
 
@@ -1258,19 +1417,10 @@ async def connect_slack(data: dict, db=Depends(get_db), user=Depends(require_aut
     user_id = user["id"]
     now = datetime.now(timezone.utc).isoformat()
 
-    conn = _get_conn(db)
-    existing = _get_integration(db, user_id, "slack")
-    if existing:
-        conn.execute(
-            "UPDATE user_integrations SET access_token = ?, status = 'connected', updated_at = ? WHERE auth_user_id = ? AND provider = ?",
-            (webhook_url, now, user_id, "slack"),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO user_integrations (id, auth_user_id, provider, access_token, status, connected_at, updated_at) VALUES (?, ?, 'slack', ?, 'connected', ?, ?)",
-            (str(uuid.uuid4()), user_id, webhook_url, now, now),
-        )
-    conn.commit()
+    await _upsert_integration_async(
+        user_id, "slack",
+        access_token=webhook_url, status_value="connected",
+    )
     return {"connected": True, "provider": "slack"}
 
 
@@ -1321,20 +1471,12 @@ async def connect_github(data: dict, db=Depends(get_db), user=Depends(require_au
             raise HTTPException(status_code=401, detail="Token GitHub invalide")
         github_user = resp.json().get("login", "")
 
-    conn = _get_conn(db)
-    existing = _get_integration(db, user_id, "github")
     metadata = json.dumps({"github_username": github_user})
-    if existing:
-        conn.execute(
-            "UPDATE user_integrations SET access_token = ?, metadata_json = ?, status = 'connected', updated_at = ? WHERE auth_user_id = ? AND provider = ?",
-            (token, metadata, now, user_id, "github"),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO user_integrations (id, auth_user_id, provider, access_token, metadata_json, status, connected_at, updated_at) VALUES (?, ?, 'github', ?, ?, 'connected', ?, ?)",
-            (str(uuid.uuid4()), user_id, token, metadata, now, now),
-        )
-    conn.commit()
+    await _upsert_integration_async(
+        user_id, "github",
+        access_token=token, metadata_json=metadata,
+        status_value="connected",
+    )
     return {"connected": True, "provider": "github", "username": github_user}
 
 

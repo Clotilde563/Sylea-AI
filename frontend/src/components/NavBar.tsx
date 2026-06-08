@@ -59,48 +59,47 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
     return () => document.removeEventListener('mousedown', handler)
   }, [dropdownOpen])
 
-  // Masquer tous les liens tant que le profil n'est pas créé
+  // Masquer tous les liens tant que le profil n'est pas créé.
+  // "Progression des décisions" retiré le 2026-06-01 (decision produit).
   const links = profil ? [
     { to: '/', label: t('nav.dashboard') },
-    { to: '/network', label: 'Réseau Syléa' },
-    { to: '/statistiques', label: t('nav.statistiques') },
+    { to: '/statistiques', label: t('nav.statistiques') || 'Statistiques' },
+    { to: '/tracking', label: 'Mes dilemmes' },
   ] : []
 
   return (
     <>
     <nav
+      className="glass-strong"
       style={{
-        background: 'rgba(3,7,15,0.94)',
-        backdropFilter: 'blur(16px)',
-        borderBottom: '1px solid var(--border)',
         position: 'sticky',
         top: 0,
         zIndex: 100,
+        borderBottom: '1px solid var(--border)',
+        backgroundImage: 'linear-gradient(180deg, rgba(8,9,12,0.85), rgba(8,9,12,0.78))',
       }}
     >
       <div
-        className="container"
+        className="container container-lg"
         style={{
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          height: '3.5rem',
+          height: '3.25rem',
         }}
       >
         {/* Logo + brand + arrow */}
         <div ref={dropdownRef} style={{ display: 'flex', alignItems: 'center', position: 'relative' }}>
-          <Link to="/" style={{ display: 'flex', alignItems: 'center', gap: '0.625rem', textDecoration: 'none' }}>
-            <SyleaLogo size={34} animated={false} />
-            <span style={{ fontWeight: 700, fontSize: '1.05rem', letterSpacing: '0.12em' }}>
-              <span style={{
-                color: 'var(--accent-silver)',
-                filter: 'drop-shadow(0 0 6px rgba(184,208,234,0.35))',
-              }}>SYLÉA</span>
-              <span style={{
-                color: 'var(--accent-violet-light)',
-                marginLeft: '0.25rem',
-                filter: 'drop-shadow(0 0 5px rgba(64,144,240,0.6))',
-              }}>.AI</span>
+          <Link to="/" style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', textDecoration: 'none' }}>
+            <SyleaLogo size={28} animated={false} />
+            <span style={{
+              fontWeight: 700,
+              fontSize: '0.95rem',
+              letterSpacing: '0.06em',
+              fontFeatureSettings: '"cv11", "ss03"',
+            }}>
+              <span style={{ color: 'var(--text-primary)' }}>Syléa</span>
+              <span className="headline-gradient" style={{ marginLeft: 1, fontWeight: 800 }}>.ai</span>
             </span>
           </Link>
 
@@ -114,32 +113,33 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
             onClick={() => setDropdownOpen(!dropdownOpen)}
             style={{
               background: 'transparent', border: 'none', cursor: 'pointer',
-              padding: '0.25rem 0.35rem', marginLeft: '0.3rem',
+              padding: '4px 6px', marginLeft: 4,
               display: 'flex', alignItems: 'center',
               color: 'var(--text-muted)',
-              transition: 'transform 0.2s, color 0.15s',
+              transition: 'transform var(--duration-base) var(--ease-out), color var(--duration-fast) var(--ease-out)',
               transform: dropdownOpen ? 'rotate(180deg)' : 'rotate(0deg)',
+              borderRadius: 'var(--radius-sm)',
             }}
+            onMouseEnter={e => { e.currentTarget.style.color = 'var(--text-primary)' }}
+            onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-muted)' }}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-              stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round">
               <polyline points="6 9 12 15 18 9"/>
             </svg>
           </button>
 
-          {/* Dropdown menu */}
+          {/* Dropdown menu — Linear style (glass + border subtle + items propres) */}
           {dropdownOpen && (
-            <div style={{
+            <div className="glass-strong animate-fade-in-scale" style={{
               position: 'absolute', top: '100%', left: 0,
-              marginTop: '0.35rem',
-              background: 'rgba(6, 12, 26, 0.94)',
-              backdropFilter: 'blur(20px)',
-              border: '1px solid var(--border)',
+              marginTop: 8,
+              border: '1px solid var(--border-strong)',
               borderRadius: 'var(--radius-lg)',
-              boxShadow: '0 12px 40px rgba(0,0,0,0.7)',
-              minWidth: 280, zIndex: 200,
-              animation: 'fadeInScale 0.15s ease',
+              boxShadow: 'var(--shadow-xl)',
+              minWidth: 300, zIndex: 200,
               overflow: 'hidden',
+              padding: 4,
             }}>
               {/* Onglet 0: Parametres */}
               <button
@@ -164,49 +164,36 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
                 </div>
               </button>
 
-              {/* Onglet unifié: Intégrations & Sécurité (services OAuth + clés API + tokens B2B) */}
+              {/* Intégrations & Sécurité — temporairement greye, "à venir" */}
               <button
-                onClick={() => { setDropdownOpen(false); navigate('/integrations') }}
+                disabled
+                aria-disabled="true"
                 style={{
                   display: 'flex', alignItems: 'center', gap: '0.6rem',
                   width: '100%', padding: '0.75rem 1rem',
                   background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
-                  color: 'var(--text-secondary)', fontSize: '0.82rem',
-                  cursor: 'pointer', textAlign: 'left',
-                  transition: 'background 0.15s',
+                  color: 'var(--text-muted)', fontSize: '0.82rem',
+                  cursor: 'not-allowed', textAlign: 'left',
+                  opacity: 0.55,
                 }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
                 </svg>
-                <div>
-                  <div style={{ fontWeight: 500, color: 'var(--text-primary)' }}>Intégrations & Sécurité</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 500, color: 'var(--text-secondary)' }}>
+                    Intégrations & Sécurité
+                    <span style={{
+                      fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.05em',
+                      padding: '0.08rem 0.4rem', borderRadius: 999,
+                      background: 'rgba(245,158,11,0.15)', color: '#fbbf24',
+                      border: '1px solid rgba(245,158,11,0.3)',
+                      textTransform: 'uppercase',
+                    }}>
+                      À venir
+                    </span>
+                  </div>
                   <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Services OAuth · Clés API tierces · Tokens B2B</div>
-                </div>
-              </button>
-
-              {/* Onglet: Outils Agent 3 (Phase 3) */}
-              <button
-                onClick={() => { setDropdownOpen(false); navigate('/outils') }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.6rem',
-                  width: '100%', padding: '0.75rem 1rem',
-                  background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
-                  color: 'var(--text-secondary)', fontSize: '0.82rem',
-                  cursor: 'pointer', textAlign: 'left',
-                  transition: 'background 0.15s',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-                </svg>
-                <div>
-                  <div style={{ fontWeight: 500, color: 'var(--text-primary)' }}>Outils Agent 3</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Activer/désactiver les capacités de l'agent</div>
                 </div>
               </button>
 
@@ -305,29 +292,6 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
                 </div>
               </button>
 
-              {/* Onglet 4: Coaching */}
-              <button
-                onClick={() => { setDropdownOpen(false); navigate('/coaching') }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.6rem',
-                  width: '100%', padding: '0.75rem 1rem',
-                  background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
-                  color: 'var(--text-secondary)', fontSize: '0.82rem',
-                  cursor: 'pointer', textAlign: 'left',
-                  transition: 'background 0.15s',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
-                </svg>
-                <div>
-                  <div style={{ fontWeight: 500, color: 'var(--text-primary)' }}>Coaching Vocal</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>Sessions hebdo, bilans et récaps</div>
-                </div>
-              </button>
-
               {/* Onglet 7: Modifier / Créer mon profil */}
               <button
                 onClick={() => {
@@ -362,8 +326,8 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
           )}
         </div>
 
-        {/* Liens de navigation */}
-        <div style={{ display: 'flex', gap: '0.25rem' }}>
+        {/* Liens de navigation — style Linear (subtle, active state via couleur+dot) */}
+        <div style={{ display: 'flex', gap: '2px', alignItems: 'center' }}>
           {links.map(({ to, label }) => {
             const active = pathname === to || (to !== '/' && pathname.startsWith(to))
             return (
@@ -371,19 +335,45 @@ export function NavBar({ onOpenChatbot }: NavBarProps) {
                 key={to}
                 to={to}
                 style={{
-                  padding: '0.375rem 0.75rem',
-                  borderRadius: '6px',
-                  fontSize: '0.85rem',
-                  fontWeight: active ? 600 : 400,
-                  color: active ? 'var(--accent-violet-light)' : 'var(--text-muted)',
-                  background: active ? 'rgba(26,111,216,0.13)' : 'transparent',
-                  border: active ? '1px solid rgba(26,111,216,0.25)' : '1px solid transparent',
+                  position: 'relative',
+                  padding: '7px 12px',
+                  borderRadius: 'var(--radius-md)',
+                  fontSize: 'var(--fs-sm)',
+                  fontWeight: 500,
+                  letterSpacing: 'var(--tracking-normal)',
+                  color: active ? 'var(--text-primary)' : 'var(--text-muted)',
+                  background: active ? 'var(--bg-elevated)' : 'transparent',
                   textDecoration: 'none',
-                  transition: 'all 0.15s',
+                  transition: 'color var(--duration-fast) var(--ease-out), background var(--duration-fast) var(--ease-out)',
                   whiteSpace: 'nowrap',
+                }}
+                onMouseEnter={e => {
+                  if (!active) {
+                    e.currentTarget.style.color = 'var(--text-secondary)'
+                    e.currentTarget.style.background = 'rgba(255,255,255,0.03)'
+                  }
+                }}
+                onMouseLeave={e => {
+                  if (!active) {
+                    e.currentTarget.style.color = 'var(--text-muted)'
+                    e.currentTarget.style.background = 'transparent'
+                  }
                 }}
               >
                 {label}
+                {active && (
+                  <span style={{
+                    position: 'absolute',
+                    bottom: -1,
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    width: 18,
+                    height: 2,
+                    borderRadius: 1,
+                    background: 'var(--sylea-gradient)',
+                    boxShadow: '0 0 8px rgba(59,130,246,0.5)',
+                  }} />
+                )}
               </Link>
             )
           })}

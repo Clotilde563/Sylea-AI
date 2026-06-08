@@ -43,23 +43,19 @@ TEST_USER_ID = "test-user-clawhub"
 
 
 @pytest.fixture()
-def db():
-    manager = DatabaseManager(db_path=Path(":memory:"))
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    manager._conn = conn
-    manager._initialiser_schema()
+def db(tmp_path, monkeypatch):
+    """Shared-DB (sync + async) — migration PG."""
+    from tests.conftest import make_shared_db, dispose_shared_db
+    manager = make_shared_db(tmp_path, monkeypatch)
 
-    conn.execute(
+    manager._conn.execute(
         "INSERT INTO users (id, email, hashed_password, provider, created_at) "
         "VALUES (?, ?, ?, ?, datetime('now'))",
         (TEST_USER_ID, "clawhub@test.com", "fake", "local"),
     )
-    conn.commit()
+    manager._conn.commit()
     yield manager
-    manager.disconnect()
+    dispose_shared_db(manager)
 
 
 @pytest.fixture()
@@ -248,24 +244,25 @@ class TestEventsEndpoint:
         assert counts.get("auto_publish", 0) == 0
 
     def test_events_logged_by_helper(self, client, db):
-        """Le helper _log_clawhub_event insere, et l'endpoint les retourne
+        """Le helper _log_clawhub_event_async insere, et l'endpoint les retourne
         triees DESC (plus recent en premier)."""
-        from api.routers.agent3_openclaw import _log_clawhub_event
+        import asyncio as _asyncio
+        from api.routers.agent3_openclaw import _log_clawhub_event_async
 
-        _log_clawhub_event(
-            db, TEST_USER_ID, "auto_search", "slack",
+        _asyncio.run(_log_clawhub_event_async(
+            TEST_USER_ID, "auto_search", "slack",
             trigger_context="query=slack notifications",
-        )
-        _log_clawhub_event(
-            db, TEST_USER_ID, "auto_install", "slack",
+        ))
+        _asyncio.run(_log_clawhub_event_async(
+            TEST_USER_ID, "auto_install", "slack",
             trigger_context="install slack",
-        )
-        _log_clawhub_event(
-            db, TEST_USER_ID, "auto_publish", "custom-skill",
+        ))
+        _asyncio.run(_log_clawhub_event_async(
+            TEST_USER_ID, "auto_publish", "custom-skill",
             trigger_context="create missing skill",
             success=False,
             error_message="Network error",
-        )
+        ))
 
         resp = client.get("/api/agent3/clawhub/events")
         body = resp.json()
@@ -290,7 +287,8 @@ class TestEventsEndpoint:
 
     def test_events_are_per_user(self, db):
         """Les events d'un user ne doivent pas fuiter chez un autre."""
-        from api.routers.agent3_openclaw import _log_clawhub_event
+        import asyncio as _asyncio
+        from api.routers.agent3_openclaw import _log_clawhub_event_async
 
         user2 = "user-2-events"
         db.conn.execute(
@@ -300,8 +298,8 @@ class TestEventsEndpoint:
         )
         db.conn.commit()
 
-        _log_clawhub_event(db, TEST_USER_ID, "auto_install", "skill-a")
-        _log_clawhub_event(db, user2, "auto_install", "skill-b")
+        _asyncio.run(_log_clawhub_event_async(TEST_USER_ID, "auto_install", "skill-a"))
+        _asyncio.run(_log_clawhub_event_async(user2, "auto_install", "skill-b"))
 
         async def _get_db():
             yield db
@@ -333,9 +331,10 @@ class TestEventsEndpoint:
 
     def test_events_limit_clamp(self, client, db):
         """Le parametre limit est borne a [1, 200]."""
-        from api.routers.agent3_openclaw import _log_clawhub_event
+        import asyncio as _asyncio
+        from api.routers.agent3_openclaw import _log_clawhub_event_async
         for i in range(10):
-            _log_clawhub_event(db, TEST_USER_ID, "auto_search", f"skill-{i}")
+            _asyncio.run(_log_clawhub_event_async(TEST_USER_ID, "auto_search", f"skill-{i}"))
 
         # limit normal
         resp = client.get("/api/agent3/clawhub/events?limit=5")
@@ -548,8 +547,8 @@ class TestDispatcherLogsEvents:
         assert result.get("is_error") is False
 
         # L'event a ete logue
-        from api.routers.agent3_openclaw import _list_clawhub_events
-        events = _list_clawhub_events(db, TEST_USER_ID)
+        from api.routers.agent3_openclaw import _list_clawhub_events_async
+        events = await _list_clawhub_events_async(TEST_USER_ID)
         assert len(events) == 1
         assert events[0]["event_type"] == "auto_search"
         assert events[0]["success"] is True
@@ -580,8 +579,8 @@ class TestDispatcherLogsEvents:
 
         assert result.get("is_error") is True
 
-        from api.routers.agent3_openclaw import _list_clawhub_events
-        events = _list_clawhub_events(db, TEST_USER_ID)
+        from api.routers.agent3_openclaw import _list_clawhub_events_async
+        events = await _list_clawhub_events_async(TEST_USER_ID)
         assert len(events) == 1
         ev = events[0]
         assert ev["event_type"] == "auto_install"
@@ -614,8 +613,8 @@ class TestDispatcherLogsEvents:
 
         assert result.get("is_error") is False
 
-        from api.routers.agent3_openclaw import _list_clawhub_events
-        events = _list_clawhub_events(db, TEST_USER_ID)
+        from api.routers.agent3_openclaw import _list_clawhub_events_async
+        events = await _list_clawhub_events_async(TEST_USER_ID)
         assert len(events) == 1
         assert events[0]["event_type"] == "auto_publish"
         assert events[0]["slug"] == "new-skill"

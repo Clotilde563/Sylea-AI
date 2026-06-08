@@ -62,39 +62,13 @@ def format_device_context(ctx) -> str:
     return "\n".join(parts)
 
 
-def build_full_user_context(
-    db=None,
-    user_id: str | None = None,
-    profil=None,
-    include_collected_info: bool = True,
-    include_decisions: bool = True,
-    include_sous_objectifs: bool = True,
-    max_decisions: int = 10,
-) -> str:
-    """Build a comprehensive user context string for ANY AI feature.
+def _build_static_user_context(profil) -> str:
+    """Sections statiques du contexte user (profil, objectif, finances, etc.).
 
-    This is the SINGLE SOURCE OF TRUTH for user context.
-    ALL AI features MUST use this function.
-
-    Args:
-        db: DatabaseManager instance (optional, needed for collected_info/decisions/sous_objectifs)
-        user_id: auth_user_id for DB lookups (optional)
-        profil: ProfilUtilisateur instance (optional, loaded from DB if not provided)
-        include_collected_info: include agent_collected_info table data
-        include_decisions: include recent decisions history
-        include_sous_objectifs: include sub-objectives
-        max_decisions: max number of recent decisions to include
-
-    Returns:
-        Formatted context string, or empty string if no profile found.
+    Pas de DB calls — purement basee sur l'objet ProfilUtilisateur deja charge.
+    Les sections DB-dependent (collected_info, decisions, sous_objectifs) sont
+    construites dans `build_full_user_context_async` via SQLAlchemy text().
     """
-    from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
-
-    if profil is None and db is not None:
-        repo = ProfilRepository(db)
-        if not repo.existe(auth_user_id=user_id):
-            return ""
-        profil = repo.charger(auth_user_id=user_id)
     if profil is None:
         return ""
 
@@ -201,68 +175,123 @@ def build_full_user_context(
         if lang:
             lines.append(f"  Langues : {', '.join(lang) if isinstance(lang, list) else lang}")
 
-    # 8. agent_collected_info
-    if include_collected_info and db is not None and user_id:
-        try:
-            rows = db.conn.execute(
-                "SELECT field, value FROM agent_collected_info WHERE user_id = ? ORDER BY collected_at DESC LIMIT 30",
-                (user_id,),
-            ).fetchall()
-            if rows:
-                lines.append("\nINFORMATIONS COLLECTEES PAR L'AGENT :")
-                for field, value in rows:
-                    lines.append(f"  {field} : {value}")
-        except Exception:
-            pass
+    return "\n".join(lines)
 
-    # 9. Recent decisions
-    if include_decisions and db is not None:
-        try:
-            dec_repo = DecisionRepository(db)
-            if user_id:
-                decisions = dec_repo.lister_pour_utilisateur(
-                    profil.id, max_decisions, auth_user_id=user_id
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def build_full_user_context_async(
+    db=None,
+    user_id: str | None = None,
+    profil=None,
+    include_collected_info: bool = True,
+    include_decisions: bool = True,
+    include_sous_objectifs: bool = True,
+    max_decisions: int = 10,
+) -> str:
+    """Version async de build_full_user_context — PG-compatible.
+
+    Le profil est charge via ProfilRepository (sync) si non fourni — meme
+    interface que la version sync. Les sections optionnelles (collected_info,
+    decisions, sous_objectifs) passent par SQLAlchemy text() async.
+
+    DecisionRepository.lister_pour_utilisateur reste sync car la table
+    decisions est simple et le repo n'a pas encore d'API async ; pour les
+    petites listes (max 10), l'overhead est negligeable.
+    """
+    from sylea.core.storage.repositories import ProfilRepository, DecisionRepository
+    from sqlalchemy import text
+    from api.database import get_session_factory
+
+    if profil is None and db is not None:
+        repo = ProfilRepository(db)
+        if not repo.existe(auth_user_id=user_id):
+            return ""
+        profil = repo.charger(auth_user_id=user_id)
+    if profil is None:
+        return ""
+
+    # Build the static sections (no DB calls)
+    base = _build_static_user_context(profil)
+    lines = [base] if base else []
+
+    factory = get_session_factory()
+    async with factory() as session:
+        # 8. agent_collected_info (async)
+        if include_collected_info and user_id:
+            try:
+                result = await session.execute(
+                    text(
+                        "SELECT field, value FROM agent_collected_info "
+                        "WHERE user_id = :uid ORDER BY collected_at DESC LIMIT 30"
+                    ),
+                    {"uid": user_id},
                 )
-            else:
-                decisions = dec_repo.lister_pour_utilisateur(profil.id, max_decisions)
-            if decisions:
-                lines.append(f"\nDERNIERES DECISIONS ({min(len(decisions), max_decisions)}) :")
-                for d in decisions[:max_decisions]:
-                    chosen = d.get_option_choisie()
-                    choix_desc = chosen.description if chosen else "?"
-                    # Use time-based impact if available
-                    tga = getattr(d, 'temps_gagne_apres', 0)
-                    tgb = getattr(d, 'temps_gagne_avant', 0)
-                    if tga and tgb is not None:
-                        impact_days = tga - tgb
-                        lines.append(f"  - {d.question} -> {choix_desc} (impact: {impact_days:+.1f} jours)")
-                    else:
-                        impact = (
-                            (d.probabilite_apres - d.probabilite_avant)
-                            if d.probabilite_apres is not None
-                            else 0
-                        )
-                        lines.append(f"  - {d.question} -> {choix_desc} (impact: {impact:+.2f}%)")
-        except Exception:
-            pass
+                rows = result.mappings().all()
+                if rows:
+                    lines.append("\nINFORMATIONS COLLECTEES PAR L'AGENT :")
+                    for r in rows:
+                        lines.append(f"  {r['field']} : {r['value']}")
+            except Exception:
+                pass
 
-    # 10. Sub-objectives
-    if include_sous_objectifs and db is not None:
-        try:
-            profil_id_row = db.conn.execute(
-                "SELECT id FROM profil_utilisateur WHERE id = ? LIMIT 1",
-                (profil.id,),
-            ).fetchone()
-            if profil_id_row:
-                so_rows = db.conn.execute(
-                    "SELECT titre, progression FROM sous_objectifs WHERE user_id = ? ORDER BY ordre",
-                    (profil.id,),
-                ).fetchall()
+        # 9. Recent decisions (sync repo — petite liste, OK)
+        if include_decisions and db is not None:
+            try:
+                dec_repo = DecisionRepository(db)
+                if user_id:
+                    decisions = dec_repo.lister_pour_utilisateur(
+                        profil.id, max_decisions, auth_user_id=user_id
+                    )
+                else:
+                    decisions = dec_repo.lister_pour_utilisateur(profil.id, max_decisions)
+                if decisions:
+                    lines.append(
+                        f"\nDERNIERES DECISIONS ({min(len(decisions), max_decisions)}) :"
+                    )
+                    for d in decisions[:max_decisions]:
+                        chosen = d.get_option_choisie()
+                        choix_desc = chosen.description if chosen else "?"
+                        tga = getattr(d, 'temps_gagne_apres', 0)
+                        tgb = getattr(d, 'temps_gagne_avant', 0)
+                        if tga and tgb is not None:
+                            impact_days = tga - tgb
+                            lines.append(
+                                f"  - {d.question} -> {choix_desc} "
+                                f"(impact: {impact_days:+.1f} jours)"
+                            )
+                        else:
+                            impact = (
+                                (d.probabilite_apres - d.probabilite_avant)
+                                if d.probabilite_apres is not None else 0
+                            )
+                            lines.append(
+                                f"  - {d.question} -> {choix_desc} "
+                                f"(impact: {impact:+.2f}%)"
+                            )
+            except Exception:
+                pass
+
+        # 10. Sub-objectives (async)
+        if include_sous_objectifs:
+            try:
+                result = await session.execute(
+                    text(
+                        "SELECT titre, progression FROM sous_objectifs "
+                        "WHERE user_id = :pid ORDER BY ordre"
+                    ),
+                    {"pid": profil.id},
+                )
+                so_rows = result.mappings().all()
                 if so_rows:
                     lines.append("\nSOUS-OBJECTIFS :")
                     for so in so_rows:
-                        lines.append(f"  - {so[0]} (progression: {so[1]:.0f}%)")
-        except Exception:
-            pass
+                        lines.append(
+                            f"  - {so['titre']} (progression: {(so['progression'] or 0):.0f}%)"
+                        )
+            except Exception:
+                pass
 
     return "\n".join(lines)

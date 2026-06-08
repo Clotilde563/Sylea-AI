@@ -9,8 +9,8 @@ recents) sans avoir a faire un tool call a chaque tour.
 Cache 5min per-user pour eviter de spammer les API Google.
 
 Usage :
-    from api.google_context import build_google_context_block
-    block = await build_google_context_block(db, user_id)
+    from api.google_context import build_google_context_block_async
+    block = await build_google_context_block_async(user_id)
     system_prompt = awareness + block + memory + core_prompt
 """
 
@@ -28,21 +28,6 @@ logger = logging.getLogger("sylea.google_context")
 
 _CACHE_TTL_S = 300.0  # 5 min
 _cache: dict[str, tuple[float, str]] = {}
-
-
-def _get_token(db: Any, user_id: str, provider: str) -> str | None:
-    """Recupere le token OAuth pour un provider (gmail/google_calendar/google_drive)."""
-    try:
-        row = db.conn.execute(
-            "SELECT access_token FROM user_integrations "
-            "WHERE auth_user_id = ? AND provider = ?",
-            (user_id, provider),
-        ).fetchone()
-        if row and row[0] and len(row[0]) > 20:
-            return row[0]
-    except Exception:
-        pass
-    return None
 
 
 async def _fetch_gmail_unread(token: str, limit: int = 5) -> list[dict]:
@@ -175,22 +160,67 @@ def _format_block(emails: list[dict], events: list[dict], files: list[dict]) -> 
     return "\n".join(lines)
 
 
-async def build_google_context_block(db: Any, user_id: str | None) -> str:
-    """Construit le bloc Google a injecter (cached 5min per user).
+def invalidate_google_context_cache(user_id: str | None = None) -> None:
+    """Force le refresh du cache Google."""
+    if user_id is None:
+        _cache.clear()
+    else:
+        _cache.pop(user_id, None)
 
-    Tout est best-effort : si Gmail/Calendar/Drive ne sont pas connectes,
-    le block contient juste les sections disponibles. Si rien n'est
-    connecte, retourne string vide.
+
+__all__ = [
+    "invalidate_google_context_cache",
+    # Async versions (migration PG, 2026-05-13)
+    "_get_token_async",
+    "build_google_context_block_async",
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Versions async (migration PG, 2026-05-13) — compat SQLite + PostgreSQL
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _get_token_async(user_id: str, provider: str) -> str | None:
+    """Version async de _get_token — PG-compatible.
+
+    Plus de parametre `db` : utilise get_session_factory() directement.
     """
-    if not user_id or db is None:
+    from sqlalchemy import text
+    from api.database import get_session_factory
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            result = await session.execute(
+                text(
+                    "SELECT access_token FROM user_integrations "
+                    "WHERE auth_user_id = :uid AND provider = :prov"
+                ),
+                {"uid": user_id, "prov": provider},
+            )
+            row = result.first()
+            if row and row[0] and len(row[0]) > 20:
+                return row[0]
+        except Exception:
+            pass
+    return None
+
+
+async def build_google_context_block_async(user_id: str | None) -> str:
+    """Version async de build_google_context_block — PG-compatible.
+
+    Plus de parametre `db` : utilise _get_token_async() directement.
+    Logique identique : cache 5min per-user, fetch passif Gmail/Calendar/Drive,
+    composition du bloc Markdown.
+    """
+    if not user_id:
         return ""
     cached = _cache.get(user_id)
     if cached and (time.time() - cached[0] < _CACHE_TTL_S):
         return cached[1]
 
-    gmail_token = _get_token(db, user_id, "gmail")
-    cal_token = _get_token(db, user_id, "google_calendar")
-    drive_token = _get_token(db, user_id, "google_drive")
+    gmail_token = await _get_token_async(user_id, "gmail")
+    cal_token = await _get_token_async(user_id, "google_calendar")
+    drive_token = await _get_token_async(user_id, "google_drive")
 
     tasks = []
     tasks.append(_fetch_gmail_unread(gmail_token, limit=5) if gmail_token else asyncio.sleep(0, result=[]))
@@ -210,17 +240,3 @@ async def build_google_context_block(db: Any, user_id: str | None) -> str:
     block = _format_block(emails, events, files)
     _cache[user_id] = (time.time(), block)
     return block
-
-
-def invalidate_google_context_cache(user_id: str | None = None) -> None:
-    """Force le refresh du cache Google."""
-    if user_id is None:
-        _cache.clear()
-    else:
-        _cache.pop(user_id, None)
-
-
-__all__ = [
-    "build_google_context_block",
-    "invalidate_google_context_cache",
-]
