@@ -45,6 +45,9 @@ export function StatistiquesPage() {
     try {
       await api.deleteDecision(id)
       setDecisions((prev) => prev.filter((d) => d.id !== id))
+      // Si le detail des rappels de cette decision etait deplie, on le referme
+      // (evite un id deplie pointant sur une decision supprimee).
+      setExpandedRappels((cur) => (cur === id ? null : cur))
       // Re-fetch profil pour obtenir probabilite_actuelle mise à jour
       const updatedProfil = await api.getProfil()
       setProfil(updatedProfil)

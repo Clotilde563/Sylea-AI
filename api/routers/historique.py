@@ -575,8 +575,15 @@ async def supprimer_decision(
     factory = get_session_factory()
     async with factory() as session:
         try:
-            # 2b. Recompute SO progressions (invariant Dashboard)
-            if decision.sous_objectif_id:
+            # 2b. Recompute SO progressions (invariant Dashboard).
+            # On recompute des qu'il y a un impact temps (pas seulement quand
+            # sous_objectif_id est defini) : les decisions issues du TRACKING ont
+            # sous_objectif_id=None mais un impact temps reel qui a cascade sur
+            # les SO. Sans recompute, supprimer une telle decision baisse
+            # temps_gagne sans rajuster les SO -> drift de l'invariant Dashboard
+            # ("Desynchronisation detectee"). Le recompute est global+idempotent
+            # et no-op s'il n'y a aucun SO.
+            if decision.sous_objectif_id or abs(impact_temps) > 0.001:
                 try:
                     await _recompute_so_progressions_async(
                         session, profil.id,

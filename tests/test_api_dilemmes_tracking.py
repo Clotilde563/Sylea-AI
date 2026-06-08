@@ -774,3 +774,45 @@ def test_validate_then_delete_keeps_history_decision(client_with_profil: TestCli
     tracking_decisions = [d for d in decisions if d.get("rappels")]
     assert len(tracking_decisions) == 1
     assert tracking_decisions[0]["rappels"]["mode"] == "validated"
+
+
+def test_delete_tracking_decision_from_history_reverses_impact(client_with_profil: TestClient):
+    """Supprimer depuis l'historique une decision issue d'un tracking reverse
+    l'impact temps ET resynchronise la probabilite (anti-drift de l'invariant :
+    le recompute SO tourne meme si sous_objectif_id est None)."""
+    assert client_with_profil.post("/api/profil/probabilite", json={}).status_code == 200
+    profil_before = client_with_profil.get("/api/profil").json()
+    tg_before = profil_before["temps_gagne_jours"]
+
+    create_resp = client_with_profil.post(
+        "/api/dilemme/tracking/create",
+        json=_create_tracking_payload(impact_jours=30),
+    )
+    tracking_id = create_resp.json()["tracking"]["id"]
+    client_with_profil.post(
+        f"/api/dilemme/tracking/{tracking_id}/respond",
+        json={"periode_idx": 0, "choice": "0"},
+    )
+    client_with_profil.post(f"/api/dilemme/tracking/{tracking_id}/validate")
+
+    profil_after_validate = client_with_profil.get("/api/profil").json()
+    assert profil_after_validate["temps_gagne_jours"] > tg_before  # impact applique
+
+    # Recupere la decision tracking dans l'historique
+    decisions = client_with_profil.get("/api/historique?limite=20").json()
+    tracking_dec = [d for d in decisions if d.get("rappels")]
+    assert len(tracking_dec) == 1
+    dec_id = tracking_dec[0]["id"]
+
+    # Supprime la decision depuis l'historique -> reverse l'impact + recompute
+    assert client_with_profil.delete(f"/api/historique/{dec_id}").status_code == 200
+
+    profil_after_delete = client_with_profil.get("/api/profil").json()
+    # temps_gagne revient a sa valeur d'avant la validation (pas de residu)
+    assert profil_after_delete["temps_gagne_jours"] == pytest.approx(tg_before, abs=0.5)
+    # probabilite resynchronisee sur temps_gagne / temps_initial (coherence)
+    ti = profil_after_delete["temps_initial_jours"]
+    if ti > 0:
+        assert profil_after_delete["probabilite_actuelle"] == pytest.approx(
+            profil_after_delete["temps_gagne_jours"] / ti * 100, abs=0.2
+        )
