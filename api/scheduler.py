@@ -91,9 +91,14 @@ class SyleaScheduler:
         self._thread: threading.Thread | None = None
         self._running = False
         self._last_check: dict[str, str] = {}  # cron_id -> last execution minute
-        # Compteur de cout quotidien (reset a minuit). Fuite-guard.
+        # Garde-fous anti-fuite (reset chaque jour calendaire). Empechent un cron
+        # oublie de vider la cle API — cf. incident 2026-06 : session OpenClaw
+        # reutilisee -> historique accumule -> ~88k tokens re-envoyes toutes les
+        # ~30 min, hors de portee du cap (qui ne couvrait que le fallback direct).
         self._spent_today_usd: float = 0.0
         self._spent_day_key: str = ""  # "YYYY-MM-DD"
+        self._calls_today: int = 0                      # appels LLM cron / jour (TOUS chemins)
+        self._runs_per_cron_today: dict[str, int] = {}  # cron_id -> nb runs / jour
 
     def start(self):
         """Start the scheduler in a background daemon thread."""
@@ -190,17 +195,46 @@ class SyleaScheduler:
         finally:
             db.disconnect()
 
-    def _daily_budget_check(self) -> tuple[bool, float, float]:
-        """Return (allowed, spent_today, daily_cap). Reset compteur a minuit."""
+    def _reset_counters_if_new_day(self) -> None:
+        """Reset des garde-fous a minuit (jour calendaire)."""
         today = datetime.now().strftime("%Y-%m-%d")
         if self._spent_day_key != today:
             self._spent_day_key = today
             self._spent_today_usd = 0.0
+            self._calls_today = 0
+            self._runs_per_cron_today = {}
+
+    def _daily_budget_check(self) -> tuple[bool, float, float]:
+        """Return (allowed, spent_today, daily_cap)."""
         try:
             cap = float(os.environ.get("SYLEA_SCHEDULER_DAILY_CAP_USD", "0.50"))
         except Exception:
             cap = 0.50
         return (self._spent_today_usd < cap), self._spent_today_usd, cap
+
+    def _disable_cron(self, cron_id: str) -> None:
+        """Desactive un cron en base (auto-protection anti-emballement)."""
+        import asyncio as _aio
+        try:
+            from sqlalchemy import text as _sa_text
+            from api.database import get_session_factory as _gsf
+
+            async def _do():
+                _factory = _gsf()
+                async with _factory() as _session:
+                    try:
+                        await _session.execute(
+                            _sa_text("UPDATE agent3_cron SET enabled = 0 WHERE id = :cid"),
+                            {"cid": cron_id},
+                        )
+                        await _session.commit()
+                    except Exception:
+                        await _session.rollback()
+
+            _aio.run(_do())
+            print(f"[Scheduler] Cron {cron_id} AUTO-DESACTIVE (emballement detecte)")
+        except Exception:
+            pass
 
     def _execute_cron(self, db, cron_id: str, user_id: str, instruction: str):
         """Execute a single cron job and store the result.
@@ -211,7 +245,38 @@ class SyleaScheduler:
           - Modele par defaut : Haiku 4.5 ($1/$5 /MTok) au lieu de Sonnet-4 ($3/$15).
           - max_tokens 300.
         """
-        # Circuit breaker budget quotidien
+        self._reset_counters_if_new_day()
+
+        # Garde-fou 1 — plafond d'appels LLM/jour, TOUS chemins (openclaw inclus).
+        # Borne DETERMINISTE meme quand le cout par appel est inconnu (le chemin
+        # openclaw ne remonte pas l'usage). Defaut 50/jour.
+        try:
+            max_calls = int(os.environ.get("SYLEA_SCHEDULER_MAX_CALLS_PER_DAY", "50"))
+        except Exception:
+            max_calls = 50
+        if self._calls_today >= max_calls:
+            self._update_cron_result(
+                cron_id,
+                f"[Cron skip — plafond {max_calls} appels LLM/jour atteint. Reprend demain.]",
+            )
+            return
+
+        # Garde-fou 2 — cron qui s'emballe : auto-DESACTIVATION en base.
+        try:
+            max_per_cron = int(os.environ.get("SYLEA_SCHEDULER_MAX_RUNS_PER_CRON_PER_DAY", "20"))
+        except Exception:
+            max_per_cron = 20
+        runs = self._runs_per_cron_today.get(cron_id, 0)
+        if runs >= max_per_cron:
+            self._disable_cron(cron_id)
+            self._update_cron_result(
+                cron_id,
+                f"[Cron DESACTIVE automatiquement — {runs} executions aujourd'hui "
+                f"(emballement detecte). Reactive-le manuellement si besoin.]",
+            )
+            return
+
+        # Garde-fou 3 — budget $/jour (existant, defaut $0.50).
         allowed, spent, cap = self._daily_budget_check()
         if not allowed:
             result_text = (
@@ -220,6 +285,10 @@ class SyleaScheduler:
             )
             self._update_cron_result(cron_id, result_text)
             return
+
+        # Comptabilise l'execution AVANT l'appel (borne meme si l'appel echoue).
+        self._calls_today += 1
+        self._runs_per_cron_today[cron_id] = runs + 1
 
         model = os.environ.get("SYLEA_SCHEDULER_MODEL", "claude-haiku-4-5-20251001")
         max_tok = 300
@@ -235,10 +304,26 @@ class SyleaScheduler:
             # Try OpenClaw first (gratuit/local-routed si configure)
             try:
                 from api.openclaw_bridge import openclaw_chat
-                session_key = f"sylea-cron-{cron_id}"
+                import uuid as _uuid
+                # FIX FUITE ~88k (incident 2026-06) : session EPHEMERE par execution.
+                # Avant, la cle "sylea-cron-{id}" etait REUTILISEE a chaque run ->
+                # l'historique de session enflait (~88k tokens) et etait re-envoye
+                # toutes les ~30 min jusqu'a vider la cle API. Une session neuve par
+                # run garde le contexte borne.
+                session_key = f"sylea-cron-{cron_id}-{_uuid.uuid4().hex[:12]}"
                 oc_response = openclaw_chat(instruction, session_key=session_key)
                 if oc_response and oc_response.content:
                     result_text = oc_response.content[:2000]
+                    # Le chemin OpenClaw ne remonte pas l'usage tokens : on impute un
+                    # cout estime conservateur pour que le cap $/jour le couvre AUSSI
+                    # (avant, seul le fallback direct etait comptabilise -> cap
+                    # contournable a 100% par ce chemin).
+                    try:
+                        self._spent_today_usd += float(
+                            os.environ.get("SYLEA_SCHEDULER_OPENCLAW_EST_USD", "0.02")
+                        )
+                    except Exception:
+                        self._spent_today_usd += 0.02
                 else:
                     result_text = "[Execution OK — pas de reponse]"
             except Exception:
